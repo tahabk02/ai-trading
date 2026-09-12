@@ -11,6 +11,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=4000
+      - TZ=UTC
     ports:
       - "4000:4000"
     depends_on:

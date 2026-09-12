@@ -49,6 +49,7 @@ services:
       LOG_FORMAT: JSON
       CONFIDENCE_THRESHOLD: 0.80
       ENVIRONMENT: production
+      TZ: UTC
     depends_on:
       redis:
         condition: service_healthy
