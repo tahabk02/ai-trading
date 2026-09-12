@@ -34,6 +34,13 @@ import {
 } from "@/lib/realtimeCandleAggregator";
 import { getPriceDigits, getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
+import {
+  bodyCapFor,
+  bucketAlignStrict,
+  clampCandleBody,
+  floorToBucketSeconds,
+  seamGapCount,
+} from "@/lib/candleGridUtils";
 
 interface APICandle {
   timestamp: number;
@@ -966,11 +973,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     // The old ±0.5% tolerance silently discarded valid candles and caused the
     // chart's desync counter to inflate (~132k s lag) by starving the series
     // of historical depth.
-    const onGridBoundary = (tsMs: number) => {
-      if (!Number.isFinite(tsMs) || tsMs <= 0) return false;
-      const ms = tsMs % bucketMs;
-      return ms < bucketMs * 0.05 || ms > bucketMs * 0.95;
-    };
+    const onGridBoundary = (tsMs: number) => bucketAlignStrict(tsMs, bucketMs);
 
     // ── Merge REAL backend history sources into ONE ascending series ──
     // Priority (later sources overwrite earlier ones at the same bucket):
@@ -1278,6 +1281,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const normalizedData = useMemo<{
     candles: CandlestickData[];
     volume: HistogramData[];
+    candleGapCount: number;
+    offGridLiveCount: number;
+    spikeClampedCount: number;
   }>(() => {
     const history = historySeries.candles;
     const volumeByTime = historySeries.volume;
@@ -1296,6 +1302,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     const volOut = new Map<number, number>();
     let hi = 0;
     let li = 0;
+    let offGridLive = 0;
 
     while (hi < history.length || li < liveArr.length) {
       const h = hi < history.length ? history[hi] : null;
@@ -1306,6 +1313,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // `timeframe` prop and the aggregator during a switch), drop it rather
       // than let a wrong-grid coordinate create a gap/straddle in the pane.
       if (l && liveGridMs > 0 && l.timestamp % liveGridMs !== 0) {
+        offGridLive += 1;
         li += 1;
         continue;
       }
@@ -1392,8 +1400,48 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           : "rgba(242,54,69,0.45)",
     }));
 
-    return { candles: chartCandles, volume: candleVolume };
-  }, [historySeries, liveSeries]);
+    // ── [4] SPIKE-BODY GUARD (every candle, never only the live tip) ──
+    // A single corrupt/spike bar (fat-finger feed, catch-up tick after silent
+    // minutes) must never render a body ~10× the series normal and squash the
+    // pane. Cap = 5 × ATR(20) when the store exposes it, else 5 × the series'
+    // robust median body. Clamping preserves the body's midpoint + direction —
+    // it SHORTENS an absurd body, never invents a level.
+    let spikeClamped = 0;
+    if (chartCandles.length > 0) {
+      const cap = bodyCapFor(chartCandles, atr);
+      if (Number.isFinite(cap)) {
+        const guarded: CandlestickData[] = [];
+        for (const candle of chartCandles) {
+          const res = clampCandleBody(candle, cap);
+          if (res.clamped) spikeClamped += 1;
+          guarded.push(res.candle);
+        }
+        if (spikeClamped > 0) {
+          console.warn(
+            `[FinancialChart] Clamped ${spikeClamped} spike-bod(y|ies) to ATR×5 cap ` +
+              `(cap=${cap.toFixed(6)})`,
+          );
+        }
+        chartCandles.length = 0;
+        chartCandles.push(...guarded);
+      }
+    }
+
+    // ── [6] SEAM CONTIGUITY AUDIT (history→live must be exactly one bucket) ──
+    // After the two-pointer zip, every consecutive pair must sit exactly
+    // `bucketSeconds` apart. A stray gap (missing real data, mixed grid) is
+    // counted + surfaced so a "candles spread apart" symptom is never silent.
+    const bucketStepSec = Math.round(liveGridMs / 1000);
+    let candleGapCount = seamGapCount(chartCandles, bucketStepSec);
+
+    return {
+      candles: chartCandles,
+      volume: candleVolume,
+      candleGapCount,
+      offGridLiveCount: offGridLive,
+      spikeClampedCount: spikeClamped,
+    };
+  }, [historySeries, liveSeries, atr]);
 
   const hasRealData = normalizedData.candles.length > 0;
 
@@ -1447,6 +1495,17 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       bucketSeconds,
       mergedCandles: c.length,
       contiguityGaps: gaps,
+      // ── [9] METRICS (steady state → all 0) ──
+      candle_gap_count: normalizedData.candleGapCount,
+      off_grid_ticks_total: normalizedData.offGridLiveCount,
+      spike_ticks_clamped_total: normalizedData.spikeClampedCount,
+      projection_alignment_offset_ms:
+        c.length > 0 && (projectionCacheRef.current ?? [])[0]
+          ? ((projectionCacheRef.current as CandlestickData[])[0]
+              .time as number) -
+            (c[c.length - 1].time as number) -
+            bucketSeconds
+          : 0,
       // ── EXACT DATA PASSED TO series.setData (history + live merged) ──
       setData_last6: c.slice(-6).map((x) => ({
         time: x.time,
@@ -1674,6 +1733,15 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           ? (normalizedData.candles[normalizedData.candles.length - 1]
               .time as number)
           : 0;
+    // ── STRICT GRID ANCHOR (zero-offset projection) ──
+    // The painted tip is a UTCTimestamp (seconds). Floor it onto the bucket
+    // grid BEFORE computing slots so forecast[0].time === liveTipTime +
+    // bucketSeconds EXACTLY — an off-grid tip (e.g. :30 within a :00 bucket)
+    // can never shift the whole lookahead chain; it would detach the
+    // projection from the live candles (the "disconnected projection" gap).
+    if (baseSlotSec > 0) {
+      baseSlotSec = floorToBucketSeconds(baseSlotSec, bucketSeconds);
+    }
     // ── STRICT SYNCHRONISED-ANCHOR GATE (NEVER FABRICATE A SLOT) ──
     // The forecast MUST attach flush to a REAL, synchronised candle (the live
     // series tip). If no real candle exists yet (awaiting SSID / out-of-sync
