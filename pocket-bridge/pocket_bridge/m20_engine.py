@@ -27,7 +27,9 @@ Last-valid-price hold semantics:
 from __future__ import annotations
 
 import threading
+from collections import deque
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Dict, List, Optional
 
 from .config import M20_MS, PLATFORM_TIME_OFFSET
@@ -54,42 +56,65 @@ class M20Candle:
 
     symbol: str
     time: int                         # bucket_start in epoch MILLISECONDS
-    open: float
-    high: float
-    low: float
-    close: float
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
     closed: bool
     asset_type: str = "otc"           # "otc" | "forex" | "crypto"
     ts_utc: int = 0                   # bucket_start in epoch SECONDS (relay convenience)
     ts_ms: int = 0                    # exact bucket_close millisecond timestamp
+    tick_count: int = 0
+    volume: Optional[Decimal] = None
+    is_gap: bool = False
+    is_synthetic: bool = True
+    is_otc: bool = True
+    first_tick_ts: Optional[int] = None
+    last_tick_ts: Optional[int] = None
 
     def to_dict(self) -> Dict:
         return {
             "symbol": self.symbol,
             "time": self.time,
-            "open": round(self.open, 8),
-            "high": round(self.high, 8),
-            "low": round(self.low, 8),
-            "close": round(self.close, 8),
+            "open": format(self.open, "f"),
+            "high": format(self.high, "f"),
+            "low": format(self.low, "f"),
+            "close": format(self.close, "f"),
             "closed": self.closed,
             "asset_type": self.asset_type,
             "ts_utc": self.ts_utc,
             "ts_ms": self.ts_ms,
+            "tick_count": self.tick_count,
+            "volume": format(self.volume, "f") if self.volume is not None else None,
+            "is_gap": self.is_gap,
+            "is_synthetic": self.is_synthetic,
+            "is_otc": self.is_otc,
+            "source": "pocket_option",
+            "first_tick_ts": self.first_tick_ts,
+            "last_tick_ts": self.last_tick_ts,
         }
 
 
 @dataclass
 class _Bucket:
     start_ms: int
-    open: float
-    high: float
-    low: float
-    close: float
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    tick_count: int = 0
+    volume: Optional[Decimal] = None
+    first_tick_ts: Optional[int] = None
+    last_tick_ts: Optional[int] = None
 
-    def update(self, price: float) -> None:
+    def update(self, price: Decimal, ts_ms: int, volume: Optional[Decimal]) -> None:
         self.high = max(self.high, price)
         self.low = min(self.low, price)
         self.close = price
+        self.tick_count += 1
+        self.last_tick_ts = ts_ms
+        if volume is not None:
+            self.volume = (self.volume or Decimal("0")) + volume
 
     def to_candle(self, symbol: str, closed: bool, asset_type: str = "otc", interval_ms: int = M20_MS) -> M20Candle:
         return M20Candle(
@@ -103,6 +128,11 @@ class _Bucket:
             asset_type=asset_type,
             ts_utc=self.start_ms // 1000,
             ts_ms=self.start_ms + interval_ms,  # exact bucket-close ms boundary
+            tick_count=self.tick_count,
+            volume=self.volume,
+            is_otc=asset_type == "otc",
+            first_tick_ts=self.first_tick_ts,
+            last_tick_ts=self.last_tick_ts,
         )
 
 
@@ -114,46 +144,89 @@ class SymbolFeed:
     interval_ms: int = M20_MS
     asset_type: str = "otc"
     current: Optional[_Bucket] = None
-    last_valid_price: Optional[float] = None
+    last_valid_price: Optional[Decimal] = None
     last_valid_at: Optional[int] = None
     #: deque of the most recent closed candles, oldest first.
     history: List[M20Candle] = field(default_factory=list)
     max_history: int = 500
+    reorder_ms: int = 3_000
+    max_seen_ts: Optional[int] = None
+    pending: List[tuple[int, Decimal, Optional[Decimal]]] = field(default_factory=list)
+    seen_keys: deque[str] = field(default_factory=lambda: deque(maxlen=100_000))
+    seen_lookup: set[str] = field(default_factory=set)
+    finalized_before: Optional[int] = None
 
-    def push_tick(self, price: float, ts_ms: int) -> Optional[M20Candle]:
+    def push_tick(
+        self,
+        price: Decimal,
+        ts_ms: int,
+        bid: Optional[Decimal] = None,
+        ask: Optional[Decimal] = None,
+        volume: Optional[Decimal] = None,
+    ) -> Optional[M20Candle]:
         """Ingest one raw tick.
 
         Returns the candle that just closed (if the tick advanced to a new
         bucket), or ``None`` while the forming bucket is simply updated.
         """
-        if price is None or price <= 0:
+        if price is None or price <= 0 or ts_ms <= 0:
             return None
-        bucket_start = (ts_ms // self.interval_ms) * self.interval_ms
+        bid_key = format(bid, "f") if bid is not None else ""
+        ask_key = format(ask, "f") if ask is not None else ""
+        key = f"{ts_ms}|{format(price, 'f')}|{bid_key}|{ask_key}"
+        if key in self.seen_lookup:
+            return None
+        if len(self.seen_keys) == self.seen_keys.maxlen:
+            self.seen_lookup.discard(self.seen_keys[0])
+        self.seen_keys.append(key)
+        self.seen_lookup.add(key)
+        self.max_seen_ts = max(self.max_seen_ts or ts_ms, ts_ms)
+        self.pending.append((ts_ms, price, volume))
+        self.pending.sort(key=lambda item: item[0])
+        return self.flush_ready()
 
-        if self.current is None:
-            self.current = _Bucket(bucket_start, price, price, price, price)
-        elif bucket_start > self.current.start_ms:
+    def flush_ready(self) -> Optional[M20Candle]:
+        if self.max_seen_ts is None:
+            return None
+        watermark = self.max_seen_ts - self.reorder_ms
+        closed_candle: Optional[M20Candle] = None
+        while self.pending and self.pending[0][0] <= watermark:
+            ts_ms, price, volume = self.pending[0]
+            bucket_start = (ts_ms // self.interval_ms) * self.interval_ms
+            if self.finalized_before is not None and bucket_start < self.finalized_before:
+                self.pending.pop(0)
+                continue
+            if self.current is None:
+                self.pending.pop(0)
+                self.current = _Bucket(
+                    bucket_start, price, price, price, price,
+                    tick_count=1,
+                    volume=volume,
+                    first_tick_ts=ts_ms,
+                    last_tick_ts=ts_ms,
+                )
+                self.last_valid_price = price
+                self.last_valid_at = ts_ms
+                continue
+            if bucket_start == self.current.start_ms:
+                self.pending.pop(0)
+                self.current.update(price, ts_ms, volume)
+                self.last_valid_price = price
+                self.last_valid_at = ts_ms
+                continue
+            if bucket_start < self.current.start_ms:
+                self.pending.pop(0)
+                continue
+            if watermark <= self.current.start_ms + self.interval_ms:
+                break
             closed_candle = self.current.to_candle(
                 self.symbol, closed=True, asset_type=self.asset_type,
                 interval_ms=self.interval_ms,
             )
             self._append_closed(closed_candle)
-            self.current = _Bucket(bucket_start, price, price, price, price)
-            self.last_valid_price = price
-            self.last_valid_at = ts_ms
-            return closed_candle
-        elif bucket_start == self.current.start_ms:
-            self.current.update(price)
-        else:
-            # Out-of-order / late tick for an already-closed window: ignore
-            # for the forming candle but still refresh the valid-price hold.
-            self.last_valid_price = price
-            self.last_valid_at = ts_ms
-            return None
-
-        self.last_valid_price = price
-        self.last_valid_at = ts_ms
-        return None
+            self.finalized_before = self.current.start_ms + self.interval_ms
+            self.current = None
+        return closed_candle
 
     def _append_closed(self, candle: M20Candle) -> None:
         self.history.append(candle)
@@ -167,6 +240,14 @@ class SymbolFeed:
         tick arrived since the window opened, ``close`` is the *held*
         previous valid price (never a static default).
         """
+        preview = self._preview_bucket()
+        if self.current is None and preview is not None:
+            return preview.to_candle(
+                self.symbol,
+                closed=False,
+                asset_type=self.asset_type,
+                interval_ms=self.interval_ms,
+            )
         if self.current is None:
             if self.last_valid_price is None or self.last_valid_at is None:
                 return None
@@ -184,6 +265,7 @@ class SymbolFeed:
                 asset_type=self.asset_type,
                 ts_utc=start_ms // 1000,
                 ts_ms=start_ms + self.interval_ms,
+                is_otc=self.asset_type == "otc",
             )
         candle = self.current.to_candle(
             self.symbol, closed=False, asset_type=self.asset_type,
@@ -201,8 +283,38 @@ class SymbolFeed:
                 asset_type=self.asset_type,
                 ts_utc=candle.ts_utc,
                 ts_ms=candle.ts_ms,
+                tick_count=candle.tick_count,
+                volume=candle.volume,
+                is_otc=self.asset_type == "otc",
+                first_tick_ts=candle.first_tick_ts,
+                last_tick_ts=candle.last_tick_ts,
             )
         return candle
+
+    def _preview_bucket(self) -> Optional[_Bucket]:
+        if not self.pending:
+            return None
+        start_ms = (self.pending[0][0] // self.interval_ms) * self.interval_ms
+        rows = [row for row in self.pending if (row[0] // self.interval_ms) * self.interval_ms == start_ms]
+        if self.current is not None and self.current.start_ms == start_ms:
+            rows = [(self.current.first_tick_ts or start_ms, self.current.open, self.current.volume)] + rows
+        if not rows:
+            return None
+        first_ts, first_price, first_volume = rows[0]
+        bucket = _Bucket(
+            start_ms,
+            first_price,
+            first_price,
+            first_price,
+            first_price,
+            tick_count=1,
+            volume=first_volume,
+            first_tick_ts=first_ts,
+            last_tick_ts=first_ts,
+        )
+        for ts_ms, price, volume in rows[1:]:
+            bucket.update(price, ts_ms, volume)
+        return bucket
 
     def snapshot(self) -> Dict:
         """Relay-ready snapshot: closed history + forming candle + held price."""
@@ -214,7 +326,10 @@ class SymbolFeed:
             "interval_ms": self.interval_ms,
             "closed_candles": closed,
             "forming": forming.to_dict() if forming else None,
-            "last_valid_price": self.last_valid_price,
+            "last_valid_price": (
+                format(self.last_valid_price, "f")
+                if self.last_valid_price is not None else None
+            ),
             "last_valid_at": self.last_valid_at,
         }
 
@@ -279,7 +394,15 @@ class M20Engine:
                 feed.interval_ms = interval_ms
                 feed.current = None
 
-    def handle_tick(self, symbol: str, price: float, ts_ms: int) -> Optional[M20Candle]:
+    def handle_tick(
+        self,
+        symbol: str,
+        price: Decimal | str | float,
+        ts_ms: int,
+        bid: Decimal | str | float | None = None,
+        ask: Decimal | str | float | None = None,
+        volume: Decimal | str | float | None = None,
+    ) -> Optional[M20Candle]:
         """Thread-safe ingest of one raw tick for a symbol.
 
         Returns the candle that just closed on bucket rollover (or ``None``
@@ -290,7 +413,20 @@ class M20Engine:
         if feed is None:
             return None
         with self._lock:
-            return feed.push_tick(price, ts_ms)
+            try:
+                decimal_price = Decimal(str(price))
+                decimal_bid = Decimal(str(bid)) if bid is not None else None
+                decimal_ask = Decimal(str(ask)) if ask is not None else None
+                decimal_volume = Decimal(str(volume)) if volume is not None else None
+            except Exception:
+                return None
+            return feed.push_tick(
+                decimal_price,
+                int(ts_ms),
+                decimal_bid,
+                decimal_ask,
+                decimal_volume,
+            )
 
     def handle_gap(self, symbol: str, ts_ms: int) -> Optional[M20Candle]:
         """Return the current forming candle so downstream holds last price.
@@ -311,7 +447,7 @@ class M20Engine:
         if feed is None:
             return
         with self._lock:
-            feed.last_valid_price = price
+            feed.last_valid_price = Decimal(str(price))
             feed.last_valid_at = ts_ms
 
     def forming(self, symbol: str) -> Optional[M20Candle]:

@@ -13,7 +13,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pocket_bridge.m20_engine import M20Engine, M20_MS  # noqa: E402
-from pocket_bridge.config import PLATFORM_TIME_OFFSET  # noqa: E402
 
 
 def test_strict_bucket_boundary():
@@ -23,18 +22,19 @@ def test_strict_bucket_boundary():
     engine.handle_tick("TEST/USD", 1.1005, 39_999)   # still bucket 20_000
     candle = engine.forming("TEST/USD")
     assert candle.time == 20_000
-    assert candle.high == 1.1005
-    # 40_000ms is a NEW bucket (exact boundary) -> the closed candle of the
-    # just-finished 20_000 window must be returned (real-time emit path).
+    assert float(candle.high) == 1.1005
+    # The 3-second reorder watermark has not crossed the bucket close yet.
     closed = engine.handle_tick("TEST/USD", 1.1010, 40_000)
+    assert closed is None
+    closed = engine.handle_tick("TEST/USD", 1.1010, 43_001)
     assert closed is not None
     assert closed.time == 20_000
-    assert closed.close == 1.1005
+    assert float(closed.close) == 1.1005
     assert closed.closed is True
     history = engine.snapshot("TEST/USD")["closed_candles"]
     assert len(history) == 1
     assert history[0]["time"] == 20_000
-    assert history[0]["close"] == 1.1005
+    assert float(history[0]["close"]) == 1.1005
     forming = engine.forming("TEST/USD")
     assert forming.time == 40_000
     assert forming.open == 1.1010
@@ -49,17 +49,15 @@ def test_last_valid_price_hold_no_default():
     # last valid price (1.15947), NOT a rounded/static default.
     forming = engine.forming("TEST/USD")
     assert forming is not None
-    assert abs(forming.close - 1.15947) < 1e-9
-    assert forming.close != 1.15942
+    assert abs(float(forming.close) - 1.15947) < 1e-9
+    assert float(forming.close) != 1.15942
 
 
-def test_platform_offset_alignment():
-    """Timestamps are aligned to PO server time before bucketing."""
-    # A raw PO timestamp with the 7200s offset lands in bucket 20_000 after
-    # the bridge subtracts the platform offset.
-    raw_ms = 20_000 + PLATFORM_TIME_OFFSET * 1000
+def test_utc_bucket_alignment():
+    """Ticks are bucketed directly on their UTC epoch timestamp."""
+    raw_ms = 20_000
     engine = M20Engine(["TEST/USD"])
-    engine.handle_tick("TEST/USD", 1.1000, raw_ms - PLATFORM_TIME_OFFSET * 1000)
+    engine.handle_tick("TEST/USD", 1.1000, raw_ms)
     assert engine.forming("TEST/USD").time == 20_000
 
 
@@ -70,5 +68,5 @@ def test_snapshot_shape():
     assert set(snap.keys()) >= {"symbol", "closed_candles", "forming",
                                 "last_valid_price", "last_valid_at"}
     assert snap["symbol"] == "TEST/USD"
-    assert snap["forming"]["close"] == 1.2000
+    assert float(snap["forming"]["close"]) == 1.2000
     assert snap["last_valid_price"] == 1.2000

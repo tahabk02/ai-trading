@@ -17,10 +17,10 @@ import asyncio
 import json
 import logging
 import time
+from decimal import Decimal
 from typing import Dict, Optional, Tuple
 
 from .config import (
-    PLATFORM_TIME_OFFSET,
     BridgeSettings,
     asset_candidates,
     asset_for_symbol,
@@ -64,31 +64,80 @@ class AssetSkippedError(Exception):
         self.candidates = candidates
 
 
-def parse_tick(payload: Dict) -> Optional[Tuple[int, float]]:
+def parse_quote(
+    payload: Dict,
+    now_ms: Optional[int] = None,
+    validate_window: bool = True,
+) -> Optional[Dict[str, object]]:
+    """Normalize and validate one Pocket Option quote in UTC milliseconds."""
+    if not isinstance(payload, dict):
+        return None
+
+    received_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    raw_ts = payload.get("timestamp", payload.get("time"))
+    timestamp_fallback = raw_ts is None
+    try:
+        ts_ms = received_ms if timestamp_fallback else int(float(raw_ts))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if ts_ms < 10_000_000_000:
+        ts_ms *= 1000
+    if validate_window and (ts_ms > received_ms + 2_000 or ts_ms < received_ms - 10_000):
+        return None
+
+    def decimal_value(*keys: str) -> Optional[Decimal]:
+        for key in keys:
+            value = payload.get(key)
+            if value is not None:
+                try:
+                    parsed = Decimal(str(value))
+                except Exception:
+                    return None
+                if not parsed.is_finite() or parsed <= 0:
+                    return None
+                return parsed
+        return None
+
+    bid = decimal_value("bid")
+    ask = decimal_value("ask")
+    price = decimal_value("mid", "close", "price")
+    if bid is not None and ask is not None:
+        if bid > ask:
+            return None
+        price = (bid + ask) / Decimal("2")
+    if price is None or price <= 0:
+        return None
+    if bid is None:
+        bid = price
+    if ask is None:
+        ask = price
+
+    volume = decimal_value("volume", "qty")
+    return {
+        "ts_ms": ts_ms,
+        "price": format(price, "f"),
+        "bid": format(bid, "f"),
+        "ask": format(ask, "f"),
+        "volume": format(volume, "f") if volume is not None else None,
+        "timestamp_fallback": timestamp_fallback,
+        "synthetic_quote": bid == ask,
+        "latency_ms": max(0, received_ms - ts_ms),
+    }
+
+
+def parse_tick(payload: Dict, now_ms: Optional[int] = None) -> Optional[Tuple[int, float]]:
     """Extract ``(timestamp_ms, price)`` from a raw PO tick dict.
 
     The library's raw ticks carry either ``close``/``price`` and
     ``timestamp``/``time`` keys. Values are float prices and epoch
     milliseconds. Returns ``None`` if the tick cannot be parsed.
     """
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or payload.get("timestamp", payload.get("time")) is None:
         return None
-    price = payload.get("close", payload.get("price"))
-    ts = payload.get("timestamp", payload.get("time"))
-    if price is None or ts is None:
+    quote = parse_quote(payload, now_ms, validate_window=now_ms is not None)
+    if quote is None:
         return None
-    try:
-        price = float(price)
-        ts_float = float(ts)
-    except (TypeError, ValueError):
-        return None
-    if ts_float < 10_000_000_000:
-        # Value is in epoch SECONDS (shouldn't happen for PO ticks) -> convert
-        # to milliseconds. Epoch-ms values (~1.7e12) always exceed 1e10 and
-        # are passed through untouched — a bare multiply on ms would push every
-        # real bucket into the far future.
-        ts_float = ts_float * 1000
-    return int(ts_float), price
+    return int(quote["ts_ms"]), float(quote["price"])
 
 
 class PocketOptionBridge:
@@ -347,14 +396,17 @@ class PocketOptionBridge:
             return
         self._subs[symbol] = stream
         async for tick in stream:
-            parsed = parse_tick(tick)
-            if parsed is None:
+            quote = parse_quote(tick)
+            if quote is None:
                 logger.debug("TICK [%s] unparseable, skipping: %r", symbol, tick)
                 continue
-            ts_raw, price = parsed
-            ts_ms = ts_raw - PLATFORM_TIME_OFFSET * 1000
+            ts_ms = int(quote["ts_ms"])
+            price = Decimal(str(quote["price"]))
+            bid = Decimal(str(quote["bid"]))
+            ask = Decimal(str(quote["ask"]))
+            volume = quote["volume"]
             await self._log_tick(symbol, price, ts_ms)
-            closed = self.engine.handle_tick(symbol, price, ts_ms)
+            closed = self.engine.handle_tick(symbol, price, ts_ms, bid, ask, volume)
             if closed is not None and self.on_candle is not None:
                 # Emit the authoritative closed-candle event in real time (on
                 # bucket rollover), not only inside reconnect snapshots.
@@ -366,9 +418,19 @@ class PocketOptionBridge:
                         "symbol": symbol,
                         "asset": asset,
                         "asset_type": asset_type_for_symbol(symbol),
-                        "price": price,
+                        "price": quote["price"],
+                        "bid": quote["bid"],
+                        "ask": quote["ask"],
+                        "mid": quote["price"],
+                        "volume": quote["volume"],
                         "ts_ms": ts_ms,
                         "ts_utc": ts_ms // 1000,
+                        "source": "pocket_option",
+                        "is_otc": asset_type_for_symbol(symbol) == "otc",
+                        "is_synthetic": True,
+                        "synthetic_quote": quote["synthetic_quote"],
+                        "timestamp_fallback": quote["timestamp_fallback"],
+                        "latency_ms": quote["latency_ms"],
                         "raw": dict(tick) if isinstance(tick, dict) else None,
                     }
                 )
