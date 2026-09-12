@@ -574,7 +574,7 @@ function clampSpot(
   return Math.min(Math.max(v, median - band), median + band);
 }
 
-export const MAX_TICK_DELTA_RATIO = 0.08;
+export const MAX_TICK_DELTA_RATIO = 0.03;
 
 export function clampPriceToReality(
   price: number,

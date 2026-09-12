@@ -30,6 +30,7 @@ import {
   type Timeframe as AggTimeframe,
   detectSystematicSeedSkew,
   toHeikinAshiSeries,
+  clampPriceToReality,
 } from "@/lib/realtimeCandleAggregator";
 import { getPriceDigits, getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
@@ -862,8 +863,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       const move = Math.abs(target - live);
       const vol = atrVal > 0 ? atrVal : Math.max(move * 1.5, live * 2e-4);
       const hw = Math.max(vol * 0.8, move * 0.3, live * 1e-4);
-      const highLevel = Math.max(live, target) + hw;
-      const lowLevel = Math.min(live, target) - hw;
+      const highLevel = clampPriceToReality(Math.max(live, target) + hw, live);
+      const lowLevel = clampPriceToReality(Math.min(live, target) - hw, live);
       const sig = `${activeSymbolRef.current}|${highLevel.toFixed(6)}|${lowLevel.toFixed(
         6,
       )}`;
