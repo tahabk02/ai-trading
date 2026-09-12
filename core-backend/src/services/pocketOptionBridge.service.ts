@@ -233,6 +233,25 @@ export class PocketOptionBridgeService {
 
   /** Start the bridge process (if auto-spawn enabled) and connect the WS client. */
   public start(): void {
+    // ── STARTUP SSID VALIDITY CHECK (mission [1]) ──
+    // Surface the SSID state explicitly at boot: an empty/whitespace SSID is a
+    // VALID "awaiting_ssid" configuration (the bridge will never fabricate),
+    // but operators must see it clearly instead of hunting for why live PO
+    // ticks never arrive. An SSID is never forged or validated beyond
+    // presence — the bridge/server probes the live session itself.
+    const ssid = secrets.POCKET_OPTION_SSID || "";
+    const ssidPresent = typeof ssid === "string" && ssid.trim().length > 0;
+    if (!ssidPresent) {
+      logger.warn(
+        "[PO Bridge] POCKET_OPTION_SSID is not set — running in awaiting_ssid state (real PO live ticks disabled; no fabricated prices). Set POCKET_OPTION_SSID to enable the PO SSOT tier.",
+      );
+    } else {
+      logger.info("[PO Bridge] POCKET_OPTION_SSID is configured — PO SSOT tier enabled", {
+        ssidLength: ssid.length,
+        ssidPrefix: `${ssid.slice(0, 8)}…`,
+      });
+    }
+
     if (this.bridgeAutoSpawn) {
       this.spawnBridgeProcess();
     }

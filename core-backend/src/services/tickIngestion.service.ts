@@ -28,6 +28,11 @@ import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { githubDataProvider } from "./githubData.provider";
 import { symbolRegistry } from "./symbolRegistry.service";
+import {
+  exponentialBackoffMs,
+  classifyFeedLog,
+} from "../lib/feedResilience";
+import { feedMetrics } from "../lib/feedMetrics";
 
 export interface LiveMarketTick {
   symbol: string;
@@ -66,28 +71,16 @@ export class LiveTickIngestionService {
   private streamDegraded: Map<string, boolean> = new Map();
   private readonly MAX_CONSECUTIVE_ERRORS = 5;
   private readonly POLLING_INTERVAL_MS = 1000; // Real-time 1-second tick cadence
-  /**
-   * Lingering retry cadence while a feed is degraded. Polls are throttled to
-   * this interval so a downed API is never hammered, but the STREAM LOOP KEEPS
-   * RUNNING — the old halt-and-wait-15s behaviour produced ~23s of silence for
-   * the chart on every transient feed drop.
-   *
-   * ADAPTIVE: when forexDataService signals recovery mode (all tiers were
-   * exhausted but the stale hold is keeping the stream alive), the effective
-   * throttle is HALVED so the system probes at double speed — the moment any
-   * API recovers, the stale hold is replaced with a fresh price instantly.
-   */
-  private readonly LINGER_RETRY_INTERVAL_MS = 1500;
-  /**
-   * Reduced linger throttle when the spot rate service is in recovery mode.
-   * Half the normal cadence = twice the probe frequency = faster exit from
-   * LINGER when an API tier recovers after a transient outage.
-   */
-  private readonly LINGER_RETRY_RECOVERY_MS = 750;
-  /**
-   * AGE WATCHDOG: if the real tick tape for a symbol is STILL this old, the
-   * next cyclic poll runs immediately even inside the linger throttle — a
-   * starved chart is exactly when recovery must be zero-timeout.
+/**
+    * LINGER backoff: probe cadence grows EXPONENTIALLY per consecutive error
+    * (1s → 2s → 5s → 10s → 30s → 60s cap, ±20% jitter) via
+    * `exponentialBackoffMs` in lib/feedResilience — a downed API is never
+    * hammered, and recovery stays zero-latency via the AGE WATCHDOG override.
+    */
+   /**
+    * AGE WATCHDOG: if the real tick tape for a symbol is STILL this old, the
+    * next cyclic poll runs immediately even inside the linger throttle — a
+    * starved chart is exactly when recovery must be zero-timeout.
    */
   private readonly FORCE_POLL_AGE_MS = 3000;
 
@@ -271,8 +264,8 @@ export class LiveTickIngestionService {
    */
   private pollLiveTick(symbol: string): void {
     // LINGER MODE: once a feed breaches the consecutive-error threshold, probes
-    // are throttled to LINGER_RETRY_INTERVAL_MS (never hammer a downed API),
-    // but the STREAM LOOP ITSELF NEVER STOPS — recovery is zero-timeout.
+    // are throttled by the exponential backoff ladder (never hammer a downed
+    // API), but the STREAM LOOP ITSELF NEVER STOPS — recovery is zero-timeout.
     const errCount = this.streamConsecutiveErrors.get(symbol) ?? 0;
     if (errCount >= this.MAX_CONSECUTIVE_ERRORS) {
       const now = Date.now();
@@ -330,9 +323,17 @@ export class LiveTickIngestionService {
 
       // ── RECOVERY → ONLINE (exactly once per incident) ──
       // A successful probe after a DEGRADED latch flips the engine status back
-      // so subscribers see the feed heal the instant it does.
+      // so subscribers see the feed heal the instant it does. Also emits the
+      // single info line that closes the incident (rate-limited log policy).
       if (this.streamDegraded.get(symbol)) {
         this.streamDegraded.set(symbol, false);
+        feedMetrics.countRecovery(symbol);
+        const recoveryLog = classifyFeedLog(0, true);
+        logger.info("[TickIngestion] Live market feed restored", {
+          symbol,
+          source: spot.source,
+          recoveryState: recoveryLog.isRecovery ? "recovered" : "online",
+        });
         this.wsService.broadcastEngineStatus(
           "ONLINE",
           `Live tick stream restored for ${symbol}.`,
@@ -415,15 +416,19 @@ export class LiveTickIngestionService {
     const errCount = (this.streamConsecutiveErrors.get(symbol) || 0) + 1;
     this.streamConsecutiveErrors.set(symbol, errCount);
 
-    // ADAPTIVE THROTTLE: when the spot rate service is in recovery mode
-    // (stale-cache holding the stream while APIs are down), use the reduced
-    // recovery cadence so the system probes at double speed — the moment any
-    // API tier recovers the stale hold is replaced with a fresh price instantly.
-    const lingerMs = forexDataService.isRecoveryMode()
-      ? this.LINGER_RETRY_RECOVERY_MS
-      : this.LINGER_RETRY_INTERVAL_MS;
+    // ── EXPONENTIAL BACKOFF (mission [2]) ──
+    // The old fixed 750ms recovery throttle (a "recovery mode" probe doubling)
+    // turned a dead API into a hot-1000/s retry storm across every symbol. Now
+    // the linger cadence grows 1s → 2s → 5s → 10s → 30s → 60s (cap) with ±20%
+    // jitter per failure, reset on the next successful probe (anySuccessReset
+    // clears the throttle slot). A downed API is never hammered; recovery stays
+    // zero-latency thanks to the FORCE_POLL_AGE watchdog override below.
+    const lingerMs = exponentialBackoffMs(
+      errCount,
+      Date.now(),
+    );
 
-    // Throttle the next probe to the lingering retry cadence. The 1s stream
+    // Throttle the next probe to the backoff cadence. The 1s stream
     // loop continues to tick — later calls skip the probe until this instant
     // passes (zero-timeout recovery, no halted stream, no hammering).
     this.nextAllowedPollAt.set(
@@ -431,13 +436,41 @@ export class LiveTickIngestionService {
       Date.now() + lingerMs,
     );
 
-    logger.warn("[TickIngestion] Live market feed error", {
-      symbol,
-      consecutiveErrors: errCount,
-      error: errorDetail,
-      lingerMs,
-      recoveryMode: forexDataService.isRecoveryMode(),
-    });
+    // ── METRICS (mission [7]) ──
+    // Monotonic retry/error counters per symbol+reason, plus the current
+    // backoff and consecutive-error watermark as gauges — scapeable at
+    // GET /metrics in Prometheus text exposition format.
+    feedMetrics.countRetry(symbol, errorDetail || "unknown_error");
+    feedMetrics.countError(symbol, errorDetail || "unknown_error");
+    feedMetrics.setBackoffMs(symbol, lingerMs);
+    feedMetrics.setMaxConsecutiveErrors(symbol, errCount);
+
+    // ── LOG RATE LIMIT (mission [3]) ──
+    // One warn on the first failure of an incident, one error per every 10th
+    // consecutive failure, and silence in between — no more warn-per-retry
+    // flooding. Recovery (a zero count while a DEGRADED latch is set) logs
+    // info exactly once (see anySuccessReset / the ONLINE branch below).
+    const logClass = classifyFeedLog(errCount, this.streamDegraded.get(symbol) ?? false);
+    if (logClass.level === "warn") {
+      logger.warn("[TickIngestion] Live market feed error", {
+        symbol,
+        consecutiveErrors: errCount,
+        error: errorDetail,
+        lingerMs,
+        recoveryMode: forexDataService.isRecoveryMode(),
+      });
+    } else if (logClass.level === "error") {
+      logger.error(
+        "[TickIngestion] Live market feed still failing (every 10th failure)",
+        {
+          symbol,
+          consecutiveErrors: errCount,
+          error: errorDetail,
+          lingerMs,
+          recoveryMode: forexDataService.isRecoveryMode(),
+        },
+      );
+    }
 
     if (errCount >= this.MAX_CONSECUTIVE_ERRORS) {
       logger.error(

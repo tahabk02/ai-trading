@@ -22,6 +22,7 @@
 
 import axios, { AxiosInstance } from "axios";
 import { logger } from "../utils/logger";
+import { renderFallbackChainLog } from "../lib/feedResilience";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TYPES
@@ -411,8 +412,9 @@ class ForexDataService {
     }
 
     // Tier 3: CoinGecko (crypto pairs only)
+    let cgResult: ForexSpotResult | undefined;
     if (norm === "BTC/USD" || norm === "ETH/USD") {
-      const cgResult = await this.fetchCoinGeckoSpot(norm);
+      cgResult = await this.fetchCoinGeckoSpot(norm);
       this.recordSourceHealth("coingecko", cgResult.success);
       if (cgResult.success) {
         this.recoveryMode = false;
@@ -460,6 +462,32 @@ class ForexDataService {
     // All sources exhausted and no real baseline — enter recovery mode and
     // return honest failure. Recovery mode ensures the next poll cycle
     // bypasses throttle delays and retries all tiers at network speed.
+    // Log the FULL fallback chain with per-source reason (mission [4]) so
+    // operators see exactly which tier died and why (timeout/429/500/DNS).
+    logger.error("[ForexData] All spot rate sources exhausted — chain audit", {
+      symbol: norm,
+      chain: renderFallbackChainLog([
+        {
+          source: "pocket_option_ssot",
+          ok: !!(po && po.price > 0 && Date.now() - po.ts < 15_000),
+          reason: po && po.price > 0 && Date.now() - po.ts < 15_000
+            ? undefined
+            : po && po.price > 0
+              ? `stale_${Math.round((Date.now() - po.ts) / 1000)}s_held`
+              : "no_ssot_cache",
+        },
+        {
+          source: "github_repo_cached",
+          ok: !!(cached && Date.now() - cached.ts < 15_000),
+          reason: cached ? `age_${Math.round((Date.now() - cached.ts) / 1000)}s` : "no_cache",
+        },
+        { source: "frankfurter", ok: false, reason: frankResult.error },
+        { source: "open_er_api", ok: false, reason: openErResult.error },
+        ...((norm === "BTC/USD" || norm === "ETH/USD") && cgResult
+          ? [{ source: "coingecko", ok: false, reason: cgResult.error }]
+          : []),
+      ]),
+    });
     this.recoveryMode = true;
     return {
       success: false,

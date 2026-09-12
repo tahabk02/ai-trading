@@ -19,6 +19,7 @@ import { tickIngestionService } from "./services/tickIngestion.service";
 import { symbolRegistry } from "./services/symbolRegistry.service";
 import { forexDataService } from "./services/forexData.service";
 import { pocketOptionBridgeService } from "./services/pocketOptionBridge.service";
+import { feedMetrics } from "./lib/feedMetrics";
 import { rateLimit } from "./middlewares/rateLimit.middleware";
 import { errorMiddleware } from "./middlewares/error.middleware";
 import apiRouter from "./routes/index";
@@ -199,6 +200,14 @@ app.get("/health", (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   });
+});
+
+// Prometheus text-format scrape endpoint for the live-feed resilience metrics
+// (feed_retry_total, feed_error_total, feed_recovery_total, feed_backoff_ms,
+// feed_lingering_max_errors). Counter semantics are monotonic so Grafana
+// allow-alerts work out of the box.
+app.get("/metrics", (_req: Request, res: Response) => {
+  res.type("text/plain").send(feedMetrics.scrape());
 });
 
 // 404 catch-all for unknown API routes

@@ -11,7 +11,8 @@
     "publish:data:loop": "ts-node --transpile-only scripts/publishMarketData.ts --loop",
     "publish:data:dry": "ts-node --transpile-only scripts/publishMarketData.ts --dry",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "test": "vitest run"
   },
   "dependencies": {
     "@prisma/client": "^5.15.0",
@@ -35,6 +36,7 @@
     "@types/node": "^20.14.2",
     "prisma": "^5.15.0",
     "ts-node-dev": "^2.0.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vitest": "^3.2.7"
   }
 }
