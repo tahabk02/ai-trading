@@ -8,7 +8,8 @@
     "verify": "node scripts/verify-manifest.js",
     "build": "npm run clean && next build && npm run verify",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "vitest run"
   },
   "dependencies": {
     "axios": "^1.18.1",
@@ -32,6 +33,7 @@
     "eslint-config-next": "^14.2.3",
     "postcss": "^8.5.26",
     "tailwindcss": "^3.4.19",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
   }
 }

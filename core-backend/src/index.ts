@@ -1,4 +1,4 @@
-﻿import express, {
+import express, {
   type Express,
   type Request,
   type Response,
