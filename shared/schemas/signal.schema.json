@@ -1,0 +1,184 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://trading-platform.local/schemas/signal.schema.json",
+  "title": "AI Price Prediction Signal",
+  "description": "Strict validation schema for AI-generated price prediction payloads. Used by the Python AI Engine (FastAPI) to validate outgoing signals and by the Node.js Core Backend to validate incoming proxy responses. Compatible with jsonschema (Python) and ajv (Node.js).",
+
+  "type": "object",
+
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "description": "Trading pair or stock ticker symbol (e.g. 'AAPL', 'BTC/USDT', 'EURUSD'). Always uppercase.",
+      "pattern": "^[A-Z0-9/.]{1,20}$",
+      "examples": ["AAPL", "BTC/USDT", "SPY", "ETH/USDT"]
+    },
+
+    "signal": {
+      "type": "string",
+      "description": "Predicted directional action.",
+      "enum": ["BUY", "SELL", "HOLD"],
+      "examples": ["BUY", "SELL", "HOLD"]
+    },
+
+    "confidence": {
+      "type": "number",
+      "description": "Model confidence score for the predicted signal. Value must be in the closed interval [0, 1].",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "multipleOf": 0.01,
+      "examples": [0.85, 0.42, 0.97]
+    },
+
+    "target_price": {
+      "type": "number",
+      "description": "AI-predicted target price for the asset after the forecast horizon. Must be a positive finite number.",
+      "minimum": 0.000001,
+      "exclusiveMinimum": true,
+      "examples": [150.5, 48200.0, 1.085]
+    },
+
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of when the prediction was generated (e.g. '2025-01-15T14:30:00Z').",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "examples": ["2025-01-15T14:30:00Z", "2025-01-15T14:30:00.123+00:00"]
+    },
+
+    "current_price": {
+      "type": "number",
+      "description": "Latest available market price at the time of prediction. Required for calculating target deviation. Must be positive.",
+      "minimum": 0.000001,
+      "exclusiveMinimum": true
+    },
+
+    "ml_probability": {
+      "type": "number",
+      "description": "Raw output probability from the ML classifier (before thresholding). In [0, 1].",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "multipleOf": 0.01
+    },
+
+    "model_accuracy": {
+      "type": "number",
+      "description": "Historical accuracy of the model on validation data. In [0, 1].",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "multipleOf": 0.01
+    },
+
+    "timeframe": {
+      "type": "string",
+      "description": "Forecast horizon over which the prediction applies (e.g. '1h', '4h', '1d'). Inherits from the analysis interval.",
+      "default": "1d",
+      "pattern": "^\\d+[mhdw]$",
+      "examples": ["1h", "4h", "1d", "1w"]
+    },
+
+    "proxyLatencyMs": {
+      "type": ["number", "null"],
+      "description": "Round-trip latency of the proxy request from core-backend to ai-engine, in milliseconds. Null when not proxied.",
+      "minimum": 0
+    },
+
+    "indicators": {
+      "type": "object",
+      "description": "Technical indicator values computed alongside the prediction.",
+      "properties": {
+        "rsi_14": {
+          "type": "number",
+          "description": "Relative Strength Index (14-period). In [0, 100].",
+          "minimum": 0.0,
+          "maximum": 100.0
+        },
+        "sma_20": {
+          "type": "number",
+          "description": "Simple Moving Average (20-period). Must be positive.",
+          "minimum": 0.000001,
+          "exclusiveMinimum": true
+        },
+        "sma_50": {
+          "type": "number",
+          "description": "Simple Moving Average (50-period). Must be positive.",
+          "minimum": 0.000001,
+          "exclusiveMinimum": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+
+  "required": ["symbol", "signal", "confidence", "target_price", "timestamp"],
+
+  "dependentRequired": {
+    "current_price": ["target_price"],
+    "indicators": ["current_price"]
+  },
+
+  "if": {
+    "properties": { "signal": { "enum": ["BUY", "SELL"] } }
+  },
+  "then": {
+    "description": "When signal is BUY or SELL, confidence must be >= 0.50 for the prediction to be meaningful.",
+    "properties": {
+      "confidence": { "minimum": 0.5 }
+    }
+  },
+
+  "allOf": [
+    {
+      "description": "Target price must differ from current price when both are present.",
+      "if": {
+        "required": ["current_price"]
+      },
+      "then": {
+        "properties": {
+          "target_price": {
+            "not": { "const": { "$data": "1/current_price" } }
+          }
+        }
+      }
+    }
+  ],
+
+  "examples": [
+    {
+      "symbol": "AAPL",
+      "signal": "BUY",
+      "confidence": 0.87,
+      "target_price": 195.5,
+      "current_price": 189.3,
+      "ml_probability": 0.84,
+      "model_accuracy": 0.82,
+      "timeframe": "1d",
+      "proxyLatencyMs": 1247,
+      "indicators": {
+        "rsi_14": 58.3,
+        "sma_20": 187.1,
+        "sma_50": 182.4
+      },
+      "timestamp": "2025-01-15T14:30:00Z"
+    },
+    {
+      "symbol": "BTC/USDT",
+      "signal": "HOLD",
+      "confidence": 0.35,
+      "target_price": 0.0,
+      "current_price": 48200.0,
+      "ml_probability": 0.35,
+      "model_accuracy": 0.78,
+      "timeframe": "1h",
+      "proxyLatencyMs": null,
+      "indicators": {
+        "rsi_14": 50.0,
+        "sma_20": 0.0,
+        "sma_50": 0.0
+      },
+      "timestamp": "2025-01-15T14:30:00Z"
+    }
+  ],
+
+  "additionalProperties": false
+}

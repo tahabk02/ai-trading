@@ -1,0 +1,138 @@
+
+===== SYMBOLS.TS OTC-RELATED LINES =====
+14: *   EMERGING/OTC: USD/TRY, USD/ZAR, USD/MXN, USD/SGD, MAD/USD, KES/USD
+29: type: "otc";
+32: /** Currency pair label e.g. "AUD/USD OTC" */
+41: export const OTC_FOREX_PAIRS: SymbolDefinition[] = [
+46: type: "otc",
+48: label: "EUR/USD OTC",
+54: type: "otc",
+56: label: "GBP/USD OTC",
+62: type: "otc",
+64: label: "USD/JPY OTC",
+70: type: "otc",
+72: label: "USD/CHF OTC",
+78: type: "otc",
+80: label: "USD/CAD OTC",
+86: type: "otc",
+88: label: "AUD/USD OTC",
+94: type: "otc",
+96: label: "NZD/USD OTC",
+104: type: "otc",
+106: label: "BTC/USD OTC",
+112: type: "otc",
+114: label: "ETH/USD OTC",
+122: type: "otc",
+124: label: "EUR/GBP OTC",
+130: type: "otc",
+132: label: "EUR/JPY OTC",
+138: type: "otc",
+140: label: "EUR/CHF OTC",
+146: type: "otc",
+148: label: "EUR/AUD OTC",
+154: type: "otc",
+156: label: "EUR/CAD OTC",
+162: type: "otc",
+164: label: "EUR/NZD OTC",
+170: type: "otc",
+172: label: "EUR/TRY OTC",
+180: type: "otc",
+182: label: "GBP/JPY OTC",
+188: type: "otc",
+190: label: "GBP/CHF OTC",
+196: type: "otc",
+198: label: "GBP/AUD OTC",
+204: type: "otc",
+206: label: "GBP/CAD OTC",
+214: type: "otc",
+216: label: "AUD/JPY OTC",
+222: type: "otc",
+224: label: "CAD/JPY OTC",
+230: type: "otc",
+232: label: "CHF/JPY OTC",
+240: type: "otc",
+242: label: "AUD/CAD OTC",
+248: type: "otc",
+250: label: "AUD/NZD OTC",
+256: type: "otc",
+258: label: "NZD/JPY OTC",
+264: type: "otc",
+266: label: "CAD/CHF OTC",
+272: type: "otc",
+274: label: "EUR/RUB OTC",
+278: // ── Emerging / OTC Variants (6) ─────────────────────────────────────
+282: type: "otc",
+284: label: "USD/TRY OTC",
+290: type: "otc",
+292: label: "USD/ZAR OTC",
+298: type: "otc",
+300: label: "USD/MXN OTC",
+306: type: "otc",
+308: label: "USD/SGD OTC",
+314: type: "otc",
+316: label: "MAD/USD OTC",
+322: type: "otc",
+324: label: "KES/USD OTC",
+333: export const OTC_WHITELIST: Set<string> = new Set(
+334: OTC_FOREX_PAIRS.map((p) => p.symbol),
+338: export const ALL_SYMBOL_TICKERS: string[] = OTC_FOREX_PAIRS.map(
+350: return OTC_WHITELIST.has(norm);
+359: return OTC_FOREX_PAIRS.find((p) => p.symbol === norm);
+363: export const DEFAULT_SYMBOL = OTC_FOREX_PAIRS[0].symbol; // "EUR/USD"
+404: * Human label for the dropdown, e.g. "AUD/CAD OTC". Always uppercase-safe.
+407: return getOtcpair(symbol)?.label ?? `${symbol.trim().toUpperCase()} OTC`;
+412: // OTC whitelist so any legacy import cannot reintroduce stock/crypto.
+413: export const ALL_SYMBOLS: SymbolDefinition[] = OTC_FOREX_PAIRS;
+
+===== getPairLabel REGION (first ref line 406) =====
+398:   if (value == null || !Number.isFinite(value) || value <= 0) return "--";
+399:   const digits = getPriceDigits(symbol);
+400:   return Number(value).toFixed(digits);
+401: }
+402: 
+403: /**
+404:  * Human label for the dropdown, e.g. "AUD/CAD OTC". Always uppercase-safe.
+405:  */
+406: export function getPairLabel(symbol: string): string {
+407:   return getOtcpair(symbol)?.label ?? `${symbol.trim().toUpperCase()} OTC`;
+408: }
+409: 
+410: // ── BACK-COMPAT: old exported names are now ALIASES to the whitelist ──
+411: // These were previously 80-asset arrays. They are now hard-bound to the
+412: // OTC whitelist so any legacy import cannot reintroduce stock/crypto.
+413: export const ALL_SYMBOLS: SymbolDefinition[] = OTC_FOREX_PAIRS;
+414: export const US_STOCKS: SymbolDefinition[] = [];
+415: export const CRYPTO_PAIRS: SymbolDefinition[] = [];
+416: export const STOCK_TICKERS: string[] = [];
+417: export const CRYPTO_TICKERS: string[] = [];
+418: 
+
+===== app/page.tsx =====
+469: ? `${activeSymbol} · ${t(lang, "interval")}`
+507: symbol={activeSymbol}
+530: symbol={selectedSymbol}
+
+===== components/trading/signal-widget.tsx =====
+83: {symbol}
+
+===== components/trading/financial-chart.tsx =====
+241: timeFormatter: (time: { year: number; month: number; day: number; value?: number } | number) => {
+528: {symbol} · {t("candlesRenderRealtime")}
+
+===== components/trading/trading-panel.tsx =====
+124: {activeSymbol}
+360: {activeSymbol}
+
+===== components/trading/order-book.tsx =====
+89: const pairLabel = `${base}/${quote}`;
+155: {pairLabel}
+163: {pairLabel}
+227: {pairLabel}
+
+===== components/trading/ai-explanation.tsx =====
+379: <span>{activeSymbol}</span>
+
+===== components/shared/header.tsx =====
+
+===== components/trading/predictive-intelligence.tsx =====
+420: OTC

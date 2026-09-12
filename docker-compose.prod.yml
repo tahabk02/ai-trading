@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  # --- BACKEND SERVICE ---
+  core-backend:
+    build:
+      context: ./core-backend
+      dockerfile: Dockerfile
+    container_name: core_backend_prod
+    restart: always
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+    ports:
+      - "4000:4000"
+    depends_on:
+      - redis
+    networks:
+      - radar_network
+
+  # --- REDIS CACHE / BROKER ---
+  redis:
+    image: redis:7-alpine
+    container_name: redis_prod
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - radar_network
+
+  # --- FRONTEND CLIENT APP ---
+  client-app:
+    build:
+      context: ./client-app
+      dockerfile: Dockerfile
+    container_name: dashboard_ui_prod
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=http://91.99.71.111:4000
+      - NEXT_PUBLIC_WS_URL=http://91.99.71.111:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - core-backend
+    networks:
+      - radar_network
+
+volumes:
+  redis_data:
+
+networks:
+  radar_network:
+    driver: bridge

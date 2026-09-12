@@ -1,0 +1,11 @@
+core-backend:
+  build: ./core-backend
+  environment:
+    - AI_ENGINE_URL=http://ai-engine:8000
+    - PORT=4000
+  ports:
+    - "4000:4000"
+  depends_on:
+    - ai-engine
+    - redis
+    - postgres

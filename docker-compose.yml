@@ -1,0 +1,137 @@
+version: "3.8"
+
+networks:
+  radar_network:
+    driver: bridge
+
+services:
+  # --- INFRASTRUCTURE LAYER ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: radar_db
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+      POSTGRES_DB: trading_radar
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - radar_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: radar_bus
+    ports:
+      - "6379:6379"
+    networks:
+      - radar_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- INTELLIGENCE LAYER ---
+  ai-engine:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    container_name: ai_brain
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      LOG_FORMAT: JSON
+      CONFIDENCE_THRESHOLD: 0.80
+      ENVIRONMENT: production
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - radar_network
+    restart: always
+
+  # --- ORCHESTRATION LAYER ---
+  core-backend:
+    build:
+      context: ./core-backend
+      dockerfile: Dockerfile
+    container_name: backend_node
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-password}@postgres:5432/trading_radar?schema=public
+      REDIS_HOST: redis
+      PORT: 4000
+      JWT_SECRET: ${JWT_SECRET:-ultra-secure-secret-key}
+      POCKET_BRIDGE_HOST: pocket-bridge
+      POCKET_BRIDGE_PORT: 8788
+      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - radar_network
+    restart: always
+
+  # --- VISUALIZATION LAYER ---
+  client-app:
+    build:
+      context: ./client-app
+      dockerfile: Dockerfile
+    container_name: dashboard_ui
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      NEXT_PUBLIC_WS_URL: http://localhost:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - core-backend
+    networks:
+      - radar_network
+    restart: always
+
+  # --- EXECUTION LAYER ---
+  execution-engine:
+    build:
+      context: ./execution-engine
+      dockerfile: Dockerfile
+    container_name: trade_executor
+    environment:
+      REDIS_HOST: redis
+      ENVIRONMENT: production
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - radar_network
+    restart: always
+
+  # --- MARKET DATA LAYER (SSOT for real prices) ---
+  # Pocket Option live feed bridge. Connects with the SSID cookie, streams
+  # raw ticks + strict M20 candles to core-backend over the relay port.
+  # Without POCKET_OPTION_SSID it runs in a clean awaiting_ssid state.
+  pocket-bridge:
+    build:
+      context: ./pocket-bridge
+      dockerfile: Dockerfile
+    container_name: pocket_option_bridge
+    environment:
+      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      POCKET_BRIDGE_HOST: 0.0.0.0
+      POCKET_BRIDGE_PORT: 8788
+    ports:
+      - "8788:8788"
+    networks:
+      - radar_network
+    restart: always
+
+volumes:
+  postgres_data:

@@ -1,0 +1,75 @@
+===== components/trading/trading-panel.tsx imports =====
+3: import React, { useEffect, useCallback, useState } from "react";
+4: import { useTradingStore } from "@/store/useTradingStore";
+5: import { useLangContext } from "@/hooks/useLangContext";
+6: import { useSocket } from "@/hooks/useSocket";
+7: import {
+18: import { cn } from "@/utils/cn";
+19: import { formatPairPrice } from "@/utils/format";
+===== components/trading/ai-explanation.tsx imports =====
+3: import React, { useMemo, useState, useEffect } from "react";
+4: import { useTradingStore } from "@/store/useTradingStore";
+5: import { useLangContext } from "@/hooks/useLangContext";
+6: import {
+16: import { cn } from "@/utils/cn";
+17: import {
+===== components/trading/order-book.tsx imports =====
+3: import React, { useEffect, useMemo, useState, useCallback } from "react";
+4: import { useLangContext } from "@/hooks/useLangContext";
+5: import apiClient, { type OrderBookResponse } from "@/services/api";
+6: import { cn } from "@/utils/cn";
+7: import { formatPairPrice } from "@/utils/format";
+===== components/trading/signal-widget.tsx imports =====
+3: import React from "react";
+4: import { TrendingUp, TrendingDown, Activity } from "lucide-react";
+5: import { format } from "date-fns";
+6: import { clsx, type ClassValue } from "clsx";
+7: import { twMerge } from "tailwind-merge";
+8: import { detectLang } from "@/utils/i18n";
+9: import { formatPairPrice } from "@/utils/format";
+10: import {
+
+===== components/trading/trading-panel.tsx render-context =====
+--- line 124 ---
+122: </div>
+123: <span className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider">
+124: {activeSymbol}
+125: </span>
+--- line 360 ---
+358: <div className="flex items-center justify-between">
+359: <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+360: {activeSymbol}
+361: </span>
+===== components/trading/ai-explanation.tsx render-context =====
+--- line 379 ---
+377: <div className="mt-3 pt-3 border-t border-slate-800/40">
+378: <div className="flex items-center justify-between text-[9px] text-slate-600 font-mono">
+379: <span>{activeSymbol}</span>
+380: <span>
+===== components/trading/order-book.tsx render-context =====
+--- line 89 ---
+87: const parsed = useMemo<ParsedSymbol>(() => parseSymbol(symbol), [symbol]);
+88: const { base, quote } = parsed;
+89: const pairLabel = `${base}/${quote}`;
+90: 
+--- line 155 ---
+153: </h3>
+154: <p className="text-[10px] text-slate-500 mt-0.5 font-mono tracking-tight">
+155: {pairLabel}
+156: </p>
+--- line 163 ---
+161: </span>
+162: <span className="text-[9px] text-slate-400 dark:text-slate-600 font-mono">
+163: {pairLabel}
+164: </span>
+--- line 227 ---
+225: </span>
+226: <span className="text-[10px] text-slate-500 font-mono">
+227: {pairLabel}
+228: </span>
+===== components/trading/signal-widget.tsx render-context =====
+--- line 83 ---
+81: <div className="min-w-0 flex-1">
+82: <h3 className="text-base sm:text-xl font-bold text-white tracking-tight truncate">
+83: {symbol}
+84: </h3>

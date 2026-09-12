@@ -1,0 +1,110 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// ── Live trading signals streamed via WebSocket ──
+model Signal {
+  id         String   @id @default(uuid())
+  symbol     String
+  signalType String   // BUY, SELL
+  price      Float
+  confidence Float
+  status     String   @default("ACTIVE") // ACTIVE, EXECUTED, CANCELLED
+  indicators String   // JSON stored as string for SQLite compatibility
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([createdAt])
+}
+
+// ── AI prediction results (persistent record of every ML forecast) ──
+model Prediction {
+  id          String   @id @default(uuid())
+  symbol      String
+  signal      String   // BUY, SELL, HOLD
+  confidence  Float
+  targetPrice Float
+  currentPrice Float?
+  mlProbability Float?
+  modelAccuracy Float?
+  rsi14       Float?
+  sma20       Float?
+  sma50       Float?
+  timeframe   String   @default("1d")
+  metadata    String?  // JSON blob for extensible fields
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([createdAt])
+  @@index([signal])
+}
+
+// ── Platform users ──
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String?
+  createdAt DateTime @default(now())
+}
+
+// ── User settings (persisted system configuration) ──
+model UserSettings {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  timeframe           String   @default("1d")
+  confidenceGuardrail Float    @default(0.80)
+  maxRequestsPerMin   Int      @default(120)
+  responseSlaMs       Int      @default(800)
+  updatedAt           DateTime @updatedAt
+  createdAt           DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ── Risk rules (persisted risk management parameters) ──
+model RiskRule {
+  id                String   @id @default(uuid())
+  userId            String
+  name              String   // e.g. "Max Drawdown", "Stop-Loss Threshold", "Position Size Limit"
+  ruleType          String   // "max_drawdown" | "stop_loss" | "position_size" | "max_leverage"
+  value             Float    // The numeric threshold
+  enabled           Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
+  createdAt         DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, ruleType])
+}
+
+// ── ADVANCED RISK MANAGEMENT & AUTOMATED KILL SWITCH ──
+// Tracks the user's daily equity curve. When the realized daily drawdown
+// breaches the configured max (e.g. 3%), the kill switch engages and locks
+// ALL trade execution until manually reset or the next UTC trading day.
+model RiskState {
+  id                String    @id @default(uuid())
+  userId            String    @unique
+  dayKey            String    // UTC calendar day "YYYY-MM-DD" — auto-resets daily
+  startingEquity    Float     @default(10000)
+  realizedPnl       Float     @default(0) // signed cumulative $ P&L today
+  peakEquity        Float     @default(10000) // intraday high-water mark
+  tradesToday       Int       @default(0)
+  winsToday         Int       @default(0)
+  lossesToday       Int       @default(0)
+  killSwitchLocked  Boolean   @default(false)
+  lockedReason      String?
+  lockedAt          DateTime?
+  unlockedAt        DateTime?
+  updatedAt         DateTime  @updatedAt
+  createdAt         DateTime  @default(now())
+
+  @@index([userId, dayKey])
+}

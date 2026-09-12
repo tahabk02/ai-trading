@@ -1,0 +1,13 @@
+agg.toHaLive(def+emit)=7 OK
+agg.toHaClosed(def+emit)=4 <MIN5
+agg.prevHa(field)=2 <MIN3
+agg.reanchorPrevHa=4 OK
+agg.getLastPrice=1 OK
+agg.normalizeSeedGrid=1 OK
+agg.clamp(maxTs)=1 OK
+chart.flag=false=1 OK
+chart.hasNativeHaLive=2 <MIN3
+chart.skew sourceShiftMs=3 OK
+chart tsShift=1 OK
+chart discard+tol=1 OK
+store currentPrice RAW=2 OK

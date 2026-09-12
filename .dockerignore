@@ -1,0 +1,10 @@
+node_modules
+.next
+dist
+.env
+__pycache__
+.pytest_cache
+.git
+.gitignore
+README.md
+
