@@ -1,7 +1,11 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useTradingStore } from "@/store/useTradingStore";
+import {
+  useTradingStore,
+  getAggregatorParityDebug,
+} from "@/store/useTradingStore";
 import { useSocket } from "./useSocket";
 import { normalizeSymbol } from "@/services/api";
+import { normalizeTimeframe } from "@/lib/realtimeCandleAggregator";
 
 // ── CANONICAL SUBSCRIPTION SYMBOL ──
 // Every subscribe payload pushed to the backend MUST use the canonical
@@ -12,6 +16,22 @@ import { normalizeSymbol } from "@/services/api";
 // "WAITING FOR REAL-TIME TICK" lock set forever).
 const canonicalSymbol = (raw: string): string =>
   normalizeSymbol(raw) ?? (raw || "").trim().toUpperCase();
+
+// ── SUBSCRIBE PAYLOAD SHAPER ──
+// The backend keys candle aggregation against BOTH the canonical symbol AND
+// the ACTIVE CHART TIMEFRAME. Every subscribe emit carries { symbol, timeframe }
+// so the server joins the `${symbol}:${timeframe}` candle room and seeds
+// `history_candles` for exactly the selected resolution. The trade expiry is
+// deliberately NOT part of the payload — chart timeframe and trade expiry are
+// fully decoupled (Alpha.5 Pro), so changing expiration never re-buckets the
+// chart and changing timeframe never moves the trade duration.
+const subscribePayload = (): { symbol: string; timeframe: string } | null => {
+  const store = useTradingStore.getState();
+  const symbol = canonicalSymbol(store.activeSymbol);
+  if (!symbol) return null;
+  const timeframe = normalizeTimeframe(store.selectedTimeframe) ?? "M1";
+  return { symbol, timeframe };
+};
 
 // ── STALL / STALE THRESHOLDS (module scope — stable, never recreated per
 //    render so they cannot churn effect dependency identities or trip the
@@ -39,6 +59,12 @@ const STALE_PRICE_MS = 2_000;
 const RECOVERY_COOLDOWN_MS = 2_000;
 const HARD_RECONNECT_MS = 15_000;
 const HARD_RECONNECT_COOLDOWN_MS = 12_000;
+// ── FEED STATUS HEARTBEAT-AGE RULE ──
+// The backend broadcasts the authoritative `feed_status` every ~5s (bridge
+// heartbeat). If none arrives for FEED_STATUS_STALE_MS while the transport is
+// connected, the feed is effectively dead — flip the single store source to
+// "disconnected" (the honest state, never fabricated live).
+const FEED_STATUS_STALE_MS = 15_000;
 
 /**
  * WebSocket orchestrator for real-time price updates and signal feed.
@@ -73,6 +99,8 @@ export const useWebSocket = (_url?: string) => {
   const abortRef = useRef<AbortController | null>(null);
   /** Tracks the symbol whose WebSocket room we have joined. */
   const subscribedSymbolRef = useRef<string>("");
+  /** Tracks the timeframe of the last subscribed candle resolution. */
+  const lastSubscribedTfRef = useRef<string | null>(null);
 
   // ── LIVE-STREAM STALL DETECTION ──
   // `streamStalled` is true when the Socket.io transport is connected but NO
@@ -85,6 +113,9 @@ export const useWebSocket = (_url?: string) => {
   const lastTickAtRef = useRef<number>(Date.now());
   const [streamStalled, setStreamStalled] = useState(false);
   const streamStalledRef = useRef(false);
+  /** Epoch ms of the last authoritative `feed_status` frame received from the
+   *  backend. Drives the client-side heartbeat-age rule (=> "disconnected"). */
+  const lastFeedStatusAtRef = useRef<number>(Date.now());
 
   // ── RECOVERY WATCHDOG REFS ──
   // `stallStartedAtRef` = onset of the CURRENT stall episode (reset to 0 when
@@ -112,12 +143,63 @@ export const useWebSocket = (_url?: string) => {
   const [stalePrice, setStalePrice] = useState(false);
   const stalePriceRef = useRef(false);
 
+  // ── CANDLE PARITY ASSERTION (raw-tick ↔ bucket-write parity) ──
+  // Flags any symbol that keeps receiving raw live ticks while its aggregation
+  // buckets are NOT advancing (a tick with no active bucket increment: clock
+  // anchor discontinuity, symbol key fork, or a wedge in the builder). Mirrors
+  // the server-side watchdog; surfaced as an honest amber banner instead of a
+  // silently flat-lining axis.
+  const [candleParityBreach, setCandleParityBreach] = useState<{
+    symbol: string;
+    timeframe: string;
+    tickCount: number;
+    bucketWrites: number;
+    gapCount: number;
+    bucketsCreated: number;
+    bucketsUpdated: number;
+  } | null>(null);
+  const parityRef = useRef<{
+    tickCount: number;
+    bucketWrites: number;
+    gapCount: number;
+    sym: string;
+    tf: string;
+  } | null>(null);
+  const parityCyclesRef = useRef(0);
+  const parityBreachRef = useRef<{
+    symbol: string;
+    timeframe: string;
+    tickCount: number;
+    bucketWrites: number;
+    gapCount: number;
+    bucketsCreated: number;
+    bucketsUpdated: number;
+  } | null>(null);
+
   const ingestLiveTick = useTradingStore((state) => state.ingestLiveTick);
   const applyLiveSignal = useTradingStore((state) => state.applyLiveSignal);
   const ingestQuantDispatch = useTradingStore(
     (state) => state.ingestQuantDispatch,
   );
   const replayTicks = useTradingStore((state) => state.replayTicks);
+  const applyServerCandle = useTradingStore((state) => state.applyServerCandle);
+  const seedServerCandles = useTradingStore((state) => state.seedServerCandles);
+  const setFeedStatus = useTradingStore((state) => state.setFeedStatus);
+  const selectedTimeframe = useTradingStore((state) => state.selectedTimeframe);
+
+  // ── SUBSCRIBE (canonical symbol + ACTIVE CHART TIMEFRAME) ──
+  // Re-emits the { symbol, timeframe } payload on the socket. Serving as the
+  // single choke point for every subscribe push, it also keeps the tf ref in
+  // sync so the timeframe-change effect below only re-subscribes on ACTUAL
+  // resolution switches (clean state swap + history_candles re-seed).
+  const emitSubscribe = useCallback(() => {
+    if (!socket) return;
+    const payload = subscribePayload();
+    if (!payload) return;
+    socket.emit("subscribe", payload);
+    subscribedSymbolRef.current = payload.symbol;
+    lastSubscribedTfRef.current = payload.timeframe;
+  }, [socket]);
   const markTickReceived = useCallback(() => {
     lastTickAtRef.current = Date.now();
     if (streamStalledRef.current) {
@@ -198,14 +280,12 @@ export const useWebSocket = (_url?: string) => {
     const store = useTradingStore.getState();
     const symbol = store.activeSymbol;
     if (!symbol) return;
-    const norm = canonicalSymbol(symbol);
 
-    socket.emit("subscribe", norm);
-    subscribedSymbolRef.current = norm;
+    emitSubscribe();
 
     store.syncAggregatorWallClock();
     store.getPrediction(symbol);
-  }, [socket]);
+  }, [socket, emitSubscribe]);
 
   useEffect(() => {
     // Single source of truth: sync the convenience boolean to the context
@@ -234,6 +314,96 @@ export const useWebSocket = (_url?: string) => {
       if (stale !== stalePriceRef.current) {
         stalePriceRef.current = stale;
         setStalePrice(stale);
+      }
+
+      // ── FEED STATUS HEARTBEAT-AGE RULE (single store source) ──
+      // While the transport is connected but no authoritative `feed_status`
+      // frame has arrived for FEED_STATUS_STALE_MS, the feed is dead — flip the
+      // store's single source to "disconnected" (honest, never fabricated).
+      if (
+        socketConnected &&
+        Date.now() - lastFeedStatusAtRef.current > FEED_STATUS_STALE_MS
+      ) {
+        const store = useTradingStore.getState();
+        if (store.feedStatus !== "disconnected") {
+          store.setFeedStatus("disconnected");
+        }
+      }
+
+      // ── CANDLE PARITY ASSERTION ──
+      // While the transport is live, compare the ACTIVE symbol's raw tick count
+      // against its bucket write count every second. New ticks with zero bucket
+      // writes for ≥3 consecutive sweeps = a flat-lining pair (aggregation is
+      // consuming nothing). Advancing writes instantly re-arm the flag; a symbol
+      // or resolution switch resets the window so one pair's failure can never
+      // be misattributed to the next.
+      const parityActive = useTradingStore.getState().activeSymbol;
+      const parityTf =
+        normalizeTimeframe(useTradingStore.getState().selectedTimeframe) ??
+        "M1";
+      if (parityActive && socketConnected) {
+        const dbg = getAggregatorParityDebug(parityActive);
+        const prev = parityRef.current;
+        const windowChanged =
+          !prev ||
+          prev.sym !== dbg.symbol ||
+          prev.sym !== parityActive ||
+          prev.tf !== dbg.timeframe ||
+          prev.tf !== parityTf;
+        if (windowChanged) {
+          // New symbol / resolution window: release any prior breach, re-arm
+          // the comparison purely on the new pair.
+          parityCyclesRef.current = 0;
+          if (parityBreachRef.current) {
+            parityBreachRef.current = null;
+            setCandleParityBreach(null);
+          }
+          parityRef.current = {
+            tickCount: dbg.tickCount,
+            bucketWrites: dbg.bucketWrites,
+            gapCount: dbg.gapCount,
+            sym: dbg.symbol,
+            tf: dbg.timeframe,
+          };
+        } else {
+          if (dbg.bucketWrites > dbg.tickCount + dbg.gapCount) {
+            const breach = {
+              symbol: dbg.symbol,
+              timeframe: String(dbg.timeframe),
+              tickCount: dbg.tickCount,
+              bucketWrites: dbg.bucketWrites,
+              gapCount: dbg.gapCount,
+              bucketsCreated: dbg.bucketsCreated,
+              bucketsUpdated: dbg.bucketsUpdated,
+            };
+            console.warn(
+              "[CandleParity] Bucket writes exceed expected writes",
+              breach,
+            );
+            parityBreachRef.current = breach;
+            setCandleParityBreach(breach);
+          } else {
+            parityCyclesRef.current = 0;
+            if (parityBreachRef.current) {
+              parityBreachRef.current = null;
+              setCandleParityBreach(null);
+            }
+          }
+          parityRef.current = {
+            tickCount: dbg.tickCount,
+            bucketWrites: dbg.bucketWrites,
+            gapCount: dbg.gapCount,
+            sym: dbg.symbol,
+            tf: dbg.timeframe,
+          };
+        }
+      } else {
+        parityRef.current = null;
+        parityCyclesRef.current = 0;
+        if (parityBreachRef.current) {
+          parityBreachRef.current = null;
+          setCandleParityBreach(null);
+        }
       }
     }, 1_000);
     return () => clearInterval(interval);
@@ -283,11 +453,18 @@ export const useWebSocket = (_url?: string) => {
     // tick before the disconnect" and "first live tick after", so a rejoin
     // never stalls the visible series waiting for the feed to move again.
     const onHistory = (payload: any) => {
-      if (!payload || !Array.isArray(payload.ticks) || payload.ticks.length === 0) {
+      if (
+        !payload ||
+        !Array.isArray(payload.ticks) ||
+        payload.ticks.length === 0
+      ) {
         return;
       }
       markTick(payload);
-      const replaySymbol = (payload.symbol || "").toString().trim().toUpperCase();
+      const replaySymbol = (payload.symbol || "")
+        .toString()
+        .trim()
+        .toUpperCase();
       const active = useTradingStore.getState().activeSymbol;
       const activeNorm = (active || "").toString().trim().toUpperCase();
       // Only fold the active symbol's replay (the series already on screen) —
@@ -303,11 +480,76 @@ export const useWebSocket = (_url?: string) => {
       lastTickAtRef.current = Date.now();
     };
 
+    // ── SERVER-AUTHORITATIVE CANDLE ACKNOWLEDGEMENT ──
+    // The backend's candle aggregator pushes each CLOSED candle on the `candle`
+    // event. Fold it into the store's serverCandles map (only closed payloads
+    // are accepted there) so the chart repaints the authoritative closed bar.
+    const onCandle = (payload: any) => {
+      if (!payload) return;
+      const active = useTradingStore.getState().activeSymbol;
+      const activeNorm = (active || "").toString().trim().toUpperCase();
+      const sym = (payload.symbol || "").toString().trim().toUpperCase();
+      if (!sym || (activeNorm && sym !== activeNorm)) return;
+      applyServerCandle(payload);
+    };
+
+    // ── REPLAY-ON-JOIN (closed candles) ──
+    // The backend ships the aggregator's authoritative closed-candle history
+    // per timeframe as a `history_candles` burst on every subscribe/rejoin.
+    const onHistoryCandles = (payload: any) => {
+      if (!payload || !Array.isArray(payload.candles)) {
+        return;
+      }
+      const active = useTradingStore.getState().activeSymbol;
+      const activeNorm = (active || "").toString().trim().toUpperCase();
+      const sym = (payload.symbol || "").toString().trim().toUpperCase();
+      if (!sym || (activeNorm && sym !== activeNorm)) return;
+      // Single-resolution burst: { symbol, timeframe, candles } — the backend
+      // seeds EXACTLY the chart timeframe requested on subscribe.
+      seedServerCandles(
+        sym,
+        String(payload.timeframe || "1m"),
+        payload.candles,
+      );
+    };
+
     socket.on("live_tick", onLiveTick);
     socket.on("symbol_update", onSymbolUpdate);
     socket.on("new_signal", onNewSignal);
     socket.on("live_quant_signal", onLiveQuantSignal);
     socket.on("history", onHistory);
+    socket.on("candle", onCandle);
+    socket.on("history_candles", onHistoryCandles);
+
+    // ── AUTHORITATIVE FEED STATUS (heartbeat-age rule) ──
+    // The backend broadcasts `feed_status` on every bridge heartbeat + state
+    // change. This is the SINGLE source of truth for the store's `feedStatus`;
+    // the 1s sweep below re-applies the local heartbeat-age rule so a socket
+    // that stops receiving these frames honestly reports "disconnected".
+    const onFeedStatus = (payload: any) => {
+      if (!payload) return;
+      lastFeedStatusAtRef.current = Date.now();
+      const raw = String(payload.status || "").toLowerCase();
+      const allowed: ReadonlyArray<string> = [
+        "live",
+        "stalled",
+        "disconnected",
+        "awaiting_ssid",
+        "auth_failed",
+        "degraded",
+      ];
+      if (!allowed.includes(raw)) return;
+      setFeedStatus(
+        raw as
+          | "live"
+          | "stalled"
+          | "disconnected"
+          | "awaiting_ssid"
+          | "auth_failed"
+          | "degraded",
+      );
+    };
+    socket.on("feed_status", onFeedStatus);
 
     // ── FORCE INITIAL TICK HANDSHAKE (every "SYNCHRONISÉ") ──
     // The instant the transport reports a live connection, dispatch the
@@ -316,11 +558,8 @@ export const useWebSocket = (_url?: string) => {
     // arms immediately, and (c) replays its real tick ring -> the stream is
     // live and the "WAITING FOR REAL-TIME TICK" lock clears at handshake.
     const onConnected = () => {
-      const active = useTradingStore.getState().activeSymbol;
-      if (!active) return;
-      const canonical = canonicalSymbol(active);
-      socket.emit("subscribe", canonical);
-      subscribedSymbolRef.current = canonical;
+      if (!useTradingStore.getState().activeSymbol) return;
+      emitSubscribe();
     };
     socket.on("connect", onConnected);
 
@@ -330,9 +569,23 @@ export const useWebSocket = (_url?: string) => {
       socket.off("new_signal", onNewSignal);
       socket.off("live_quant_signal", onLiveQuantSignal);
       socket.off("history", onHistory);
+      socket.off("candle", onCandle);
+      socket.off("history_candles", onHistoryCandles);
+      socket.off("feed_status", onFeedStatus);
       socket.off("connect", onConnected);
     };
-  }, [socket, ingestLiveTick, applyLiveSignal, ingestQuantDispatch, markTick, replayTicks]);
+  }, [
+    socket,
+    ingestLiveTick,
+    applyLiveSignal,
+    ingestQuantDispatch,
+    markTick,
+    replayTicks,
+    applyServerCandle,
+    seedServerCandles,
+    setFeedStatus,
+    emitSubscribe,
+  ]);
 
   // ── RECONNECT RESILIENCE ──
   // After every successful (re)connect, re-join the active symbol's room.
@@ -368,14 +621,11 @@ export const useWebSocket = (_url?: string) => {
     }
 
     const norm = canonicalSymbol(useTradingStore.getState().activeSymbol);
-    if (norm && subscribedSymbolRef.current !== norm) {
-      socket.emit("subscribe", norm);
-      subscribedSymbolRef.current = norm;
-    } else if (norm && subscribedSymbolRef.current === norm) {
-      // Already tracked, but re-emit defensively after every (re)connect —
-      // the backend's subscribe handler replays the real tick ring on join.
-      socket.emit("subscribe", norm);
-    }
+
+    // Re-join the ACTIVE resolution on every (re)connect — carries the
+    // current { symbol, timeframe } so the backend replays the real tick ring
+    // AND seeds the current chart resolution's closed candles.
+    emitSubscribe();
 
     // ── INSTANT RE-ARM ON RECONNECT ──
     // Every (re)connect re-subscribes above, and the backend replays its real
@@ -390,7 +640,29 @@ export const useWebSocket = (_url?: string) => {
     const store = useTradingStore.getState();
     store.syncAggregatorWallClock();
     if (norm) void store.getPrediction(norm);
-  }, [socket, socketConnected, socket?.id]);
+  }, [socket, socketConnected, socket?.id, emitSubscribe]);
+
+  // ── CHART TIMEFRAME SWITCH → CLEAN STATE SWAP + HISTORY SEED ──
+  // The instant the user changes the chart timeframe, re-subscribe with the
+  // new resolution: the backend joins the `${symbol}:${timeframe}` candle room
+  // and replays `history_candles` for THAT grid. The store's serverCandles +
+  // serverCandleVersion bump (via seedServerCandles) then triggers the chart's
+  // clean state swap — the selected bucket's closed bars are RE-SEEDED from
+  // the server's authoritative ring, so no stale bar from the previous
+  // resolution survives the switch. Trade expiry is never involved.
+  useEffect(() => {
+    if (!socket || !socketConnected) return;
+    const tf = normalizeTimeframe(selectedTimeframe) ?? "M1";
+    if (lastSubscribedTfRef.current === null) {
+      // Mount baseline — the connect handshake already emitted it.
+      lastSubscribedTfRef.current = tf;
+      return;
+    }
+    if (lastSubscribedTfRef.current !== tf) {
+      lastSubscribedTfRef.current = tf;
+      emitSubscribe();
+    }
+  }, [socket, socketConnected, selectedTimeframe, emitSubscribe]);
 
   // ── HARD FEED RESET (dataEpoch) ──
   // A `hardResetLiveData` call wipes every cache, aggregator symbol state and
@@ -458,11 +730,11 @@ export const useWebSocket = (_url?: string) => {
       if (!socket || !symbol) return;
       const normalized = canonicalSymbol(symbol);
       if (subscribedSymbolRef.current !== normalized) {
-        socket.emit("subscribe", normalized);
+        emitSubscribe();
         subscribedSymbolRef.current = normalized;
       }
     },
-    [socket],
+    [socket, emitSubscribe],
   );
 
   const startSync = useCallback(
@@ -534,6 +806,7 @@ export const useWebSocket = (_url?: string) => {
     socket,
     streamStalled,
     stalePrice,
+    candleParityBreach,
     subscribeSymbol,
     unsubscribeSymbol,
   };

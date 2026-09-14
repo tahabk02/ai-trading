@@ -21,6 +21,58 @@ const MINIMUM_REQUIRED_BARS = 30;
 // jitter while staying well below the platform's stale-price threshold.
 const LIVE_PRICE_MAX_AGE_MS = 10_000;
 
+function timeframeMs(timeframe: string): number {
+  const token = String(timeframe || "1m")
+    .toLowerCase()
+    .replace("+", "");
+  const amount = Number.parseInt(token, 10);
+  if (!Number.isFinite(amount) || amount <= 0)
+    throw new Error(`Invalid timeframe: ${timeframe}`);
+  if (token.endsWith("h")) return amount * 3_600_000;
+  if (token.endsWith("d")) return amount * 86_400_000;
+  return amount * 60_000;
+}
+
+function buildFutureCandles(
+  bars: ForexCandle[],
+  livePrice: number,
+  target: number,
+  atr: number,
+  bid: number | undefined,
+  ask: number | undefined,
+  timeframe: string,
+  digits: number,
+) {
+  if (!bars.length || livePrice <= 0 || target <= 0 || atr <= 0) return [];
+  const interval = timeframeMs(timeframe);
+  const rawTimestamp = new Date(bars[bars.length - 1].timestamp).getTime();
+  if (!Number.isFinite(rawTimestamp) || rawTimestamp <= 0) return [];
+  const anchor = Math.floor(rawTimestamp / interval) * interval;
+  const intervals = Math.max(1, Math.round(interval / 60_000));
+  const spread = bid && ask && ask >= bid ? ask - bid : 0;
+  const wick = Math.max(atr * 0.5, spread * 0.5);
+  const round = (value: number) => Number(value.toFixed(digits));
+  const result = [];
+  let previousClose = livePrice;
+  for (let index = 1; index <= intervals; index += 1) {
+    const close =
+      index === intervals
+        ? target
+        : livePrice + ((target - livePrice) * index) / intervals;
+    result.push({
+      timestamp: anchor + index * interval,
+      open: round(previousClose),
+      high: round(Math.max(previousClose, close) + wick),
+      low: round(Math.max(0, Math.min(previousClose, close) - wick)),
+      close: round(close),
+      volume: 0,
+      projected: true,
+    });
+    previousClose = close;
+  }
+  return result;
+}
+
 const TIMEFRAME_DESIRED_BARS: Record<string, number> = {
   "1m": 200,
   "2m": 200,
@@ -191,11 +243,16 @@ const buildAiEnginePredictUrl = (baseUrl: string): string => {
 };
 
 const AI_ENGINE_PREDICT_URL = buildAiEnginePredictUrl(secrets.AI_ENGINE_URL);
-// Extended timeout (default 120s, env-tunable) for heavy sklearn inference /
-// training. Never let this fall below 15_000ms or legitimate ML computation
-// spikes will be cut short and treated as failures.
-const PREDICT_TIMEOUT_MS = Math.max(secrets.AI_ENGINE_TIMEOUT_MS, 15_000);
-const PREDICT_MAX_RETRIES = Math.max(secrets.AI_ENGINE_MAX_RETRIES, 1);
+// ── Extended AI Engine timeout ──
+// A cold-cache RandomForest train alone takes ~1.3s, and /predict requests can
+// queue briefly behind the AI Engine's event loop while heavy confluence
+// computation runs. The previous 3s budget was aborted by axios (exactly 3.0s
+// of socket inactivity) even when the engine completed the request in
+// 300–700ms — a consistent 503 source. 12s keeps a legitimate slow-but-alive
+// engine alive while still returning fast enough for the client's backoff
+// loop (retryAfterMs) to stay snappy on a genuinely dead engine.
+const PREDICT_TIMEOUT_MS = 12_000;
+const PREDICT_MAX_RETRIES = 1;
 
 // ════════════════════════════════════════════════════════════════════════
 // HIGH-FREQUENCY TICK-QUANT PATH (fast endpoint, separate from /predict)
@@ -317,9 +374,24 @@ export const predictSignal = async (req: Request, res: Response) => {
   };
 
   if (!symbol || typeof symbol !== "string" || symbol.trim().length === 0) {
+    logger.info("[predict] symbol=missing timeframe=unknown status=error");
     return res.status(400).json({
       error: "Validation Error",
       message: 'A non-empty "symbol" field is required.',
+    });
+  }
+
+  if (
+    !timeframe ||
+    typeof timeframe !== "string" ||
+    timeframe.trim().length === 0
+  ) {
+    logger.info(
+      `[predict] symbol=${symbol.trim()} timeframe=missing status=error`,
+    );
+    return res.status(400).json({
+      error: "Validation Error",
+      message: 'A non-empty "timeframe" field is required.',
     });
   }
 
@@ -339,6 +411,9 @@ export const predictSignal = async (req: Request, res: Response) => {
     logger.warn("[signal.controller] Non-whitelisted symbol rejected", {
       symbol: normalizedSymbol,
     });
+    logger.info(
+      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=error`,
+    );
     return res.status(400).json({
       error: "Symbol not permitted",
       symbol: normalizedSymbol,
@@ -482,6 +557,9 @@ export const predictSignal = async (req: Request, res: Response) => {
         spotPresent: spotResult.success,
       },
     );
+    logger.info(
+      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=error`,
+    );
     return res.status(503).json({
       error: "Awaiting real-time tick",
       symbol: normalizedSymbol,
@@ -552,6 +630,9 @@ export const predictSignal = async (req: Request, res: Response) => {
           bufferedBars: buffered.length,
           required: MINIMUM_REQUIRED_BARS,
         },
+      );
+      logger.info(
+        `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=error`,
       );
       return res.status(503).json({
         error: "Awaiting live market data",
@@ -632,6 +713,12 @@ export const predictSignal = async (req: Request, res: Response) => {
     );
 
     const elapsed = Date.now() - t0;
+    logger.info(
+      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=ok`,
+    );
+    logger.info(
+      `[predict] ai_engine_url=${AI_ENGINE_PREDICT_URL} latency_ms=${elapsed}`,
+    );
 
     // ════════════════════════════════════════════════════════════════════
     // CONFIDENCE SANITIZER — normalizes every upstream scale to 0-100.
@@ -735,6 +822,20 @@ export const predictSignal = async (req: Request, res: Response) => {
           : null,
       book_confluence:
         prediction.book_confluence ?? prediction.diagnostics?.book ?? {},
+      future_candles: buildFutureCandles(
+        bars,
+        Number(effectiveLivePrice),
+        authoritativeTarget,
+        atr,
+        Number.isFinite(latestSpread.bid)
+          ? Number(latestSpread.bid)
+          : undefined,
+        Number.isFinite(latestSpread.ask)
+          ? Number(latestSpread.ask)
+          : undefined,
+        normalizedTimeframe,
+        symbolRegistry.getDigits(normalizedSymbol),
+      ),
       candles: bars.map((b) => ({
         timestamp: b.timestamp,
         open: b.open,
@@ -772,6 +873,13 @@ export const predictSignal = async (req: Request, res: Response) => {
     // ════════════════════════════════════════════════════════════════════
     const aiFailure = classifyAiEngineFailure(aiError);
 
+    logger.info(
+      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=${aiFailure.kind === "timeout" ? "timeout" : "error"}`,
+    );
+    logger.info(
+      `[predict] ai_engine_url=${AI_ENGINE_PREDICT_URL} latency_ms=${elapsed}`,
+    );
+
     logger.warn(
       "[signal.controller] AI Engine failed persistently after extended timeout + retries — no HOLD fallback, serving 503",
       {
@@ -788,8 +896,19 @@ export const predictSignal = async (req: Request, res: Response) => {
     // ── Refresh dynamic payout (non-fatal) ──
     forexDataService.syncPayouts(normalizedSymbol).catch(() => {});
 
+    if (aiFailure.kind === "timeout") {
+      return res.status(503).json({
+        error: "ai_timeout",
+        retryAfterMs: 1000,
+        symbol: normalizedSymbol,
+        timeframe: normalizedTimeframe,
+        proxyLatencyMs: elapsed,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return res.status(503).json({
-      error: "Prediction service unavailable",
+      error: "ai_unavailable",
       message:
         "The AI Engine is currently unavailable or rejected the payload. " +
         "No direction was dispatched — retrying.",

@@ -37,7 +37,7 @@ def test_strict_bucket_boundary():
     assert float(history[0]["close"]) == 1.1005
     forming = engine.forming("TEST/USD")
     assert forming.time == 40_000
-    assert forming.open == 1.1010
+    assert float(forming.open) == 1.1010
 
 
 def test_last_valid_price_hold_no_default():

@@ -64,6 +64,7 @@ export interface CandleDataPoint {
   low: number;
   close: number;
   volume?: number;
+  projected?: boolean;
 }
 
 export interface PredictionResponse {
@@ -169,6 +170,7 @@ export interface PredictionResponse {
   };
   timestamp: string;
   candles?: CandleDataPoint[];
+  future_candles?: CandleDataPoint[];
   barCount?: number;
   dataSource?: string;
   isCrypto?: boolean;
@@ -438,8 +440,9 @@ api.interceptors.response.use(
         ((config as InternalAxiosRequestConfig & { __retryCount?: number })
           .__retryCount ?? 0) + 1;
       if (attempt <= RETRY_MAX_ATTEMPTS) {
-        (config as InternalAxiosRequestConfig & { __retryCount?: number })
-          .__retryCount = attempt;
+        (
+          config as InternalAxiosRequestConfig & { __retryCount?: number }
+        ).__retryCount = attempt;
         const delay = Math.min(
           RETRY_MAX_DELAY_MS,
           RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
@@ -543,8 +546,7 @@ const apiClient = {
     // Falls back to the trimmed uppercase input when normalization cannot
     // recover a canonical pair (backend will respond with a descriptive
     // error listing supported symbols).
-    const cleanSymbol =
-      normalizeSymbol(symbol) ?? symbol.trim().toUpperCase();
+    const cleanSymbol = normalizeSymbol(symbol) ?? symbol.trim().toUpperCase();
     const cleanTimeframe = timeframe.trim().toLowerCase();
 
     try {
@@ -601,8 +603,7 @@ const apiClient = {
           // 5xx (including 503 Service Unavailable) and 429 are transient by
           // nature; 4xx validation errors are NOT retryable.
           err.recoverable =
-            typeof status === "number" &&
-            (status >= 500 || status === 429);
+            typeof status === "number" && (status >= 500 || status === 429);
           throw err;
         }
       }

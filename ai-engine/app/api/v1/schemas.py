@@ -74,6 +74,17 @@ class CandleModel(BaseModel):
         )
 
 
+class FutureCandleModel(BaseModel):
+    """A model-produced future candle, never a realized market observation."""
+    timestamp: float = Field(..., gt=0)
+    open: float = Field(..., gt=0)
+    high: float = Field(..., gt=0)
+    low: float = Field(..., gt=0)
+    close: float = Field(..., gt=0)
+    volume: float = Field(default=0, ge=0)
+    projected: bool = True
+
+
 from app.services.ml_predictor import pad_candles_if_needed
 
 # ═══════════════════════════════════════════════════════════════════
@@ -231,7 +242,7 @@ class IndicatorModel(BaseModel):
 class PredictResponse(BaseModel):
     """Standardized prediction response."""
     symbol: str
-    signal: str = Field(..., pattern="^(BUY|SELL|HOLD)$")
+    signal: Optional[str] = Field(None, pattern="^(BUY|SELL|HOLD)$")
     # Genuine full-range confidence percentage (0-100 scale from the engine).
     confidence: float = Field(..., ge=0.0, le=100.0)
     target_price: float = Field(..., ge=0)
@@ -245,6 +256,7 @@ class PredictResponse(BaseModel):
     delta_pct: Optional[float] = None
     dataSource: Optional[str] = None
     barCount: Optional[int] = None
+    future_candles: List[FutureCandleModel] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

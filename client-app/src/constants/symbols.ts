@@ -494,6 +494,67 @@ export function getPairLabel(symbol: string): string {
   return getOtcpair(symbol)?.label ?? symbol.trim().toUpperCase();
 }
 
+export interface SymbolSearchResult {
+  symbol: string;
+  name: string;
+  type: "otc" | "crypto";
+  label: string;
+  digits: number;
+}
+
+/**
+ * Resilient client-side symbol search over the strict OTC/crypto universe.
+ * Powers the "Search symbols..." input fallback whenever the backend
+ * /symbols route is unreachable, times out, or answers 400/504 — the
+ * whitelist keeps search alive with zero fabricated instruments. Also
+ * guarantees instant filtering while the network request is still in flight.
+ */
+export function searchSymbolUniverse(
+  query: string,
+  limit = 15,
+): SymbolSearchResult[] {
+  const q = String(query || "")
+    .trim()
+    .toUpperCase();
+  if (!q) {
+    return OTC_FOREX_PAIRS.slice(0, Math.max(1, limit)).map(toSymbolSearchResult);
+  }
+  const compactQ = q.replace(/OTC$/u, "").replace(/[^A-Z0-9]/g, "");
+  const hay = q.replace(/[\s\-_.]+/g, "/");
+  const matches: SymbolDefinition[] = [];
+  for (const p of OTC_FOREX_PAIRS) {
+    const sym = p.symbol.toUpperCase();
+    const compact = sym.replace(/\//g, "");
+    const name = p.name.toUpperCase();
+    const label = p.label.toUpperCase();
+    if (
+      sym.includes(hay) ||
+      label.includes(q) ||
+      name.includes(q) ||
+      (compactQ.length >= 3 && compact.startsWith(compactQ)) ||
+      (compactQ.length === 6 && compact === compactQ)
+    ) {
+      matches.push(p);
+    }
+  }
+  matches.sort((a, b) => {
+    const aPrefix = a.symbol.startsWith(hay) ? 0 : 1;
+    const bPrefix = b.symbol.startsWith(hay) ? 0 : 1;
+    return aPrefix - bPrefix;
+  });
+  return matches.slice(0, Math.max(1, limit)).map(toSymbolSearchResult);
+}
+
+function toSymbolSearchResult(p: SymbolDefinition): SymbolSearchResult {
+  return {
+    symbol: p.symbol,
+    name: p.name,
+    type: p.type,
+    label: p.label,
+    digits: p.digits,
+  };
+}
+
 // ── BACK-COMPAT: old exported names are now ALIASES to the whitelist ──
 // These were previously 80-asset arrays. They are now hard-bound to the
 // OTC whitelist so any legacy import cannot reintroduce stock/crypto.

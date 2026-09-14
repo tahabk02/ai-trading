@@ -17,6 +17,7 @@ import {
   type Candle,
   type Timeframe,
   isTimeframe,
+  normalizeTimeframe,
   TIMEFRAME_MS,
 } from "@/lib/realtimeCandleAggregator";
 import tradingAccuracyVerifier, {
@@ -28,26 +29,40 @@ const LS_TIMEFRAME_KEY = "selected_timeframe";
 const LS_LEAD_OFFSET_KEY = "selected_lead_offset_ms";
 
 // ── SUB-MINUTE CHART GRID ↔ AI THERMAL HORIZON BRIDGE ──
-// The chart can bucket at sub-minute widths (20s / 1s / 100ms / 20ms micro
-// grids), but the ai-engine thermal quant matrix evaluates at >= 1m horizons
-// only (schemas.py whitelist). A raw "20s" /predict would 422 (no retry on
-// 4xx) — the failure surface that used to lock the engine into a HOLD state.
-// The CHART keeps its own sub-minute bucket; the /predict REQUEST is coerced
-// to "1m" (the nearest supported thermal channel), so a healthy live stream
-// always resolves a genuine directional signal instead of a whitelist-dead 422.
-const SUB_MINUTE_TIMEFRAMES = new Set([
-  "20ms",
-  "100ms",
-  "1s",
-  "5s",
-  "20s",
-]);
+// PO canonical sub-minute timeframes (S5..S30). The ai-engine thermal
+// quant matrix evaluates at >= 1m horizons only (schemas.py whitelist).
+// A raw "S5" /predict would 422 — the failure surface that used to lock
+// the engine into a HOLD state. The CHART keeps its own sub-minute bucket;
+// the /predict REQUEST is coerced to "1m" (the nearest supported thermal
+// channel), so a healthy live stream always resolves a genuine directional
+// signal instead of a whitelist-dead 422.
+const PO_TO_BACKEND_TF: Record<string, string> = {
+  S5: "1m", S10: "1m", S15: "1m", S30: "1m",
+  M1: "1m", M2: "2m", M3: "3m", M5: "5m",
+  M10: "10m", M15: "15m", M30: "30m",
+  H1: "1h", H4: "4h", D1: "1d",
+};
 export function aiTimeframeFor(timeframe: string): string {
-  return SUB_MINUTE_TIMEFRAMES.has(
-    (timeframe || "").trim().toLowerCase(),
-  )
-    ? "1m"
-    : (timeframe || "").trim().toLowerCase();
+  const upper = (timeframe || "").trim().toUpperCase();
+  if (PO_TO_BACKEND_TF[upper]) return PO_TO_BACKEND_TF[upper];
+  return (timeframe || "").trim().toLowerCase() || "1m";
+}
+
+// ── SERVER-AUTHORITATIVE CLOSED CANDLE CONTRACT ──
+// The backend's realtime candle aggregator pushes closed candles over the
+// WebSocket `candle` event and replays accumulated history via
+// `history_candles`. These are the single source of truth for CLOSED bars on
+// the chart; the client's own aggregator only builds the current forming bar.
+export interface ServerSettledCandle {
+  symbol: string;
+  timeframe: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+  closed?: boolean;
 }
 
 // ── LIVE-SIGNAL ID UNIQUENESS (React key-collision fix) ──
@@ -179,23 +194,20 @@ function predictionKey(symbol: string, timeframe: string): string {
 }
 
 /**
- * Read persisted timeframe from localStorage, falling back to "1m".
+ * Read persisted timeframe from localStorage, returning canonical PO form.
+ * Falls back to "S5" if stored value is invalid.
  */
 function getPersistedTimeframe(): string {
-  if (typeof window === "undefined") return "1m";
+  if (typeof window === "undefined") return "S5";
   try {
     const stored = localStorage.getItem(LS_TIMEFRAME_KEY);
-    // Validated against the aggregator's SINGLE authoritative timeframe
-    // universe (isTimeframe) so every selectable chart interval — from the
-    // micro 20ms grid to the 10-day sweep — restores exactly, never a
-    // hardcoded whitelist drift.
     if (stored && isTimeframe(stored)) {
-      return stored;
+      return normalizeTimeframe(stored) ?? "S5";
     }
   } catch {
     // localStorage may be unavailable (SSR, privacy mode, etc.)
   }
-  return "1m";
+  return "S5";
 }
 
 /**
@@ -240,7 +252,18 @@ export interface QuantTickSnapshot {
   receivedAt: number;
 }
 
+export type POExpiration = 1 | 5 | 10 | 15 | 20 | 30 | 60 | 120 | 180 | 300 | 600 | 900 | 1800 | 3600 | 14400 | 43200 | 86400;
+export const PO_EXPIRATION_SECONDS_SET = new Set<number>([1,5,10,15,20,30,60,120,180,300,600,900,1800,3600,14400,43200,86400]);
+function snapToNearestExpiration(seconds: number): POExpiration {
+  if (!Number.isFinite(seconds) || seconds <= 0) return 60;
+  const arr = [1,5,10,15,20,30,60,120,180,300,600,900,1800,3600,14400,43200,86400];
+  let best = arr[0];
+  for (const v of arr) { if (Math.abs(seconds - v) < Math.abs(seconds - best)) best = v; }
+  return best as POExpiration;
+}
+
 export interface TradingState {
+  feedStatus: "awaiting_ssid" | "auth_failed" | "degraded" | "live" | "stalled" | "disconnected";
   /** Currently selected trading symbol */
   activeSymbol: string;
 
@@ -279,6 +302,21 @@ export interface TradingState {
    */
   realtimeCandles: Record<string, Candle[]>;
 
+  /**
+   * SERVER-AUTHORITATIVE CLOSED CANDLES — pushed by the backend's realtime
+   * candle aggregator over the WebSocket (`candle` event on close, plus the
+   * `history_candles` replay on subscribe). Keyed by normalized symbol then
+   * timeframe ("S5" | "S10" | "S15" | "S30" | "M1"). The chart renders these as the
+   * authoritative CLOSED base and overlays the client aggregator's CURRENT
+   * forming bar only (zero server bars → fall back to the resident
+   * prediction/aggregator history).
+   */
+  serverCandles: Record<string, Record<string, Candle[]>>;
+
+  /** Monotonic counter bumped on every server candle upsert / seed — drives
+   *  the chart's swapKey so a newly closed authoritative bar repaints. */
+  serverCandleVersion: number;
+
   /** Monotonic generation counter — incremented on every hard feed reset. */
   dataEpoch: number;
 
@@ -314,8 +352,18 @@ export interface TradingState {
   /** Internal request tracking ID to prevent race conditions */
   _lastRequestId: number;
 
-  /** Currently selected prediction timeframe/interval */
-  selectedTimeframe: string;
+  selectedTimeframe: "S5" | "S10" | "S15" | "S30" | "M1" | "M2" | "M3" | "M5" |
+    "M10" | "M15" | "M30" | "H1" | "H4" | "D1";
+  /** Derived timeframe in seconds (e.g. "M5" → 300). Auto-synced with selectedTimeframe. */
+  selectedTimeframeSeconds: number;
+
+  /**
+   * PREDICTION EXPIRATION (seconds) — Pocket-Option canonical set.
+   * Fully decoupled from `selectedTimeframe`: changing this NEVER touches
+   * the candle build bucket. The chart computes target-candle count as
+   * max(1, min(30, round(selectedExpirationSeconds / selectedTimeframeSeconds))).
+   */
+  selectedExpirationSeconds: number;
 
   /** Predictive lead-time offset (ms) — how far ahead of the external feed the
    *  forming candle is projected. NULL selects the aggregator default (exactly
@@ -355,10 +403,11 @@ export interface TradingState {
 
   // ── Actions ──
   setActiveSymbol: (symbol: string) => void;
+  setFeedStatus: (status: TradingState["feedStatus"]) => void;
   setSelectedTimeframe: (timeframe: string) => void;
   /**
-   * HYDRATION-SAFE persisted-timeframe restore. The store MUST initialize
-   * `selectedTimeframe` deterministically ("1m") so server-rendered markup
+   * HYDRATION-SAFE persisted-timeframe restore. The store initializes
+   * `selectedTimeframe` deterministically ("S5") so server-rendered markup
    * matches the client's first paint; call this once from a mount effect to
    * re-apply the user's localStorage choice with zero hydration drift.
    */
@@ -378,12 +427,12 @@ export interface TradingState {
    * re-projected onto the new lead grid immediately (no seams, no blanks).
    */
   setLeadOffset: (offsetMs: number | null) => void;
-    getPrediction: (
-      symbol: string,
-      timeframe?: string,
-      signal?: AbortSignal,
-      force?: boolean,
-    ) => Promise<void>;
+  getPrediction: (
+    symbol: string,
+    timeframe?: string,
+    signal?: AbortSignal,
+    force?: boolean,
+  ) => Promise<void>;
   addLiveSignal: (signal: SignalData) => void;
   setLiveSignals: (signals: SignalData[]) => void;
   clearError: () => void;
@@ -397,6 +446,15 @@ export interface TradingState {
   replayTicks: (symbol: string, ticks: unknown[]) => void;
   seedAggregatorHistory: (symbol: string, candles: CandleDataPoint[]) => void;
   seedAggregatorPrice: (symbol: string, price: number) => void;
+  // ── Server-authoritative candle actions ──
+  /** Upsert a SINGLE closed candle pushed by the backend (`candle` event). */
+  applyServerCandle: (payload: ServerSettledCandle) => void;
+  /** Seed ONE timeframe's authoritative CLOSED history (`history_candles`). */
+  seedServerCandles: (
+    symbol: string,
+    timeframe: string,
+    candles: Candle[],
+  ) => void;
   getRealtimeSeries: (symbol: string) => Candle[];
   syncAggregatorWallClock: () => void;
   ingestQuantDispatch: (payload: {
@@ -422,6 +480,13 @@ export interface TradingState {
   }) => void;
   // ── Trading Actions ──
   setExpirationSeconds: (seconds: number) => void;
+  /**
+   * Set the PREDICTION expiration (seconds, PO canonical set). This drives
+   * ONLY the target-candle count + target-price horizon on the chart — it
+   * NEVER touches the candle build bucket (`selectedTimeframe`). Non-member
+   * values snap to the nearest PO expiration.
+   */
+  setSelectedExpirationSeconds: (seconds: number) => void;
   executeTrade: (direction: "CALL" | "PUT") => Promise<void>;
   clearTradeResult: () => void;
   /**
@@ -525,58 +590,57 @@ export const useTradingStore = create<TradingState>((set, get) => {
   // ── SINGLETON REAL-TIME CANDLE AGGREGATOR ──
   // Owned by the store so the chart, the AI pipeline, and the timeframe
   // selector all share ONE authoritative OHLCV aggregation engine.
-  const aggregator = new RealtimeCandleAggregator(
-    "1m",
-    {
-      zeroFabrication: true,
-      onCandleClose: (candle, symbol, timeframe) => {
-        // ════════════════════════════════════════════════════════════════
-        // CANDLE CLOSE → ASYNC /predict DISPATCH
-        // Every time a real live candle bucket rolls over, fetch the FastAPI
-        // /predict endpoint for the active symbol and timeframe. Response
-        // updates predictionData + confidence instantly.
-        //
-        // getPrediction() is coalescing + debounced per (symbol, timeframe) at
-        // the STORE level, so even if this fires several times in one tick
-        // (rollover + backfill) only ONE network request is ever issued.
-        // ════════════════════════════════════════════════════════════════
-        const state = useTradingStore.getState();
-        const active = state.activeSymbol;
-        if (active && active === symbol) {
-          void state.getPrediction(active, timeframe);
-        }
-      },
-      onRawBar: (candle, symbol, timeframe) => {
-        tradingAccuracyVerifier.realizeBar({
-          symbol,
-          timeframe,
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
-          timestamp: candle.timestamp,
-        });
-      },
-      onProjection: (event) => {
-        const projection = event.projection;
-        if (!projection) return;
-        tradingAccuracyVerifier.recordProjection({
-          symbol: event.symbol,
-          timeframe: event.timeframe,
-          bucketOpen:
-            projection.bucketOpen > 0 ? projection.bucketOpen : event.geometry.bucketOpen,
-          direction: projection.slopePerMs > 0 ? "BUY" : "SELL",
-          projectionClose: projection.close,
-          projectedHigh: projection.high,
-          projectedLow: projection.low,
-          recordedAt: Date.now(),
-        });
-      },
-      onCandleUpdate: (candle, symbol) => {
-        syncStoreCandle(candle, symbol);
-      },
+  const aggregator = new RealtimeCandleAggregator("M1", {
+    zeroFabrication: true,
+    onCandleClose: (candle, symbol, timeframe) => {
+      // ════════════════════════════════════════════════════════════════
+      // CANDLE CLOSE → ASYNC /predict DISPATCH
+      // Every time a real live candle bucket rolls over, fetch the FastAPI
+      // /predict endpoint for the active symbol and timeframe. Response
+      // updates predictionData + confidence instantly.
+      //
+      // getPrediction() is coalescing + debounced per (symbol, timeframe) at
+      // the STORE level, so even if this fires several times in one tick
+      // (rollover + backfill) only ONE network request is ever issued.
+      // ════════════════════════════════════════════════════════════════
+      const state = useTradingStore.getState();
+      const active = state.activeSymbol;
+      if (active && active === symbol) {
+        void state.getPrediction(active, timeframe);
+      }
     },
-  );
+    onRawBar: (candle, symbol, timeframe) => {
+      tradingAccuracyVerifier.realizeBar({
+        symbol,
+        timeframe,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        timestamp: candle.timestamp,
+      });
+    },
+    onProjection: (event) => {
+      const projection = event.projection;
+      if (!projection) return;
+      tradingAccuracyVerifier.recordProjection({
+        symbol: event.symbol,
+        timeframe: event.timeframe,
+        bucketOpen:
+          projection.bucketOpen > 0
+            ? projection.bucketOpen
+            : event.geometry.bucketOpen,
+        direction: projection.slopePerMs > 0 ? "BUY" : "SELL",
+        projectionClose: projection.close,
+        projectedHigh: projection.high,
+        projectedLow: projection.low,
+        recordedAt: Date.now(),
+      });
+    },
+    onCandleUpdate: (candle, symbol) => {
+      syncStoreCandle(candle, symbol);
+    },
+  });
   // Zero-hop handle for the chart engine's direct live subscription.
   realtimeAggregator = aggregator;
 
@@ -594,12 +658,15 @@ export const useTradingStore = create<TradingState>((set, get) => {
   return {
     // ── State defaults ──
     activeSymbol: DEFAULT_SYMBOL, // "EUR/USD" — strict OTC whitelist default
+    feedStatus: "awaiting_ssid",
     currentPrice: 0,
     lastPriceUpdate: null,
     predictionData: null,
     predictionBySymbol: {},
     candlesCache: {},
     realtimeCandles: {},
+    serverCandles: {},
+    serverCandleVersion: 0,
     dataEpoch: 0,
     lastQuantDispatch: null,
     isLoading: false,
@@ -613,11 +680,12 @@ export const useTradingStore = create<TradingState>((set, get) => {
     _priceVersion: 0,
     _lastRequestId: 0,
     // ── DETERMINISTIC SSR DEFAULT (hydration safety) ──
-    // Reading localStorage during store creation made the SERVER render "1m"
-    // while the CLIENT's first render could restore e.g. "5m" → mismatched
-    // active-timeframe markup → React hydration error. Always start at "1m";
+    // Reading localStorage during store creation made the SERVER render "S5"
+    // while the CLIENT's first render could restore e.g. "M5" → mismatched
+    // active-timeframe markup → React hydration error. Always start at "S5";
     // hydrateSelectedTimeframe() re-applies the persisted value post-mount.
-    selectedTimeframe: "1m",
+    selectedTimeframe: "S5",
+    selectedTimeframeSeconds: 5,
     // ── DETERMINISTIC SSR DEFAULT (hydration safety) ──
     // Same hydration-safe path as selectedTimeframe: the lead-time offset
     // begins at NULL (aggregator default = one selected timeframe ahead) so
@@ -637,6 +705,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
 
     // ── Pocket Option Trading Defaults ──
     expirationSeconds: 60, // 1 minute default
+    selectedExpirationSeconds: 60, // chart expiration = 1 minute default (decoupled from timeframe)
     countdownSeconds: 0,
     isTradeActive: false,
     lastTradeResult: null,
@@ -772,7 +841,12 @@ export const useTradingStore = create<TradingState>((set, get) => {
         get().seedAggregatorHistory(cleanSymbol, cachedHistory);
       }
 
-      get().getPrediction(cleanSymbol, get().selectedTimeframe, undefined, true);
+      get().getPrediction(
+        cleanSymbol,
+        get().selectedTimeframe,
+        undefined,
+        true,
+      );
     },
 
     // ── HYDRATION-SAFE PERSISTED TIMEFRAME RESTORE ──
@@ -791,25 +865,31 @@ export const useTradingStore = create<TradingState>((set, get) => {
     },
 
     setSelectedTimeframe: (timeframe: string) => {
-      const cleanTf = timeframe.trim().toLowerCase();
-      if (!cleanTf) return;
+      const canonical = normalizeTimeframe(timeframe);
+      if (!canonical) return;
 
       // Switching timeframe supersedes any recovery retry queued for the
       // previous (symbol, timeframe) combination. The retry/dedupe keys ride
       // the coerced AI channel (aiTimeframeFor) — a stale retry for the raw
       // sub-minute key would never be cancelled and would re-storm /predict.
       clearPredictionRetry(
-        predictionKey(get().activeSymbol, aiTimeframeFor(get().selectedTimeframe)),
+        predictionKey(
+          get().activeSymbol,
+          aiTimeframeFor(get().selectedTimeframe),
+        ),
       );
 
       try {
-        localStorage.setItem(LS_TIMEFRAME_KEY, cleanTf);
+        localStorage.setItem(LS_TIMEFRAME_KEY, canonical);
       } catch {
         // localStorage may be unavailable
       }
 
+      const tfSeconds = TIMEFRAME_MS[canonical] / 1000;
+
       set((state) => ({
-        selectedTimeframe: cleanTf,
+        selectedTimeframe: canonical,
+        selectedTimeframeSeconds: tfSeconds,
         predictionData: null,
         quoteStreamWaiting: false,
         _priceVersion: state._priceVersion + 1,
@@ -818,16 +898,14 @@ export const useTradingStore = create<TradingState>((set, get) => {
       // ── SYNC AGGREGATOR TIMEFRAME ──
       // Re-bucket the retained real ticks immediately so the chart never
       // blanks and never shows stale bucket widths.
-      if (isTimeframe(cleanTf)) {
-        aggregator.setTimeframe(cleanTf as Timeframe);
-        const norm = (get().activeSymbol || "").trim().toUpperCase();
-        set((s) => ({
-          realtimeCandles: {
-            ...s.realtimeCandles,
-            [norm]: aggregator.getSeries(norm),
-          },
-        }));
-      }
+      aggregator.setTimeframe(canonical);
+      const norm = (get().activeSymbol || "").trim().toUpperCase();
+      set((s) => ({
+        realtimeCandles: {
+          ...s.realtimeCandles,
+          [norm]: aggregator.getSeries(norm),
+        },
+      }));
 
       const currentSymbol = get().activeSymbol;
       if (currentSymbol) {
@@ -838,7 +916,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
             cachedHistory,
           );
         }
-        get().getPrediction(currentSymbol, cleanTf, undefined, true);
+        get().getPrediction(currentSymbol, canonical, undefined, true);
       }
     },
 
@@ -970,7 +1048,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
               (data.confidence_gated ??
                 data.dispatch?.confidence_gated ??
                 data.diagnostics?.confidence_gated ??
-                false) || verificationSnapshot.blocking,
+                false) ||
+              verificationSnapshot.blocking,
             // ── MARKET-WAITING CONTRACT (dynamic floor, passthrough) ──
             market_waiting:
               typeof data.market_waiting === "boolean"
@@ -1022,7 +1101,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
             // the AI response when NO live tick has been observed yet.
             currentPrice:
               state.currentPrice > 0 ? state.currentPrice : data.current_price,
-            lastPriceUpdate: state.currentPrice > 0 ? state.lastPriceUpdate : data.timestamp,
+            lastPriceUpdate:
+              state.currentPrice > 0 ? state.lastPriceUpdate : data.timestamp,
             isLoading: false,
             quoteStreamWaiting: false,
             liveSignals: [liveSignal, ...state.liveSignals].slice(0, 100),
@@ -1172,71 +1252,20 @@ export const useTradingStore = create<TradingState>((set, get) => {
     // ── Pocket Option Trading Actions ──
 
     setExpirationSeconds: (seconds: number) => {
-      // Full expiration range: 1 second (1s) → 10 days (86400s × 10)
-      const validSeconds = [
-        1, 5, 20, 60, 120, 180, 300, 600, 900, 1200, 1500, 1800, 2100, 3600,
-        14400, 86400, 172800, 259200, 432000, 864000,
-      ];
-      if (!validSeconds.includes(seconds)) return;
-      set({ expirationSeconds: seconds });
+      const snapped = snapToNearestExpiration(seconds);
+      // TRADE-ONLY PROPERTY: the expiration duration is a pure execution
+      // parameter (position sizing / countdown / PO expiry). It NEVER touches
+      // the chart timeframe, aggregator buckets or prediction channel — chart
+      // timeframe and trade expiry are fully decoupled (Alpha.5 Pro).
+      set({ expirationSeconds: snapped });
+    },
 
-      // ════════════════════════════════════════════════════════════════════
-      // LINK EXPIRATION → TIMEFRAME: When the user changes the expiration
-      // button (1s-35m+), synchronize the selectedTimeframe so the
-      // prediction engine recomputes targets for the exact duration.
-      // This ensures ATR-based targets, AI signals, and delta percentages
-      // are ALL dynamically recalculated for the chosen horizon.
-      // ════════════════════════════════════════════════════════════════════
-      const secsToTf: Record<number, string> = {
-        1: "1s",
-        5: "5s",
-        20: "20s",
-        60: "1m",
-        120: "2m",
-        180: "3m",
-        300: "5m",
-        600: "10m",
-        900: "15m",
-        1200: "20m",
-        1500: "25m",
-        1800: "30m",
-        2100: "35m+",
-        3600: "1h",
-        14400: "4h",
-        86400: "1d",
-        172800: "2d",
-        259200: "3d",
-        432000: "5d",
-        864000: "10d",
-      };
-      const tf = secsToTf[seconds];
-      if (tf) {
-        try {
-          localStorage.setItem("selected_timeframe", tf);
-        } catch {}
-        set({ selectedTimeframe: tf });
-
-        // ── SYNC AGGREGATOR TIMEFRAME ──
-        // Re-bucket the retained real ticks immediately so the chart
-        // re-renders correct OHLCV bars for the new expiration horizon.
-        if (isTimeframe(tf)) {
-          aggregator.setTimeframe(tf as Timeframe);
-          const norm = (get().activeSymbol || "").trim().toUpperCase();
-          set((s) => ({
-            realtimeCandles: {
-              ...s.realtimeCandles,
-              [norm]: aggregator.getSeries(norm),
-            },
-          }));
-        }
-
-        // Trigger a re-fetch with the new timeframe (user-driven interval
-        // selection — force so the evaluation is immediate).
-        const sym = get().activeSymbol;
-        if (sym) {
-          get().getPrediction(sym, tf, undefined, true);
-        }
-      }
+    setSelectedExpirationSeconds: (seconds: number) => {
+      const snapped = snapToNearestExpiration(seconds);
+      // EXPIRATION-ONLY PROPERTY: this drives ONLY the target-candle count and
+      // target-price horizon on the chart — it NEVER changes the candle build
+      // bucket (`selectedTimeframe`) or the trade execution expiry.
+      set({ selectedExpirationSeconds: snapped });
     },
 
     executeTrade: async (direction: "CALL" | "PUT") => {
@@ -1311,10 +1340,12 @@ export const useTradingStore = create<TradingState>((set, get) => {
         });
         return;
       }
-      if (engineBacked && (predictionData?.confidence ?? 0) < STRICT_TRADE_CONFIDENCE_MIN) {
+      if (
+        engineBacked &&
+        (predictionData?.confidence ?? 0) < STRICT_TRADE_CONFIDENCE_MIN
+      ) {
         set({
-          lastTradeResult:
-            `⛔ Engine signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below the strict 96.5% dispatch floor. Signal execution refused.`,
+          lastTradeResult: `⛔ Engine signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below the strict 96.5% dispatch floor. Signal execution refused.`,
         });
         return;
       }
@@ -1530,7 +1561,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
         .toUpperCase();
       const { activeSymbol } = get();
       const normActive = (activeSymbol || "").toUpperCase();
-      const waitingOnly = direction === null && payload?.market_waiting === true;
+      const waitingOnly =
+        direction === null && payload?.market_waiting === true;
       if (direction === null && !waitingOnly) return;
 
       // Backend WS signals (`new_signal` / `symbol_update`) carry the keys
@@ -1560,7 +1592,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
 
       if (direction && hasPrice) {
         const wsSignalTf = aiTimeframeFor(
-          String(get().selectedTimeframe ?? "1m"),
+          String(get().selectedTimeframe ?? "M1"),
         );
         const wsEmittedAt = (() => {
           const rawNum = Number(payload?.timestamp ?? 0);
@@ -1607,11 +1639,14 @@ export const useTradingStore = create<TradingState>((set, get) => {
               }
             : null;
           return {
-            ...(shouldApply && merged
-              ? { predictionData: merged }
-              : {}),
+            ...(shouldApply && merged ? { predictionData: merged } : {}),
             ...(snapshotKey && merged
-              ? { predictionBySymbol: { ...s.predictionBySymbol, [snapshotKey]: merged } }
+              ? {
+                  predictionBySymbol: {
+                    ...s.predictionBySymbol,
+                    [snapshotKey]: merged,
+                  },
+                }
               : {}),
           };
         }
@@ -1648,9 +1683,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
               };
         }
         return {
-          ...(shouldApply
-            ? { predictionData: mergedPrediction }
-            : {}),
+          ...(shouldApply ? { predictionData: mergedPrediction } : {}),
           ...(snapshotKey
             ? {
                 predictionBySymbol: {
@@ -1660,8 +1693,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
               }
             : {}),
           ...(hasPrice && s.currentPrice <= 0
-              ? { currentPrice: price, lastPriceUpdate: ts }
-              : {}),
+            ? { currentPrice: price, lastPriceUpdate: ts }
+            : {}),
           liveSignals: [
             {
               // Monotonic-counter suffix guarantees uniqueness per session even
@@ -1761,7 +1794,10 @@ export const useTradingStore = create<TradingState>((set, get) => {
 
       const candle = aggregator.ingest(rawTick);
       if (!candle) return;
+      set({ feedStatus: "live" });
     },
+
+    setFeedStatus: (status) => set({ feedStatus: status }),
 
     /**
      * Switch the aggregator timeframe — re-buckets retained real ticks
@@ -1828,8 +1864,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
     hardResetLiveData: () => {
       try {
         aggregator.reset();
-      } catch {
-      }
+      } catch {}
       tradingAccuracyVerifier.reset();
       liveSignatures.clear();
       lastRealtimePublish.clear();
@@ -1840,20 +1875,22 @@ export const useTradingStore = create<TradingState>((set, get) => {
           aggregator.registerSymbols([norm]);
           aggregator.setActiveSymbol(norm);
         }
-      } catch {
-      }
+      } catch {}
       set((s) => ({
         candlesCache: {},
         realtimeCandles: {},
+        serverCandles: {},
         predictionData: null,
         predictionBySymbol: {},
         currentPrice: 0,
+        feedStatus: "awaiting_ssid",
         lastPriceUpdate: null,
         lastQuantDispatch: null,
         quoteStreamWaiting: false,
         isLoading: false,
         error: null,
         _priceVersion: s._priceVersion + 1,
+        serverCandleVersion: s.serverCandleVersion + 1,
         dataEpoch: s.dataEpoch + 1,
       }));
     },
@@ -1886,9 +1923,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
       lastPublishedBucket.delete(norm);
       const current = get().currentPrice;
       const replaysActive = (get().activeSymbol || "").toUpperCase() === norm;
-      const seededPrice = seeded.live && seeded.live.close > 0
-        ? seeded.live.close
-        : 0;
+      const seededPrice =
+        seeded.live && seeded.live.close > 0 ? seeded.live.close : 0;
       set((s) => ({
         currentPrice:
           replaysActive && current <= 0 && seededPrice > 0
@@ -1964,6 +2000,132 @@ export const useTradingStore = create<TradingState>((set, get) => {
         },
         _priceVersion: s._priceVersion + 1,
       }));
+    },
+
+    // ── Server-authoritative closed candles ──
+
+    /**
+     * Upsert a single CLOSED candle pushed by the backend `candle` event.
+     * Only `closed === true` payloads are accepted (the server owns closed
+     * bars; the client aggregator paints only the forming row). Replaces any
+     * prior candle at the same bucket timestamp, keeps the per-timeframe list
+     * sorted, caps it at 512 rows, and bumps serverCandleVersion so the chart
+     * swapKey repaints the authoritative bar.
+     */
+    applyServerCandle: (payload: ServerSettledCandle) => {
+      if (!payload || payload.closed !== true) return;
+      const symbol = (payload.symbol || "").trim().toUpperCase();
+      const tf = normalizeTimeframe(payload.timeframe);
+      if (!symbol || !tf) return;
+      const ts = Number(payload.timestamp);
+      const o = Number(payload.open);
+      const h = Number(payload.high);
+      const l = Number(payload.low);
+      const c = Number(payload.close);
+      if (
+        !Number.isFinite(ts) ||
+        ts <= 0 ||
+        !Number.isFinite(o) ||
+        !Number.isFinite(h) ||
+        !Number.isFinite(l) ||
+        !Number.isFinite(c) ||
+        c <= 0
+      ) {
+        return;
+      }
+      const candle: Candle = {
+        timestamp: ts,
+        open: o,
+        high: h,
+        low: l,
+        close: c,
+        volume:
+          Number.isFinite(payload.volume) && (payload.volume as number) > 0
+            ? (payload.volume as number)
+            : 0,
+      };
+      set((s) => {
+        const bySym = s.serverCandles[symbol] ?? {};
+        const list = bySym[tf] ?? [];
+        const idx = list.findIndex((row) => row.timestamp === ts);
+        const next =
+          idx >= 0
+            ? [...list.slice(0, idx), candle, ...list.slice(idx + 1)]
+            : [...list, candle].sort((a, b) => a.timestamp - b.timestamp);
+        const capped = next.slice(-512);
+        return {
+          serverCandles: {
+            ...s.serverCandles,
+            [symbol]: { ...bySym, [tf]: capped },
+          },
+          serverCandleVersion: s.serverCandleVersion + 1,
+        };
+      });
+    },
+
+    /**
+     * Seed ONE timeframe's authoritative CLOSED history for a symbol from the
+     * `history_candles` replay burst. The backend emits the EXACT resolution
+     * requested on subscribe (`symbol` + active chart timeframe), so a chart
+     * timeframe switch instantly re-seeds the selected bucket grid. Replaces
+     * (rather than merges) the per-timeframe list so a stale cached series can
+     * never linger ahead of the server truth. Silently ignores unknown
+     * timeframes and non-finite candles.
+     */
+    seedServerCandles: (
+      symbol: string,
+      timeframe: string,
+      candles: Candle[],
+    ) => {
+      const norm = (symbol || "").trim().toUpperCase();
+      const tf = normalizeTimeframe(timeframe);
+      if (!norm || !tf) return;
+      if (!Array.isArray(candles) || candles.length === 0) return;
+
+      const mapped: Candle[] = [];
+      for (const r of candles) {
+        if (!r) continue;
+        const ts = Number(r.timestamp);
+        const o = Number(r.open);
+        const h = Number(r.high);
+        const l = Number(r.low);
+        const c = Number(r.close);
+        if (
+          !Number.isFinite(ts) ||
+          ts <= 0 ||
+          !Number.isFinite(o) ||
+          !Number.isFinite(h) ||
+          !Number.isFinite(l) ||
+          !Number.isFinite(c) ||
+          c <= 0
+        ) {
+          continue;
+        }
+        mapped.push({
+          timestamp: ts,
+          open: o,
+          high: h,
+          low: l,
+          close: c,
+          volume:
+            Number.isFinite(r.volume) && (r.volume as number) > 0
+              ? (r.volume as number)
+              : 0,
+        });
+      }
+      if (mapped.length === 0) return;
+      mapped.sort((a, b) => a.timestamp - b.timestamp);
+
+      set((s) => {
+        const prev = s.serverCandles[norm] ?? {};
+        return {
+          serverCandles: {
+            ...s.serverCandles,
+            [norm]: { ...prev, [tf]: mapped.slice(-512) },
+          },
+          serverCandleVersion: s.serverCandleVersion + 1,
+        };
+      });
     },
 
     /**
@@ -2045,6 +2207,8 @@ export const selectLiveSignals = (state: TradingState) => state.liveSignals;
 export const selectPriceVersion = (state: TradingState) => state._priceVersion;
 export const selectSelectedTimeframe = (state: TradingState) =>
   state.selectedTimeframe;
+export const selectSelectedExpiration = (state: TradingState) =>
+  state.selectedExpirationSeconds;
 export const selectSetSelectedTimeframe = (state: TradingState) =>
   state.setSelectedTimeframe;
 export const selectSymbolsList = (state: TradingState) => state.symbolsList;
@@ -2123,3 +2287,12 @@ export const selectRealtimeSeriesForSymbol = (
   }
   return [];
 };
+
+/**
+ * Read the live tick-vs-bucket parity telemetry for any symbol — the
+ * aggregation layer's tick count vs bucket write count. Used by the
+ * WebSocket orchestrator's heartbeat assertion to detect flat-lining
+ * symbols (raw ticks arriving but no bucket increment).
+ */
+export const getAggregatorParityDebug = (symbol?: string) =>
+  realtimeAggregator.getDebug(symbol);

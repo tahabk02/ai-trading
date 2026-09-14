@@ -55,7 +55,7 @@ import asyncio
 import time as _time
 
 from app.services.signal_generator import SignalGenerator, generate_unbiased_prediction
-from app.services.ml_predictor import predict_with_rf
+from app.services.ml_predictor import predict_with_rf, _CPU_EXECUTOR
 from app.services.quant_matrix import (
     evaluate_quant_matrix,
     project_target,
@@ -105,6 +105,66 @@ PREDICT_PIPELINE_TIMEOUT_SECONDS = 120.0
 # live ticks accumulate. Below-floor requests get a clean HTTP 400 — never
 # synthetic padding.
 MINIMUM_REQUIRED_BARS = 100
+
+
+def _timeframe_ms(timeframe: str) -> int:
+    units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+    token = str(timeframe or "1m").strip().lower()
+    if token.endswith("m"):
+        return int(token[:-1]) * units["m"]
+    if token.endswith("h"):
+        return int(token[:-1]) * units["h"]
+    if token.endswith("d"):
+        return int(token[:-1]) * units["d"]
+    raise ValueError(f"Unsupported prediction timeframe: {timeframe}")
+
+
+def _timestamp_ms(value: object) -> int:
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        return int(raw * 1000 if raw < 1_000_000_000_000 else raw)
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return int(parsed.timestamp() * 1000)
+    raise ValueError("prediction anchor candle has no usable timestamp")
+
+
+def build_future_candles(
+    *,
+    candles: List[Dict[str, Any]],
+    current_price: float,
+    target_price: float,
+    atr: float,
+    bid: Optional[float],
+    ask: Optional[float],
+    timeframe: str,
+    symbol_digits: int,
+) -> List[Dict[str, Any]]:
+    """Build transparent model projection bars from real tape-derived inputs."""
+    if not candles or current_price <= 0 or target_price <= 0 or atr <= 0:
+        return []
+    interval_ms = _timeframe_ms(timeframe)
+    anchor_ms = _timestamp_ms(candles[-1].get("timestamp"))
+    anchor_ms = (anchor_ms // interval_ms) * interval_ms
+    horizon = max(1, round(interval_ms / 60_000))
+    spread = abs(float(ask) - float(bid)) if bid and ask and ask >= bid else 0.0
+    wick = max(atr * 0.5, spread * 0.5)
+    out: List[Dict[str, Any]] = []
+    previous_close = current_price
+    for index in range(1, horizon + 1):
+        close = target_price if index == horizon else current_price + (target_price - current_price) * index / horizon
+        open_price = previous_close
+        out.append({
+            "timestamp": anchor_ms + index * interval_ms,
+            "open": round(open_price, symbol_digits),
+            "high": round(max(open_price, close) + wick, symbol_digits),
+            "low": round(max(0.0, min(open_price, close) - wick), symbol_digits),
+            "close": round(close, symbol_digits),
+            "volume": 0.0,
+            "projected": True,
+        })
+        previous_close = close
+    return out
 
 # ── Per-symbol asyncio.Lock registry ──
 _symbol_locks: Dict[str, asyncio.Lock] = {}
@@ -289,7 +349,8 @@ async def tick_signal(data: Dict[str, Any]):
                 },
             )
 
-        verdict = evaluate_live_tick_signal(
+        verdict = await asyncio.to_thread(
+            evaluate_live_tick_signal,
             prices=eval_array,
             tick=tick,
             highs=highs,
@@ -459,12 +520,15 @@ async def predict_signal(data: PredictRequest):
     #     else the real tick-position proxy) is all aligned. Everything below is
     #     corroboration/UI.
     try:
-        verdict = evaluate_quant_matrix(
-            candles=candles_raw,
-            live_price=live_price,
-            timeframe=timeframe,
-            bid=bid,
-            ask=ask,
+        verdict = await asyncio.get_event_loop().run_in_executor(
+            _CPU_EXECUTOR,
+            evaluate_quant_matrix,
+            candles_raw,
+            live_price,
+            timeframe,
+            None,   # order_book_imbalance (not forwarded)
+            bid,
+            ask,
         )
     except ValueError as ve:
         raise HTTPException(
@@ -532,18 +596,30 @@ async def predict_signal(data: PredictRequest):
     target_price, distance = project_target(
         verdict.direction, current_price, atr_now, timeframe, digits
     )
+    future_candles = build_future_candles(
+        candles=candles_raw,
+        current_price=current_price,
+        target_price=target_price,
+        atr=atr_now,
+        bid=data.bid,
+        ask=data.ask,
+        timeframe=timeframe,
+        symbol_digits=digits,
+    )
 
     total_ms = (_time.perf_counter() - t0) * 1000
 
+    emitted_signal = None if verdict.market_waiting else verdict.direction
     response = {
         "symbol": symbol,
-        "signal": verdict.direction,
+        "signal": emitted_signal,
         "confidence": verdict.confidence,
-        "high_confidence_alert": verdict.high_confidence_alert,
+        "high_confidence_alert": verdict.high_confidence_alert and emitted_signal is not None,
         "target_price": target_price,
         "current_price": round(current_price, digits),
         "atr": round(atr_now, 8),
         "target_distance": distance,
+        "future_candles": future_candles,
         "volatility_pct": round((atr_now / current_price) * 100.0, 4),
         "ml_probability": round(verdict.confidence / 100.0, 4),
         # GENUINE factor agreement (real alignment fraction 0..1). The old

@@ -144,6 +144,14 @@ class LiveTickSignalDispatcher {
   private async dispatch(symbol: string): Promise<void> {
     this.lastSentAt.set(symbol, Date.now());
 
+    // ── SUBSCRIBER GATE ──
+    // Only spend AI Engine CPU on symbols an actual client is watching. Boot
+    // auto-starts all 34 OTC pairs, so without this gate every pair issues a
+    // full 10-book live-quant evaluation once/second — a guaranteed 34 req/sec
+    // flood that starves /predict and the socket loop. With it, only the
+    // active chart pair(s) evaluate.
+    if (!websocketService.hasActiveSubscribers(symbol)) return;
+
     const window = realtimeTickBuffer.getRecentWindow(
       symbol,
       FORWARD_WINDOW_TICKS,

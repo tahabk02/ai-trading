@@ -31,6 +31,16 @@
     --text-secondary: #94a3b8;
   }
 
+  /* ── VIEWPORT & OVERFLOW LOCK ── */
+  html {
+    height: 100%;
+    overflow: hidden;
+    -webkit-text-size-adjust: 100%;
+    -moz-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    overscroll-behavior: none;
+  }
+
   html,
   body {
     height: 100%;
@@ -45,6 +55,45 @@
       system-ui,
       -apple-system,
       sans-serif;
+    box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overscroll-behavior: none;
+    /* safe-area insets for notched phones (iOS/Android) */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* ── Universal box-sizing on mobile ── */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  /* ── Prevent text overflow on mobile ── */
+  img,
+  svg,
+  video,
+  canvas,
+  audio,
+  iframe,
+  embed,
+  object {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* ── Tap highlight removal for all interactive elements ── */
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  [role="button"] {
+    -webkit-tap-highlight-color: transparent;
   }
 
   /* ── Elite dark terminal selection ── */
@@ -244,6 +293,12 @@
     .sidebar-nav-link {
       @apply min-h-[48px] text-sm;
     }
+    /* Touch-friendly tap targets (44px minimum per WCAG/Apple HIG) */
+    button,
+    [role="button"],
+    a {
+      min-height: 44px;
+    }
   }
 
   /* ── Trading panel: hidden on mobile (below md) ── */
@@ -258,5 +313,13 @@
     transition:
       width 0.3s ease-in-out,
       opacity 0.3s ease-in-out;
+  }
+
+  /* ── Safe area padding for notched devices ── */
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top);
   }
 }

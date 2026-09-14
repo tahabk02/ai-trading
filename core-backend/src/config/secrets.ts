@@ -19,7 +19,7 @@ export const secrets = {
   NODE_ENV: process.env.NODE_ENV || "development",
 
   // ── CORS ──
-  CORS_ORIGIN: process.env.CORS_ORIGIN || "*",
+  CORS_ORIGIN: process.env.CORS_ORIGIN || "",
 
   // ── JWT ──
   JWT_SECRET:

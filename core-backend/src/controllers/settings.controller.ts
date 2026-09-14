@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { settingsService } from "../services/settings.service";
 import { logger } from "../utils/logger";
+import { SERVER_CANDLE_TFS } from "../services/realtimeCandleAggregator.service";
 
 /**
  * Stable default user ID used when no JWT authentication is present.
@@ -54,21 +55,14 @@ export const updateSettings = async (req: Request, res: Response) => {
     const updates: Record<string, unknown> = {};
 
     if (timeframe !== undefined) {
-      const validTfs = [
-        "1m",
-        "2m",
-        "3m",
-        "5m",
-        "10m",
-        "15m",
-        "20m",
-        "25m",
-        "30m",
-        "35m+",
-        "1h",
-        "4h",
-        "1d",
-      ];
+      // Single source of truth: the server's authoritative multi-resolution
+      // bucket grid (1s / 5s / M10 / M11 / M20 / M30 / 1m … 35m+ / H1 / H4 /
+      // 1d … 10d). The settings page doubles as the persistent default CHART
+      // timeframe, so it must accept every resolution the aggregator serves —
+      // otherwise persisting a sub-minute M-interval (or a 2d–10d frame) that
+      // the UI offers would 400 as a "stale" rejection. Trade expiry lives in
+      // a separate store and never rides this wire.
+      const validTfs = [...SERVER_CANDLE_TFS];
       if (!validTfs.includes(timeframe)) {
         return res.status(400).json({
           error: "Validation Error",

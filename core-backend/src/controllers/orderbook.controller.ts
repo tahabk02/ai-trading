@@ -31,6 +31,55 @@ import { logger } from "../utils/logger";
 import { symbolRegistry } from "../services/symbolRegistry.service";
 import { forexDataService } from "../services/forexData.service";
 
+/**
+ * Health ledger for GET /health/orderbook — records the last outcome of every
+ * /orderbook call (latency + failure detail) and drives the health endpoint so
+ * operators can see WHY the order book is slow/down without hitting it.
+ */
+export const orderbookHealth = {
+  last_latency_ms: 0,
+  last_error: null as string | null,
+  last_ok_ts: null as number | null,
+  recordStart(): void {
+    this.last_latency_ms = 0;
+  },
+  recordOk(latencyMs: number): void {
+    this.last_latency_ms = latencyMs;
+    this.last_error = null;
+    this.last_ok_ts = Date.now();
+  },
+  recordError(latencyMs: number, error: string): void {
+    this.last_latency_ms = latencyMs;
+    this.last_error = error;
+  },
+};
+
+/** Per-request upstream cap. The axios client timeout is 5s; the controller
+ *  MUST bound the whole fork (spot + candles) at 3s so a dead upstream returns
+ *  a JSON 504 instead of letting a proxy respond with a bare 502. */
+const UPSTREAM_TIMEOUT_MS = 3_000;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`orderbook_upstream_timeout after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 // Known daily volatility per pair (used ONLY to scale the L1 spread aroma,
 // the ATR-derived half-spread relative to the live rate).
 const PAIR_SPECS: Record<string, { base: string; quote: string }> = {
@@ -79,17 +128,46 @@ export const getOrderBook = async (req: Request, res: Response) => {
 
   const spec = PAIR_SPECS[normalizedSymbol];
   const t0 = Date.now();
+  orderbookHealth.recordStart();
 
   try {
-    // ── Fetch REAL live spot + REAL historical candles in parallel ──
-    const [spotResult, barResult] = await Promise.all([
-      forexDataService.getLiveSpot(normalizedSymbol),
-      forexDataService.getHistoricalCandles(normalizedSymbol, "1d", 60),
-    ]);
+    // ── Fetch REAL live spot + REAL historical candles in parallel, bounded
+    //    by a hard 3s cap. On timeout → 504 JSON (never a bare proxy 502).
+    let spotResult: Awaited<ReturnType<typeof forexDataService.getLiveSpot>>;
+    let barResult: Awaited<
+      ReturnType<typeof forexDataService.getHistoricalCandles>
+    >;
+    try {
+      [spotResult, barResult] = await withTimeout(
+        Promise.all([
+          forexDataService.getLiveSpot(normalizedSymbol),
+          forexDataService.getHistoricalCandles(normalizedSymbol, "1d", 60),
+        ]),
+        UPSTREAM_TIMEOUT_MS,
+      );
+    } catch (cause) {
+      const elapsed = Date.now() - t0;
+      const isTimeout = /timeout/i.test(
+        cause instanceof Error ? cause.message : String(cause),
+      );
+      orderbookHealth.recordError(elapsed, String(cause));
+      return res.status(isTimeout ? 504 : 502).json({
+        error: isTimeout ? "orderbook_timeout" : "orderbook_upstream",
+        symbol: normalizedSymbol,
+        retryAfterMs: isTimeout ? 1000 : undefined,
+        message: isTimeout
+          ? "Upstream forex rate pipeline exceeded the 3s order-book deadline."
+          : "Upstream forex rate pipeline failed.",
+        detail: cause instanceof Error ? cause.message : String(cause),
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     if (!spotResult.success || spotResult.price == null) {
+      const elapsed = Date.now() - t0;
+      orderbookHealth.recordError(elapsed, spotResult.error || "no live rate");
       return res.status(502).json({
-        error: "Failed to fetch order book data — no live OTC rate",
+        error: "orderbook_upstream",
         symbol: normalizedSymbol,
         message:
           spotResult.error ||
@@ -135,6 +213,8 @@ export const getOrderBook = async (req: Request, res: Response) => {
       elapsedMs: Date.now() - t0,
     });
 
+    orderbookHealth.recordOk(Date.now() - t0);
+
     return res.json({
       symbol: normalizedSymbol,
       source: "forex_otc",
@@ -152,6 +232,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
     });
   } catch (error) {
     const elapsed = Date.now() - t0;
+    orderbookHealth.recordError(elapsed, error instanceof Error ? error.message : String(error));
     logger.error("[OrderBook] Failed to fetch OTC order book data", {
       symbol: normalizedSymbol,
       error: error instanceof Error ? error.message : String(error),
@@ -160,7 +241,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
 
     // NEVER return synthetic data — just propagate the error
     return res.status(502).json({
-      error: "Order book data unavailable",
+      error: "orderbook_upstream",
       symbol: normalizedSymbol,
       message:
         "Could not fetch real OTC order book data from the market data pipeline.",

@@ -12,6 +12,7 @@ import {
 } from "@/utils/format";
 import apiClient, { type PredictionResponse } from "@/services/api";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
+import { searchSymbolUniverse } from "@/constants/symbols";
 
 export interface PredictiveIntelligenceProps {
   symbol?: string;
@@ -83,26 +84,20 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
   }
 
   const tfOptions = [
-    { value: "1s", label: "1s" },
-    { value: "5s", label: "5s" },
-    { value: "20s", label: "M20" },
-    { value: "1m", label: "1m" },
-    { value: "2m", label: "2m" },
-    { value: "3m", label: "3m" },
-    { value: "5m", label: "5m" },
-    { value: "10m", label: "10m" },
-    { value: "15m", label: "15m" },
-    { value: "20m", label: "20m" },
-    { value: "25m", label: "25m" },
-    { value: "30m", label: "30m" },
-    { value: "35m+", label: "35m+" },
-    { value: "1h", label: "1h" },
-    { value: "4h", label: "4h" },
-    { value: "1d", label: "1d" },
-    { value: "2d", label: "2d" },
-    { value: "3d", label: "3d" },
-    { value: "5d", label: "5d" },
-    { value: "10d", label: "10d" },
+    { value: "S5", label: "S5" },
+    { value: "S10", label: "S10" },
+    { value: "S15", label: "S15" },
+    { value: "S30", label: "S30" },
+    { value: "M1", label: "M1" },
+    { value: "M2", label: "M2" },
+    { value: "M3", label: "M3" },
+    { value: "M5", label: "M5" },
+    { value: "M10", label: "M10" },
+    { value: "M15", label: "M15" },
+    { value: "M30", label: "M30" },
+    { value: "H1", label: "H1" },
+    { value: "H4", label: "H4" },
+    { value: "D1", label: "D1" },
   ];
 
   if (!mounted) {
@@ -407,14 +402,29 @@ function SymbolSearchInput() {
   }, []);
 
   const doSearch = useCallback(async (q: string) => {
+    const whitelist = searchSymbolUniverse(q, 12);
     setLoading(true);
     try {
       const data = await apiClient.getSymbols(q || undefined, undefined, 15);
-      setResults(data.symbols);
-      setIsOpen(data.symbols.length > 0 && isFocusedRef.current);
+      const merged = new Map<string, { symbol: string; name: string; type: string }>();
+      for (const w of whitelist) merged.set(w.symbol.toUpperCase(), w);
+      for (const r of data.symbols) {
+        if (!merged.has(r.symbol.toUpperCase())) {
+          merged.set(r.symbol.toUpperCase(), {
+            symbol: r.symbol,
+            name: r.name ?? r.symbol,
+            type: r.type,
+          });
+        }
+      }
+      const list = Array.from(merged.values()).slice(0, 15);
+      setResults(list);
+      setIsOpen(list.length > 0 && isFocusedRef.current);
     } catch {
-      setResults([]);
-      setIsOpen(false);
+      // Backend /symbols unreachable / timing out / 400-504 — the strict
+      // whitelist keeps search fully alive client-side, no fabricated pairs.
+      setResults(whitelist);
+      setIsOpen(whitelist.length > 0 && isFocusedRef.current);
     } finally {
       setLoading(false);
     }

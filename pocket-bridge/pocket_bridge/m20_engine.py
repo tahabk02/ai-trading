@@ -73,19 +73,32 @@ class M20Candle:
     last_tick_ts: Optional[int] = None
 
     def to_dict(self) -> Dict:
+        """Relay-ready dict with NUMBER primary fields + ``*_exact`` string
+        (full Decimal precision) so the Node client's ``typeof price ===
+        "number"`` contract never silently drops a frame (zero-drop L1)."""
+        open_exact = format(self.open, "f")
+        high_exact = format(self.high, "f")
+        low_exact = format(self.low, "f")
+        close_exact = format(self.close, "f")
+        volume_exact = format(self.volume, "f") if self.volume is not None else None
         return {
             "symbol": self.symbol,
             "time": self.time,
-            "open": format(self.open, "f"),
-            "high": format(self.high, "f"),
-            "low": format(self.low, "f"),
-            "close": format(self.close, "f"),
+            "open": float(open_exact),
+            "high": float(high_exact),
+            "low": float(low_exact),
+            "close": float(close_exact),
+            "open_exact": open_exact,
+            "high_exact": high_exact,
+            "low_exact": low_exact,
+            "close_exact": close_exact,
             "closed": self.closed,
             "asset_type": self.asset_type,
             "ts_utc": self.ts_utc,
             "ts_ms": self.ts_ms,
             "tick_count": self.tick_count,
-            "volume": format(self.volume, "f") if self.volume is not None else None,
+            "volume": float(volume_exact) if volume_exact is not None else None,
+            "volume_exact": volume_exact,
             "is_gap": self.is_gap,
             "is_synthetic": self.is_synthetic,
             "is_otc": self.is_otc,
@@ -163,11 +176,11 @@ class SymbolFeed:
         bid: Optional[Decimal] = None,
         ask: Optional[Decimal] = None,
         volume: Optional[Decimal] = None,
-    ) -> Optional[M20Candle]:
+    ) -> List[M20Candle]:
         """Ingest one raw tick.
 
-        Returns the candle that just closed (if the tick advanced to a new
-        bucket), or ``None`` while the forming bucket is simply updated.
+        Returns every candle that closed as a result of this tick (in order),
+        or ``[]`` while the forming bucket is simply updated.
         """
         if price is None or price <= 0 or ts_ms <= 0:
             return None
@@ -183,13 +196,25 @@ class SymbolFeed:
         self.max_seen_ts = max(self.max_seen_ts or ts_ms, ts_ms)
         self.pending.append((ts_ms, price, volume))
         self.pending.sort(key=lambda item: item[0])
-        return self.flush_ready()
+        candles = self.flush_ready()
+        # The hold MUST always reflect the newest accepted raw print,
+        # independent of bucket state — a single sparse tick must still author
+        # a held price so the handshake / forming-gap path is never starved
+        # (zero-drop last-valid-price hold).
+        self.last_valid_price = price
+        self.last_valid_at = ts_ms
+        return candles
 
-    def flush_ready(self) -> Optional[M20Candle]:
+    def flush_ready(self) -> List[M20Candle]:
+        """Finalize every bucket whose close boundary the reorder watermark has
+        cleared, in chronological order. Returns ALL candles that closed with
+        this flush (zero-drop emit: a fast tape that advances through several
+        buckets in one call must stream EVERY closed candle, not just the most
+        recent one as the old single-return API did)."""
         if self.max_seen_ts is None:
-            return None
+            return []
         watermark = self.max_seen_ts - self.reorder_ms
-        closed_candle: Optional[M20Candle] = None
+        closed_candles: List[M20Candle] = []
         while self.pending and self.pending[0][0] <= watermark:
             ts_ms, price, volume = self.pending[0]
             bucket_start = (ts_ms // self.interval_ms) * self.interval_ms
@@ -226,7 +251,8 @@ class SymbolFeed:
             self._append_closed(closed_candle)
             self.finalized_before = self.current.start_ms + self.interval_ms
             self.current = None
-        return closed_candle
+            closed_candles.append(closed_candle)
+        return closed_candles
 
     def _append_closed(self, candle: M20Candle) -> None:
         self.history.append(candle)
@@ -239,14 +265,22 @@ class SymbolFeed:
         The close always equals the most recent valid tick price; when no new
         tick arrived since the window opened, ``close`` is the *held*
         previous valid price (never a static default).
+
+        ZERO-DROP view: ticks still inside the reorder window (pending, not yet
+        flushed into the open bucket) are merged into the forming candle for
+        the same bucket — the newest prints are never hidden from the chart.
         """
         preview = self._preview_bucket()
-        if self.current is None and preview is not None:
-            return preview.to_candle(
-                self.symbol,
-                closed=False,
-                asset_type=self.asset_type,
-                interval_ms=self.interval_ms,
+        if preview is not None and (
+            self.current is None or preview.start_ms >= self.current.start_ms
+        ):
+            return self._hold_render(
+                preview.to_candle(
+                    self.symbol,
+                    closed=False,
+                    asset_type=self.asset_type,
+                    interval_ms=self.interval_ms,
+                )
             )
         if self.current is None:
             if self.last_valid_price is None or self.last_valid_at is None:
@@ -271,25 +305,29 @@ class SymbolFeed:
             self.symbol, closed=False, asset_type=self.asset_type,
             interval_ms=self.interval_ms,
         )
-        if self.last_valid_price is not None:
-            candle = M20Candle(
-                symbol=candle.symbol,
-                time=candle.time,
-                open=candle.open,
-                high=candle.high,
-                low=candle.low,
-                close=self.last_valid_price,
-                closed=False,
-                asset_type=self.asset_type,
-                ts_utc=candle.ts_utc,
-                ts_ms=candle.ts_ms,
-                tick_count=candle.tick_count,
-                volume=candle.volume,
-                is_otc=self.asset_type == "otc",
-                first_tick_ts=candle.first_tick_ts,
-                last_tick_ts=candle.last_tick_ts,
-            )
-        return candle
+        return self._hold_render(candle)
+
+    def _hold_render(self, candle: M20Candle) -> M20Candle:
+        """Apply the held last-valid-price close onto a forming candle."""
+        if self.last_valid_price is None:
+            return candle
+        return M20Candle(
+            symbol=candle.symbol,
+            time=candle.time,
+            open=candle.open,
+            high=candle.high,
+            low=candle.low,
+            close=self.last_valid_price,
+            closed=False,
+            asset_type=self.asset_type,
+            ts_utc=candle.ts_utc,
+            ts_ms=candle.ts_ms,
+            tick_count=candle.tick_count,
+            volume=candle.volume,
+            is_otc=self.asset_type == "otc",
+            first_tick_ts=candle.first_tick_ts,
+            last_tick_ts=candle.last_tick_ts,
+        )
 
     def _preview_bucket(self) -> Optional[_Bucket]:
         if not self.pending:
@@ -327,6 +365,10 @@ class SymbolFeed:
             "closed_candles": closed,
             "forming": forming.to_dict() if forming else None,
             "last_valid_price": (
+                float(format(self.last_valid_price, "f"))
+                if self.last_valid_price is not None else None
+            ),
+            "last_valid_price_exact": (
                 format(self.last_valid_price, "f")
                 if self.last_valid_price is not None else None
             ),
@@ -403,15 +445,34 @@ class M20Engine:
         ask: Decimal | str | float | None = None,
         volume: Decimal | str | float | None = None,
     ) -> Optional[M20Candle]:
-        """Thread-safe ingest of one raw tick for a symbol.
+        """Thread-safe ingest of one raw tick (single-candle view).
 
-        Returns the candle that just closed on bucket rollover (or ``None``
-        while the forming bucket is simply updated) so callers can relay the
-        authoritative closed OHLC event in real time — not only via snapshots.
+        Returns the LAST candle closed by this tick (or ``None``). Prefer
+        :meth:`handle_tick_all` from real-time hot paths so every closed bucket
+        is streamed, never just the most recent one.
+        """
+        candles = self.handle_tick_all(symbol, price, ts_ms, bid, ask, volume)
+        return candles[-1] if candles else None
+
+    def handle_tick_all(
+        self,
+        symbol: str,
+        price: Decimal | str | float,
+        ts_ms: int,
+        bid: Decimal | str | float | None = None,
+        ask: Decimal | str | float | None = None,
+        volume: Decimal | str | float | None = None,
+    ) -> List[M20Candle]:
+        """Thread-safe ingest of one raw tick (zero-drop list view).
+
+        Returns EVERY candle closed by this tick in chronological order so
+        callers can relay the authoritative closed OHLC events in real time —
+        a fast tape that crosses several bucket boundaries in one tick must
+        emit each closed bucket, not only the last one.
         """
         feed = self.feeds.get(symbol)
         if feed is None:
-            return None
+            return []
         with self._lock:
             try:
                 decimal_price = Decimal(str(price))
@@ -419,7 +480,7 @@ class M20Engine:
                 decimal_ask = Decimal(str(ask)) if ask is not None else None
                 decimal_volume = Decimal(str(volume)) if volume is not None else None
             except Exception:
-                return None
+                return []
             return feed.push_tick(
                 decimal_price,
                 int(ts_ms),

@@ -248,8 +248,25 @@ class RealtimeTickBufferService {
   }
 
   /** ISO timestamp of the last genuine tick for a symbol, or undefined. */
+  /**
+   * The most recent REAL tick timestamp observed for a symbol, ISO string, or
+   * undefined when no genuine tick has been seen yet.
+   */
   public getLastTickAt(symbol: string): string | undefined {
     return this.lastTickAt.get((symbol || "").trim().toUpperCase());
+  }
+
+  /**
+   * ISO timestamp of the newest genuine tick across ALL symbols, or undefined
+   * when no tick has ever been observed. Grounds the `feed_status` payload's
+   * `last_tick_ts` on the REAL tape — never a fabricated clock.
+   */
+  public getGlobalLastTickAt(): string | undefined {
+    let latest: string | undefined;
+    for (const iso of this.lastTickAt.values()) {
+      if (!latest || iso > latest) latest = iso;
+    }
+    return latest;
   }
 
   /**

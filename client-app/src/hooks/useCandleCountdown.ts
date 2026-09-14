@@ -71,6 +71,18 @@ export function useCandleCountdown(
     const readAggregator = () => {
       const agg = aggregatorRef.current;
       if (!agg) return null;
+      // Preferred path (MASTER MISSION part 7.2): the explicit grid formula
+      // candleCloseMs = liveTipBucketMs + timeframeMs, remaining = close − now.
+      const cc = agg.getLiveCandleClose?.();
+      if (cc) {
+        const bw = cc.timeframeMs > 0 ? cc.timeframeMs : 60_000;
+        const remainMs = cc.remainingMs;
+        return {
+          remainMs,
+          progress: Math.min(1, Math.max(0, (bw - remainMs) / bw)),
+          bw,
+        };
+      }
       const geo = agg.getBoundary();
       if (typeof geo?.boundaryIn !== "number") return null;
       const bw = geo.bucketMs > 0 ? geo.bucketMs : 60_000;

@@ -4,6 +4,10 @@ import React, { useMemo, useState, useEffect } from "react";
 import { useTradingStore } from "@/store/useTradingStore";
 import { useLangContext } from "@/hooks/useLangContext";
 import {
+  buildSignalView,
+  SIGNAL_CONFIDENCE_THRESHOLD,
+} from "@/lib/realtimeCandleAggregator";
+import {
   Brain,
   TrendingUp,
   TrendingDown,
@@ -43,7 +47,16 @@ export const AIExplanation: React.FC = () => {
     setIsMounted(true);
   }, []);
 
-  const signal = predictionData?.signal ?? null;
+  // ── SHARED 96.5% SIGNAL GATE ──
+  // The SAME buildSignalView + SIGNAL_CONFIDENCE_THRESHOLD the trading panel
+  // and chart use. Below the gate a raw BUY/SELL is demoted to NO SIGNAL so
+  // this widget never surfaces a directional call the rest of the app blocks.
+  const signalView = buildSignalView(
+    predictionData,
+    SIGNAL_CONFIDENCE_THRESHOLD,
+  );
+  const signal =
+    predictionData?.market_waiting === true ? null : signalView.gatedSignal;
   const indicators = predictionData?.indicators;
   const scalpingInd = predictionData?.scalping_indicators;
 
@@ -130,23 +143,34 @@ export const AIExplanation: React.FC = () => {
     }
 
     // Confidence level statement
-    if (confidenceNum >= 80)
+    if (confidenceNum >= 96.5)
       reasons.push("High-confidence prediction — strong signal alignment");
-    else if (confidenceNum >= 60)
+    else if (confidenceNum >= 80)
       reasons.push("Moderate confidence — partial signal confirmation");
     else
       reasons.push("Low confidence — divergent indicators, trade with caution");
+
+    // ── GATED-DIRECTION NOTICE ──
+    // When the engine emitted a raw BUY/SELL below the 96.5% gate, say so
+    // explicitly instead of quietly showing nothing.
+    if (signalView.gated && confidenceNum > 0) {
+      reasons.push(
+        `Signal gate: confidence ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
+      );
+    }
 
     return reasons;
   }, [
     predictionData,
     signal,
+    signalView,
     currentPrice,
     rsi,
     sma20,
     sma50,
     atr,
     confidenceNum,
+    confidenceStr,
     activeSymbol,
   ]);
 
@@ -250,7 +274,13 @@ export const AIExplanation: React.FC = () => {
                 : "bg-slate-500/20 text-slate-300",
           )}
         >
-          {signal === "BUY" ? "BUY" : signal === "SELL" ? "SELL" : "—"}
+          {signal === "BUY"
+            ? "BUY"
+            : signal === "SELL"
+              ? "SELL"
+              : signalView.badgeText
+                ? signalView.badgeText
+                : "—"}
         </span>
       </div>
 
@@ -263,11 +293,9 @@ export const AIExplanation: React.FC = () => {
           <span
             className={cn(
               "text-sm font-black font-mono",
-              confidenceNum >= 80
+              signal === "BUY" || signal === "SELL"
                 ? "text-emerald-400"
-                : confidenceNum >= 60
-                  ? "text-amber-400"
-                  : "text-rose-400",
+                : "text-slate-400",
             )}
           >
             {confidenceStr}%
@@ -277,11 +305,9 @@ export const AIExplanation: React.FC = () => {
           <div
             className={cn(
               "h-full rounded-full transition-all duration-500",
-              confidenceNum >= 80
+              signal === "BUY" || signal === "SELL"
                 ? "bg-emerald-500"
-                : confidenceNum >= 60
-                  ? "bg-amber-500"
-                  : "bg-rose-500",
+                : "bg-slate-600",
             )}
             style={{ width: `${confidenceNum}%` }}
           />
@@ -368,7 +394,11 @@ export const AIExplanation: React.FC = () => {
             <p
               className={cn(
                 "text-xs font-bold font-mono",
-                signal === "BUY" ? "text-emerald-400" : "text-rose-400",
+                signal === "BUY"
+                  ? "text-emerald-400"
+                  : signal === "SELL"
+                    ? "text-rose-400"
+                    : "text-slate-400",
               )}
             >
               {predictionData.target_price > 0

@@ -19,17 +19,41 @@ from contextlib import asynccontextmanager
 
 from .core.config import settings
 from .core.logging_config import setup_logging
+from .core.runtime_state import (
+    set_last_health_error,
+    set_warmup_progress,
+    set_warmup_running,
+)
 from .services.signal_generator import SignalGenerator
 from .messaging.publisher import RedisPublisher
 from .data.cache import data_cache
 from .services.ml_predictor import predict_with_rf, _model_cache
 from .api.v1.endpoints import api_router
+from .api.v1.health import health_report, gate_report
 
 setup_logging()
 logger = structlog.get_logger(__name__)
 
 publisher = RedisPublisher()
 signal_gen = SignalGenerator(confidence_threshold=settings.CONFIDENCE_THRESHOLD)
+
+# ── STRICT 96.5% HARD GATE — boot-time invariant ──
+# The configured dispatch floor must never drift below the canonical
+# DEFINITIVE_CONFIDENCE_MIN (96.5). A misconfigured threshold is a hard
+# startup failure, not a silent downgrade.
+from .services.signal_gatekeeper import (
+    DEFINITIVE_CONFIDENCE_MIN as GATE_FLOOR_PCT,
+    HARD_GATE,
+)
+_configured_threshold = float(settings.CONFIDENCE_THRESHOLD)
+if _configured_threshold <= 1:
+    _configured_threshold *= 100.0
+if _configured_threshold < GATE_FLOOR_PCT or abs(HARD_GATE - 0.965) > 1e-9:
+    raise RuntimeError(
+        "HARD GATE MISCONFIGURED — CONFIDENCE_THRESHOLD must be >= 96.5% "
+        f"(got {_configured_threshold:.2f}%) and HARD_GATE must equal 0.965 "
+        f"(got {HARD_GATE})."
+    )
 
 # ── Model Cache Warmup Symbols ──
 # Pre-trained on startup so first client request hits cache (sub-50ms).
@@ -176,8 +200,10 @@ async def _warmup_model_cache():
         await asyncio.gather(*batch_tasks)
         completed += len(batch)
 
-        # Log progress every 10 symbols
+        # Log progress every 10 symbols (also mirrored into the shared runtime
+        # state so /health can report warmup progress to operators).
         if completed % 10 == 0 or completed == len(all_tasks):
+            set_warmup_progress(completed, len(all_tasks))
             logger.info("Warmup progress",
                         completed=completed,
                         total=len(all_tasks),
@@ -188,10 +214,33 @@ async def _warmup_model_cache():
             await asyncio.sleep(WARMUP_INTER_SYMBOL_DELAY)
 
     await collector.close()
+    set_warmup_progress(0, 0)
     logger.info("Model cache warmup complete",
                 cache_size=_model_cache.size,
                 symbols_warmed=WARMUP_SYMBOLS,
                 total_jobs=total_jobs)
+
+
+def _warmup_done(task: asyncio.Task) -> None:
+    """Backfill the shared runtime state when warmup exits (any reason)."""
+    set_warmup_running(False)
+    try:
+        task.result()
+    except Exception as e:  # noqa: BLE001 — warmup must never take down startup
+        set_last_health_error(f"Warmup finished with error: {e}")
+        logger.warning("Warmup task finished with an error",
+                       error=str(e))
+    else:
+        set_last_health_error(None)
+
+
+async def _warmup_launcher() -> None:
+    """Wrap the warmup in the running flag so /health reports it accurately."""
+    try:
+        await _warmup_model_cache()
+    finally:
+        set_warmup_running(False)
+        set_last_health_error(None)
 
 
 @asynccontextmanager
@@ -199,10 +248,16 @@ async def lifespan(app: FastAPI):
     await publisher.connect()
     data_cache.clear_all()
     logger.info("AI Engine DataCache cleared on startup — stale prices purged")
-    # Fire-and-forget warmup — don't block server readiness
-    asyncio.create_task(_warmup_model_cache())
+    # Fire-and-forget warmup — don't block server readiness. /health reports
+    # status "degraded" while it runs so operators know predicts may pay a
+    # one-time training cost.
+    set_warmup_running(True)
+    warmup_task = asyncio.create_task(_warmup_launcher())
+    warmup_task.add_done_callback(_warmup_done)
     logger.info("AI Engine startup complete (model cache warmup launched in background)")
     yield
+    warmup_task.cancel()
+    set_warmup_running(False)
     await publisher.close()
     logger.info("AI Engine shutdown complete")
 
@@ -262,7 +317,12 @@ async def validation_exception_handler(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": settings.PROJECT_NAME}
+    return health_report()
+
+
+@app.get("/health/gate")
+async def health_check_gate():
+    return gate_report()
 
 
 if __name__ == "__main__":

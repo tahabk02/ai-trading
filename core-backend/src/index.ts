@@ -14,15 +14,26 @@ import { secrets } from "./config/secrets";
 import { logger } from "./utils/logger";
 import { RedisSubscriber } from "./messaging/subscriber";
 import { CacheService } from "./services/cache.service";
-import { WebSocketService } from "./services/websocket.service";
+import { WebSocketService, buildFeedStatusPayload } from "./services/websocket.service";
 import { tickIngestionService } from "./services/tickIngestion.service";
 import { symbolRegistry } from "./services/symbolRegistry.service";
 import { forexDataService } from "./services/forexData.service";
 import { pocketOptionBridgeService } from "./services/pocketOptionBridge.service";
+import { realtimeCandleAggregatorService } from "./services/realtimeCandleAggregator.service";
+import { realtimeTickBuffer } from "./services/realtimeTickBuffer.service";
+import { SOCKET_SERVER_OPTIONS } from "./config/socket.config";
 import { feedMetrics } from "./lib/feedMetrics";
+import { createProcessErrorReporter } from "./lib/processErrorHandler";
 import { rateLimit } from "./middlewares/rateLimit.middleware";
 import { errorMiddleware } from "./middlewares/error.middleware";
 import apiRouter from "./routes/index";
+import { rootHealthRouter } from "./routes/health.routes";
+import {
+  allowedOrigins,
+  corsOriginResolver,
+  corsOptions,
+  privateNetworkMiddleware,
+} from "./config/cors";
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //  GLOBAL EVENT EMITTER CONFIGURATION
@@ -104,57 +115,11 @@ httpServer.setMaxListeners(30); // suppress MaxListenersExceededWarning on HTTP 
 // â”€â”€ 1. CORS Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Requirement 1: Initialize Express and configure CORS explicitly allowing origin "http://localhost:3000" with credentials support.
 // We also support additional configured origins to maintain production flexibility.
-const allowedOrigins = ["http://localhost:3000", "http://127.0.0.1:3000"];
-const configuredOrigin = (secrets.CORS_ORIGIN || "").trim();
-if (configuredOrigin) {
-  configuredOrigin.split(",").forEach((o) => {
-    const trimmed = o.trim();
-    if (trimmed && !allowedOrigins.includes(trimmed)) {
-      allowedOrigins.push(trimmed);
-    }
-  });
-}
-
-function corsOriginResolver(
-  origin: string | undefined,
-  callback: (err: Error | null, allow?: boolean) => void,
-): void {
-  if (!origin) {
-    return callback(null, true);
-  }
-  
-  const isAllowed = allowedOrigins.includes(origin) ||
-    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin) ||
-    origin.includes(".devtunnels.ms");
-    
-  if (isAllowed) {
-    callback(null, true);
-  } else {
-    callback(new Error(`Origin ${origin} not allowed by CORS`));
-  }
-}
-
 // Express CORS â€” must be first to handle preflight
+app.use(privateNetworkMiddleware);
 app.use(
-  cors({
-    origin: corsOriginResolver,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Access-Control-Allow-Origin",
-    ],
-  }),
+  cors(corsOptions),
 );
-
-// Add Private Network Access header (required by Chrome when a public/HTTPS
-// origin â€” e.g. Dev Tunnel â€” tries to reach a private/localhost server).
-app.use((_req, res, next) => {
-  res.setHeader("Access-Control-Allow-Private-Network", "true");
-  next();
-});
 
 // Body parsing
 app.use(express.json({ limit: "1mb" }));
@@ -192,15 +157,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // â”€â”€ 3. API Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.use("/api/v1", apiRouter);
 
-// Root health check
-app.get("/health", (_req: Request, res: Response) => {
-  res.json({
-    status: "ok",
-    service: "core-backend",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-  });
-});
+// Root health routes (MASTER MISSION 1.3) — the autopilot probes
+// http://127.0.0.1:4000/health, /health/ai and /health/data on the ROOT
+// namespace (no /api/v1 prefix). All three answer 200 with structured JSON.
+app.use("/health", rootHealthRouter);
 
 // Prometheus text-format scrape endpoint for the live-feed resilience metrics
 // (feed_retry_total, feed_error_total, feed_recovery_total, feed_backoff_ms,
@@ -230,14 +190,14 @@ const io: SocketIOServer = new SocketIOServer(httpServer, {
     origin: corsOriginResolver, // Matches the frontend URL "http://localhost:3000" dynamically and explicitly
     methods: ["GET", "POST"],
     credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: corsOptions.allowedHeaders,
   },
-  transports: ["websocket", "polling"], // Explicit transports as requested
-  pingInterval: 12_000, // fast dead-pipe detection (was 25s â€” a 25s gap before a
-  // timeout means up to 45s of "silence" before the transport recovers; at a
-  // 100Hz+ tick cadence that is catastrophic). 12s keeps the heartbeat cheap
-  // while pruning wedged pipes in under ~20s worst case.
-  pingTimeout: 10_000,
+  transports: SOCKET_SERVER_OPTIONS.transports, // Explicit transports as requested
+  pingInterval: 25_000, // MASTER MISSION part 2 — 25s/20s tolerates brief
+  // UI event-loop stalls (long tasks >10s from the tick/chart flood) WITHOUT
+  // tripping the heartbeat into a disconnect↔reconnect cycle, while still
+  // pruning genuinely wedged pipes in ~45s worst case.
+  pingTimeout: 20_000,
   connectTimeout: 10_000,
   upgradeTimeout: 10_000,
   maxHttpBufferSize: 5e6, // 5MB per packet â€” large candle/signal payloads are
@@ -264,6 +224,40 @@ const io: SocketIOServer = new SocketIOServer(httpServer, {
 const wsService = WebSocketService.getInstance();
 wsService.initialize(io);
 
+// ── ENGINE-LEVEL TRANSPORT FAULTS ──
+// Never silence a failed handshake/upgrade: surface it with the sibling code
+// so operator logs distinguish "client vanished" (normal) from "network/transport
+// fault mid-handshake" (worth watching). This is observability only — recovery is
+// driven by the client provider's exponential backoff.
+io.engine.on("connection_error", (err) => {
+  const rawReq = err?.req as { remoteAddress?: string } | undefined;
+  logger.warn("Socket.IO engine connection_error", {
+    code: err?.code,
+    message: typeof (err as { message?: string })?.message === "string"
+      ? (err as { message?: string }).message
+      : undefined,
+    context:
+      err && err.context &&
+      typeof (err.context as { code?: string })?.code === "string"
+        ? (err.context as { code?: string }).code
+        : undefined,
+    remoteAddress: rawReq?.remoteAddress ?? undefined,
+  });
+});
+
+// ── SERVER-AUTHORITATIVE REALTIME CANDLE AGGREGATOR ──
+// Buckets every live tick (PO + HTTP + GitHub) into 1s/5s/20s/1m closed
+// candles server-side and pushes each close to subscribers over the `candle`
+// event. The frontend consumes these as the single source of truth for CLOSED
+// bars; its own client aggregator paints only the current forming bar.
+realtimeCandleAggregatorService.setClosedHandler((candle) => {
+  wsService.broadcastCandle(candle);
+});
+realtimeCandleAggregatorService.setParityHandler((alert) => {
+  wsService.broadcastCandleParity(alert);
+});
+realtimeCandleAggregatorService.start();
+
 // Connection lifecycle
 // Requirement 3: Implement core connection lifecycle handlers, including client connection logging,
 // a "subscribe" event listener for dynamic symbol room management, and a clean "disconnect" handler.
@@ -274,38 +268,101 @@ io.on("connection", (socket) => {
     transport: socket.conn.transport.name,
   });
 
+  // ── feed_status ON CONNECT (MASTER MISSION part 2) ──
+  // A fresh socket gets an immediate payload BEFORE its first subscribe: the
+  // bridge's real feed-state machine value, the newest genuine tick timestamp,
+  // and the full instrument universe. Observational — a failure here never
+  // breaks the connection or logging of it.
+  void symbolRegistry
+    .getAll()
+    .then((entries) => {
+      const feed = pocketOptionBridgeService.getCurrentFeedStatus();
+      wsService.emitFeedStatusTo(
+        socket,
+        buildFeedStatusPayload(feed.status, {
+          symbols: entries.map((e) => ({
+            symbol: e.symbol,
+            name: e.name,
+            type: e.type,
+          })),
+          lastTickTs: realtimeTickBuffer.getGlobalLastTickAt(),
+          lastHeartbeatTs: feed.lastHeartbeatTs,
+          heartbeatAgeMs: feed.heartbeatAgeMs,
+        }),
+      );
+    })
+    .catch(() => {
+      /* observational — a failed universe read must never break the socket */
+    });
+
   // Dynamic symbol room management via "subscribe" event
-  socket.on("subscribe", (symbol: string) => {
-    if (symbol?.trim()) {
-      const normalized = symbol.trim().toUpperCase();
+  // The modern client sends { symbol, timeframe } — the active CHART timeframe
+  // it wants server-authoritative candles for. The socket joins BOTH the plain
+  // symbol room (live_tick feed) and the `${symbol}:${timeframe}` room that
+  // broadcastCandle emits to, so each resolution gets exactly its own closed
+  // bars. Legacy string payloads fall back to "1m".
+  socket.on("subscribe", (payload: unknown) => {
+    try {
+      const parsed =
+        typeof payload === "string"
+          ? { symbol: payload, timeframe: undefined }
+          : (payload as { symbol?: string; timeframe?: string } | null);
+      const rawSymbol = parsed?.symbol?.trim();
+      if (!rawSymbol) return;
+
+      const normalized = rawSymbol.toUpperCase();
+      const tf =
+        realtimeCandleAggregatorService.canonicalTimeframe(parsed?.timeframe || "") ??
+        "1m";
       socket.join(normalized);
+      socket.join(`${normalized}:${tf}`);
       tickIngestionService.startSymbolStream(normalized);
       // FORCE INITIAL TICK HANDSHAKE — push the ACTIVE symbol to the PO bridge
       // so its tick reader arms immediately and confirms back (subscribed →
       // held price seeded → "WAITING FOR REAL-TIME TICK" lock clears).
       pocketOptionBridgeService.requestSymbolSubscription(normalized);
-      // REPLAY-ON-JOIN â€” seed this socket with the real 2000-tick ring so a
+      // REPLAY-ON-JOIN — seed this socket with the real 2000-tick ring so a
       // fresh/reconnecting client rebuilds chart continuity instantly instead
       // of waiting for the live feed to move again.
       wsService.replayHistory(socket, normalized);
+      // REPLAY-ON-JOIN (candles) — authoritative server closed candles for the
+      // requested chart timeframe via the `history_candles` event.
+      wsService.replayCandleHistory(socket, normalized, tf);
       logger.info("Client subscribed to symbol room", {
         socketId: socket.id,
         symbol: normalized,
+        timeframe: tf,
+      });
+    } catch (err) {
+      // MASTER MISSION part 2 — a mis-handled subscription must never crash the
+      // connection handler or silently kill the socket; log + drop.
+      logger.warn("WebSocket subscribe handler error", {
+        socketId: socket.id,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   });
 
   // Dynamic symbol room management via "subscribe_symbol" event (for backward compatibility)
   socket.on("subscribe_symbol", (symbol: string) => {
-    if (symbol?.trim()) {
-      const normalized = symbol.trim().toUpperCase();
-      socket.join(normalized);
-      tickIngestionService.startSymbolStream(normalized);
-      pocketOptionBridgeService.requestSymbolSubscription(normalized);
-      wsService.replayHistory(socket, normalized);
-      logger.info("Client subscribed to symbol room (legacy)", {
+    try {
+      if (symbol?.trim()) {
+        const normalized = symbol.trim().toUpperCase();
+        socket.join(normalized);
+        socket.join(`${normalized}:1m`);
+        tickIngestionService.startSymbolStream(normalized);
+        pocketOptionBridgeService.requestSymbolSubscription(normalized);
+        wsService.replayHistory(socket, normalized);
+        wsService.replayCandleHistory(socket, normalized, "1m");
+        logger.info("Client subscribed to symbol room (legacy)", {
+          socketId: socket.id,
+          symbol: normalized,
+        });
+      }
+    } catch (err) {
+      logger.warn("WebSocket subscribe_symbol handler error", {
         socketId: socket.id,
-        symbol: normalized,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   });
@@ -326,6 +383,15 @@ io.on("connection", (socket) => {
     logger.info("WebSocket client disconnected", {
       socketId: socket.id,
       reason,
+    });
+  });
+
+  // Surface socket-level errors (never silence them — a malformed emitter or a
+  // middleware fault should be visible rather than silently swallowing ticks).
+  socket.on("error", (err) => {
+    logger.warn("WebSocket client socket error", {
+      socketId: socket.id,
+      error: err instanceof Error ? err.message : String(err),
     });
   });
 });
@@ -480,6 +546,7 @@ async function shutdown(signal: string): Promise<void> {
   try {
     tickIngestionService.stopAllStreams();
     pocketOptionBridgeService.stop();
+    realtimeCandleAggregatorService.stop();
     io.close();
     logger.info("WebSocket server closed");
 
@@ -504,18 +571,53 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-process.on("unhandledRejection", (reason: unknown) => {
-  logger.error("Unhandled Promise Rejection â€” server continues running", {
-    reason: reason instanceof Error ? reason.message : String(reason),
-    stack: reason instanceof Error ? reason.stack : undefined,
+// Process-level errors are routed through a single rate-limited reporter:
+// - "write EPIPE" spam (stream closed under ts-node-dev respawn / PIPE) is
+//   announced ONCE per source and then ignored — it is noise, not a fault.
+// - genuine errors are rate-limited to one log per source per 5s, so a
+//   cascading failure can never flood the output with thousands of identical
+//   stack traces. Each logged entry carries its correlation id.
+const processErrorReporter = createProcessErrorReporter();
+
+for (const streamName of ["stdout", "stderr"] as const) {
+  process[streamName].on("error", (error: Error) => {
+    const report = processErrorReporter.report(streamName, error);
+    if (!report.shouldLog) return;
+    logger.error(
+      `process.${streamName} error (cid=${report.correlationId})${
+        report.isEpipe ? " — EPIPE ignored" : ""
+      }`,
+      {
+        code: (error as NodeJS.ErrnoException).code ?? "ERR_UNKNOWN",
+        message: error.message,
+        stack: error.stack,
+      },
+    );
   });
+}
+
+process.on("unhandledRejection", (reason: unknown) => {
+  const report = processErrorReporter.report("unhandledRejection", reason);
+  if (!report.shouldLog) return;
+  logger.error(
+    `Unhandled Promise Rejection — server continues running (cid=${report.correlationId})`,
+    {
+      reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    },
+  );
 });
 
 process.on("uncaughtException", (error: Error) => {
-  logger.error("Uncaught Exception â€” server continues running", {
-    error: error.message,
-    stack: error.stack,
-  });
+  const report = processErrorReporter.report("uncaughtException", error);
+  if (!report.shouldLog) return;
+  logger.error(
+    `Uncaught Exception — server continues running (cid=${report.correlationId})`,
+    {
+      error: error.message,
+      stack: error.stack,
+    },
+  );
 });
 
 // =============================================================================

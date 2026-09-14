@@ -47,6 +47,7 @@ import {
   selectSetActiveSymbol,
   selectLiveSignals,
   selectSelectedTimeframe,
+  selectSelectedExpiration,
 } from "@/store/useTradingStore";
 
 export default function DashboardPage() {
@@ -60,6 +61,7 @@ export default function DashboardPage() {
     unsubscribeSymbol,
     streamStalled,
     stalePrice,
+    candleParityBreach,
   } = useWebSocket();
   const activeSymbol = useTradingStore(selectActiveSymbol);
   const currentPrice = useTradingStore(selectCurrentPrice);
@@ -68,12 +70,10 @@ export default function DashboardPage() {
   const setActiveSymbol = useTradingStore(selectSetActiveSymbol);
   const liveSignals = useTradingStore(selectLiveSignals);
   const selectedTimeframe = useTradingStore(selectSelectedTimeframe);
+  const selectedExpirationSeconds = useTradingStore(selectSelectedExpiration);
   // Full AI prediction payload — feeds the chart's target/anchor/ATR props
   // and seeds the aggregator with REAL backend OHLC history when present.
   const predictionData = useTradingStore((s) => s.predictionData);
-  // Selected expiration (seconds) — maps to the chart's predictive-candle
-  // expiry horizon so the forecast candles span the chosen 1m/2m/3m… slot.
-  const expirationSeconds = useTradingStore((s) => s.expirationSeconds);
   // ── HYDRATION-SAFE TIMEFRAME RESTORE (deterministic "1m" SSR default) ──
   const hydrateSelectedTimeframe = useTradingStore(
     (s) => s.hydrateSelectedTimeframe,
@@ -296,11 +296,11 @@ export default function DashboardPage() {
                       predictionData?.scalping_indicators?.atr_14 ??
                       0
                     }
-                    projectionMinutes={expirationSeconds / 60}
+                    expirationSeconds={selectedExpirationSeconds}
                     signal={predictionData?.signal ?? null}
-                    lookaheadHorizon={5}
                     streamStalled={streamStalled}
                     stalePrice={stalePrice}
+                    candleParityBreach={candleParityBreach}
                   />
                 </ErrorBoundary>
               </div>

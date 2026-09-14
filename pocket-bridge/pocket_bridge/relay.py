@@ -1,19 +1,26 @@
 """Local WebSocket relay that streams cleared PO data to the Node backend.
 
 The Node.js backend connects to this endpoint as a WebSocket client
-(``/relay``). The relay pushes two framed message types:
+(``/relay``). The relay pushes framed message types — ``tick``, ``candle``,
+``status``, ``snapshot``, ``ready``, ``subscribed``, ``heartbeat`` plus the
+control frames ``hello`` / ``pong``. Every outbound message is emitted through
+ONE unified path that stamps a monotonic ``seq`` and a UTC-millisecond
+``ts_utc`` on top of the frame, so consumers can detect drops / reordering
+even across reconnects.
 
-    {"type": "tick",  "payload": {...raw tick + symbol...}}
-    {"type": "candle","payload": {...M20 candle + symbol...}}
-    {"type": "status","payload": {"status": ..., "error": ...}}
-    {"type": "snapshot","payload": {...per-symbol M20 snapshots...}}
-    {"type": "ready", "payload": {"assets_initialized": true}}
+Zero-drop, no-backpressure design:
 
-On every new client connection the relay sends a full snapshot so the backend
-can rebuild the SSOT immediately (no historical fetch required). Once the bridge
-has authenticated and loaded its authoritative asset list it broadcasts (and
-replies to each new client with) ``ready`` — the Node backend gates its
-subscribe pushes on that frame so it never races Python's startup.
+* Each connected client gets a bounded outbound queue drained by its own
+  writer task — a slow consumer can NEVER stall the broker tick stream for the
+  other clients (or for the bridge). ``broadcast``/``send`` are O(1) enqueues.
+* Only a catastrophically slow client (queue overflow) is disconnected — never
+  silently deprioritised, never blocking the rest.
+* On every new client connection the relay sends a full snapshot so the
+  backend can rebuild the SSOT immediately (no historical fetch required).
+* Once the bridge has authenticated and loaded its authoritative asset list it
+  broadcasts (and replies to each new client with) ``ready`` — the Node
+  backend gates its subscribe pushes on that frame so it never races Python's
+  startup.
 """
 
 from __future__ import annotations
@@ -24,22 +31,64 @@ import json
 import logging
 import os
 import socket
-from typing import Callable, Dict, List, Optional, Set
+import time
+from http import HTTPStatus
+from typing import Callable, Dict, Optional
 
 import websockets
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 from .config import BridgeSettings
 from .m20_engine import M20Engine
 
 logger = logging.getLogger("pocket_bridge.relay")
 
+#: Per-client outbound queue cap. Larger than any realistic burst between
+#: two consecutive TCP flushes; overflow only fires for a truly wedged client.
+OUTBOX_MAX_FRAMES = 10_000
+
+
+class _Outbox:
+    """Bounded FIFO of serialized frames drained by a dedicated writer task."""
+
+    def __init__(self, ws, maxlen: int = OUTBOX_MAX_FRAMES) -> None:
+        self.ws = ws
+        self._q: "asyncio.Queue[str]" = asyncio.Queue(maxsize=maxlen)
+        self.task: Optional[asyncio.Task] = None
+        self.overflow = 0
+
+    def start(self) -> None:
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        while True:
+            data = await self._q.get()
+            try:
+                await self.ws.send(data)
+            except Exception:  # noqa: BLE001 - dead conn stops this writer only
+                break
+            finally:
+                self._q.task_done()
+
+    def put(self, data: str) -> bool:
+        """Enqueue one serialized frame; False when the client is falling behind."""
+        try:
+            self._q.put_nowait(data)
+            return True
+        except asyncio.QueueFull:
+            self.overflow += 1
+            return False
+
 
 class RelayServer:
     def __init__(self, settings: BridgeSettings, engine: M20Engine) -> None:
         self.settings = settings
         self.engine = engine
-        self.clients: Set = set()
+        self.clients: Dict = {}
         self.server = None
+        self._seq = 0
         #: async callback (websocket, payload_dict) -> None invoked on every
         #: ``{"type": "subscribe", "payload": {...}}`` frame. Wired by the
         #: entrypoint so the bridge can dynamically arm the requested symbol
@@ -51,9 +100,58 @@ class RelayServer:
         #: backend can release its staged subscribes without waiting for the
         #: next global broadcast.
         self.is_ready: Optional[Callable[[], bool]] = None
+        self.health_provider: Optional[Callable[[], Dict]] = None
+        #: total frames of type "candle" pushed through broadcast() this
+        #: process (MASTER MISSION 2.x — surfaced on /health). Incremented in
+        #: broadcast(), which is the single funnel for every client-visible
+        #: candle frame regardless of which producer emitted it.
+        self.candles_emitted: int = 0
+
+    async def process_request(self, _connection, request):
+        if request.path.rstrip("/") != "/health":
+            return None
+        payload = self.health_provider() if self.health_provider else {"status": "degraded"}
+        payload = dict(payload)
+        payload["candles_emitted"] = self.candles_emitted
+        body = json.dumps(payload).encode("utf-8")
+        headers = Headers()
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = str(len(body))
+        return Response(HTTPStatus.OK.value, "OK", headers, body)
+
+    def _frame(self, frame: Dict) -> Dict:
+        """UNIFIED EMIT: decorate every outbound frame with diagnostics.
+
+        ``ts_utc`` — UTC wall-clock (epoch ms) at emission time,
+        ``seq``     — per-process monotonic emit counter (drop detection).
+
+        Consumer keys (``type`` / ``payload``) are never touched.
+        """
+        self._seq += 1
+        out = dict(frame)
+        out.setdefault("ts_utc", time.time_ns() // 1_000_000)
+        out.setdefault("seq", self._seq)
+        return out
+
+    async def _drain_outbox(self, outbox: Optional[_Outbox]) -> None:
+        if outbox is None or outbox.task is None:
+            return
+        outbox.task.cancel()
+        try:
+            await outbox.task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - cleanup
+            pass
+
+    def _register(self, ws) -> _Outbox:
+        outbox = self.clients.get(ws)
+        if outbox is None:
+            outbox = _Outbox(ws)
+            self.clients[ws] = outbox
+        outbox.start()
+        return outbox
 
     async def handler(self, websocket) -> None:
-        self.clients.add(websocket)
+        outbox = self._register(websocket)
         logger.info("relay client connected (%d total)", len(self.clients))
         try:
             # Initial full snapshot so the backend can rebuild the SSOT.
@@ -101,27 +199,36 @@ class RelayServer:
         except websockets.ConnectionClosed:
             pass
         finally:
-            self.clients.discard(websocket)
+            self.clients.pop(websocket, None)
+            await self._drain_outbox(outbox)
             logger.info("relay client disconnected (%d total)", len(self.clients))
 
     async def send(self, websocket, frame: Dict) -> None:
-        try:
-            await websocket.send(json.dumps(frame))
-        except Exception:  # noqa: BLE001
-            self.clients.discard(websocket)
+        """Enqueue one frame for a single client (never blocks the tick stream)."""
+        outbox = self._register(websocket)
+        if not outbox.put(json.dumps(self._frame(frame))):
+            # Catastrophically slow consumer: drop the client, never stall the
+            # broker stream for everyone else.
+            self.clients.pop(websocket, None)
+            await self._drain_outbox(outbox)
+            try:
+                await websocket.close()
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
 
     async def broadcast(self, frame: Dict) -> None:
         if not self.clients:
             return
-        data = json.dumps(frame)
+        if frame.get("type") == "candle":
+            self.candles_emitted += 1
+        data = json.dumps(self._frame(frame))
         dead = []
-        for ws in list(self.clients):
-            try:
-                await ws.send(data)
-            except Exception:  # noqa: BLE001
+        for ws, outbox in list(self.clients.items()):
+            if not outbox.put(data):
                 dead.append(ws)
         for ws in dead:
-            self.clients.discard(ws)
+            outbox = self.clients.pop(ws, None)
+            await self._drain_outbox(outbox)
 
     @staticmethod
     def _is_port_bound(host: str, port: int) -> bool:
@@ -188,6 +295,7 @@ class RelayServer:
             self.server = await websockets.serve(
                 self.handler,
                 sock=sock,
+                process_request=self.process_request,
                 ping_interval=20,
                 ping_timeout=30,
             )

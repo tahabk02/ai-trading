@@ -1,0 +1,15 @@
+# Secret material — never image-eligible. The real .env is injected at runtime
+# via docker-compose env_file; the browser session via the read-only volume.
+.env
+.env.*
+!.env.example
+session/
+
+# Python build/junk
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# VCS
+.git
+.gitignore

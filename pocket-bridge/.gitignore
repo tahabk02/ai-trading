@@ -4,3 +4,11 @@ __pycache__/
 venv/
 .pytest_cache/
 .env
+
+# Captured Pocket Option browser session — a LIVE login credential.
+session/po_session.json
+session/po_session.meta.json
+session/.pw_profile/
+
+# BinaryOptionsToolsV2/system artifacts
+playwright-report/

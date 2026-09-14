@@ -57,8 +57,9 @@ const SocketContext = createContext<SocketContextType | undefined>(undefined);
 //     automatically (if still down it fails once more and falls back again).
 const FALLBACK_AFTER_FAILURES = 3;
 const PRIMARY_RETRY_MS = 60_000;
-/** Throttle console.warn so a refused backend never spams the devtools log. */
-const WARN_THROTTLE_MS = 5_000;
+/** Throttle console.warn so a refused backend never spams the devtools log —
+ *  one warn every 2s per reconnect storm (MASTER MISSION part 2). */
+const WARN_THROTTLE_MS = 2_000;
 
 const SOCKET_OPTS: Partial<ManagerOptions & SocketOptions> = {
   // websocket-first with polling fallback handshake (same as before)
@@ -66,11 +67,13 @@ const SOCKET_OPTS: Partial<ManagerOptions & SocketOptions> = {
   autoConnect: true,
   // ── EXPONENTIAL BACKOFF, NOT SPAM ──
   // socket.io-client doubles reconnectionDelay per failure, capped at
-  // reconnectionDelayMax (0.8s → 25s randomized).
+  // reconnectionDelayMax (1s → 10s randomized). A longer base + lower cap keep
+  // the reconnect machine gentle under sustained outages while the transport
+  // still reclaims a recovered backend within seconds.
   reconnection: true,
   reconnectionAttempts: Infinity, // never give up — live ticks are mandatory
-  reconnectionDelay: 800,
-  reconnectionDelayMax: 25_000,
+  reconnectionDelay: 1_000,
+  reconnectionDelayMax: 10_000,
   randomizationFactor: 0.4,
   timeout: 10_000,
 };

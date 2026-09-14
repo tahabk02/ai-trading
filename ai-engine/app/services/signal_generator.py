@@ -79,6 +79,10 @@ class SignalGenerator:
             settings.CONFIDENCE_THRESHOLD if confidence_threshold is None else confidence_threshold
         )
 
+    @property
+    def threshold_percent(self) -> float:
+        return self.confidence_threshold * 100 if self.confidence_threshold <= 1 else self.confidence_threshold
+
     def generate_signal(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Generate an ACTIVE or NO_TRADE verdict from REAL market data.
 
@@ -159,6 +163,17 @@ class SignalGenerator:
         market_waiting = bool(diagnostics.get("market_waiting", False))
         waiting_reason = diagnostics.get("waiting_reason")
         waiting_detail = diagnostics.get("waiting_detail")
+        confidence = float(verdict.confidence)
+        signal_type = (
+            direction if confidence >= self.threshold_percent else None
+        )
+        if signal_type is None:
+            market_waiting = True
+            waiting_reason = "LOW_CONFIDENCE"
+            waiting_detail = (
+                f"NO SIGNAL — confidence {confidence:.2f}% < "
+                f"threshold {self.threshold_percent:.2f}%"
+            )
 
         entry = last_close
         digits = symbol_price_digits(symbol)
@@ -168,10 +183,10 @@ class SignalGenerator:
         payload = {
             "symbol": symbol,
             "status": "ACTIVE",
-            "signal_type": direction,
+            "signal_type": signal_type,
             "price": round(entry, digits),
-            "confidence": verdict.confidence,
-            "high_confidence_alert": verdict.high_confidence_alert,
+            "confidence": confidence,
+            "high_confidence_alert": verdict.high_confidence_alert and signal_type is not None,
             "market_waiting": market_waiting,
             "waiting_reason": waiting_reason,
             "waiting_detail": waiting_detail,
@@ -194,7 +209,7 @@ class SignalGenerator:
         logger.info(
             "SIGNAL_GENERATED_ACTIVE",
             symbol=symbol,
-            signal_type=direction,
+            signal_type=signal_type,
             price=payload["price"],
             confidence=payload["confidence"],
             high_confidence_alert=payload["high_confidence_alert"],
@@ -281,9 +296,17 @@ def generate_unbiased_prediction(
 
     return {
         "symbol": symbol,
-        "signal": verdict.direction,
-        "confidence": verdict.confidence,
-        "high_confidence_alert": verdict.high_confidence_alert,
+        "signal": verdict.direction if float(verdict.confidence) >= (
+            float(settings.CONFIDENCE_THRESHOLD)
+            if float(settings.CONFIDENCE_THRESHOLD) > 1
+            else float(settings.CONFIDENCE_THRESHOLD) * 100
+        ) else None,
+        "confidence": float(verdict.confidence),
+        "high_confidence_alert": verdict.high_confidence_alert and float(verdict.confidence) >= (
+            float(settings.CONFIDENCE_THRESHOLD)
+            if float(settings.CONFIDENCE_THRESHOLD) > 1
+            else float(settings.CONFIDENCE_THRESHOLD) * 100
+        ),
         "target_price": target_price,
         "current_price": round(current_price, digits),
         "atr": round(atr_now, 8),
@@ -308,5 +331,23 @@ def generate_unbiased_prediction(
         },
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
+        "waiting_reason": (
+            None
+            if float(verdict.confidence) >= (
+                float(settings.CONFIDENCE_THRESHOLD)
+                if float(settings.CONFIDENCE_THRESHOLD) > 1
+                else float(settings.CONFIDENCE_THRESHOLD) * 100
+            )
+            else "LOW_CONFIDENCE"
+        ),
+        "waiting_detail": (
+            None
+            if float(verdict.confidence) >= (
+                float(settings.CONFIDENCE_THRESHOLD)
+                if float(settings.CONFIDENCE_THRESHOLD) > 1
+                else float(settings.CONFIDENCE_THRESHOLD) * 100
+            )
+            else f"NO SIGNAL — confidence {float(verdict.confidence):.2f}% < threshold {(float(settings.CONFIDENCE_THRESHOLD) if float(settings.CONFIDENCE_THRESHOLD) > 1 else float(settings.CONFIDENCE_THRESHOLD) * 100):.2f}%"
+        ),
         "timestamp": pd.Timestamp.utcnow().isoformat(),
     }

@@ -86,6 +86,14 @@ _CRYPTO_SYMBOLS = frozenset({"BTC/USD", "ETH/USD"})
 # (STRICT ZERO-DEMO — never fabricate or pad with synthetic bars).
 MIN_TRAINING_CANDLES = 85
 
+# ── CPU DISCIPLINE ──
+# Warmup trains up to WARMUP_CONCURRENCY (4) symbols over the 2-thread
+# executor. n_jobs=-1 per trainer × 2 concurrent trainers would spawn a
+# thread per core TWICE — saturating the host and starving live /predict in
+# back-to-back runs. A small fixed pool keeps warmup fast while leaving the
+# event loop breathing.
+_RF_N_JOBS = 2
+
 
 def _price_precision(symbol: str) -> int:
     sym = (symbol or "").strip().upper()
@@ -689,6 +697,37 @@ def check_momentum_confirmation(row) -> dict:
     return {"buy": buy, "sell": sell, "micro": True, "buy_count": buy_count, "sell_count": sell_count}
 
 
+def _engineer_features_only(
+    closes, highs, lows, volumes, timeframe_hint: str = "1d",
+):
+    """Engineer fresh features off the event loop (executor callable)."""
+    df = engineer_features(closes, highs, lows, volumes, timeframe_hint=timeframe_hint)
+    if df.empty:
+        raise ValueError("Empty feature DataFrame")
+    return df
+
+
+def _feature_and_train(
+    symbol,
+    closes,
+    highs,
+    lows,
+    volumes,
+    timeframe_hint: str = "1d",
+):
+    """Engineer features AND train a model in ONE executor submission.
+
+    Keeps the heavy pandas feature build (previously on the event loop) off the
+    loop entirely — warm-up and cold-cache predicts no longer starve request
+    servicing while the loop-thread waits inside a GIL-heavy compute.
+    """
+    df = engineer_features(closes, highs, lows, volumes, timeframe_hint=timeframe_hint)
+    if df.empty:
+        raise ValueError("Empty feature DataFrame for " + str(symbol))
+    model, scaler, accuracy, _df_cl = train_model(symbol, df)
+    return model, scaler, accuracy, df
+
+
 # =====================================================================
 # MODEL TRAINING
 # =====================================================================
@@ -724,7 +763,7 @@ def train_model(symbol, df):
     def _fallback_model():
         model = RandomForestClassifier(
             n_estimators=50, max_depth=4, min_samples_leaf=2,
-            random_state=42, n_jobs=-1, class_weight="balanced",
+            random_state=42, n_jobs=_RF_N_JOBS, class_weight="balanced",
         )
         scaler = StandardScaler()
         # Full feature matrix (already NaN-safe from engineer_features + warmup fill).
@@ -794,7 +833,7 @@ def train_model(symbol, df):
     X_tr_s = scaler.fit_transform(X_tr)
     X_te_s = scaler.transform(X_te)
     model = RandomForestClassifier(n_estimators=100, max_depth=6, min_samples_leaf=2,
-                                   random_state=42, n_jobs=-1, class_weight="balanced")
+                                   random_state=42, n_jobs=_RF_N_JOBS, class_weight="balanced")
     model.fit(X_tr_s, y_tr)
     acc = float(accuracy_score(y_te, model.predict(X_te_s))) if len(y_te) > 0 else 0.5
     el = (time.perf_counter() - t0) * 1000
@@ -881,11 +920,6 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
 
     cp = float(live_price)
 
-    # ── Feature engineering (always fresh from candles) ──
-    df = engineer_features(closes, highs, lows, volumes, timeframe_hint=timeframe)
-    if df.empty:
-        raise ValueError("Empty feature DataFrame for " + str(symbol))
-
     # ── Model cache lookup ──
     loop = asyncio.get_event_loop()
     cached = _model_cache.get(symbol, timeframe) if not force_retrain else None
@@ -894,6 +928,14 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
         model, scaler, accuracy = cached
         cache_hit = True
         logger.debug("Model cache HIT", symbol=symbol, timeframe=timeframe)
+        # Features are still engineered fresh from the forwarded candles — the
+        # heavy pandas/numpy step runs in the executor so the event loop stays
+        # free to read/answer incoming requests.
+        df = await loop.run_in_executor(
+            _CPU_EXECUTOR,
+            _engineer_features_only,
+            closes, highs, lows, volumes, timeframe,
+        )
     else:
         cache_hit = False
         logger.info("Model cache MISS — training", symbol=symbol, timeframe=timeframe, force_retrain=force_retrain)
@@ -901,9 +943,20 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
         if cached2 is not None:
             model, scaler, accuracy = cached2
             cache_hit = True
+            df = await loop.run_in_executor(
+                _CPU_EXECUTOR,
+                _engineer_features_only,
+                closes, highs, lows, volumes, timeframe,
+            )
         else:
-            model, scaler, accuracy, df_cl = await loop.run_in_executor(
-                _CPU_EXECUTOR, train_model, symbol, df)
+            # Feature engineering AND training both run off the event loop (a
+            # single executor submission) — warm-up and live train never block
+            # request servicing.
+            model, scaler, accuracy, df = await loop.run_in_executor(
+                _CPU_EXECUTOR,
+                _feature_and_train,
+                symbol, closes, highs, lows, volumes, timeframe,
+            )
             _model_cache.set(symbol, timeframe, model, scaler, accuracy)
             cache_hit = False
 

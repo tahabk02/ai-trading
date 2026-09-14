@@ -64,6 +64,21 @@ const CB_MAX_ATTEMPTS_PER_WINDOW = 4;
 // awaiting_ssid / silent relay never hangs the handshake, never a hard sleep.
 const READINESS_FALLBACK_MS = 5_000;
 
+// ── Feed Heartbeat Constants ──
+// The Python bridge emits a `heartbeat` frame every 5s. A gap longer than
+// HEARTBEAT_STALE_MS means the feed is dead even if the WS transport is still
+// up — the client is told `disconnected` (never fabricated live).
+const HEARTBEAT_STALE_MS = 12_000;
+const FEED_STATUS_WATCHDOG_MS = 5_000;
+
+type FeedStatus =
+  | "live"
+  | "stalled"
+  | "disconnected"
+  | "awaiting_ssid"
+  | "auth_failed"
+  | "degraded";
+
 interface BridgeTickFrame {
   symbol: string;
   asset: string;
@@ -89,6 +104,22 @@ interface BridgeCandleFrame {
   asset_type?: string;
 }
 
+/**
+ * Coerce any bridge numeric field to a finite number, accepting BOTH the new
+ * number frames and the legacy exact-string ("1.15255") frames. This is the
+ * zero-drop contract boundary: a string price must never be silently dropped
+ * by a naive `typeof x === "number"` check. Returns null when not a usable
+ * positive-or-any finite number (sign caller-side for positivity).
+ */
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 /** Circuit breaker states: CLOSED = normal, OPEN = failing, HALF_OPEN = probing */
 type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
@@ -104,6 +135,15 @@ export class PocketOptionBridgeService {
   private wsErrorSeen = false;
   private lastStatus: "ONLINE" | "DEGRADED" | "awaiting_ssid" | "idle" =
     "idle";
+  /** Raw relay status string ("connected" | "stalled" | "awaiting_ssid" |
+   *  "connection_error" | "session_expired" ...) — the precise source for the
+   *  feed-status mapping (DEGRADED collapses several relay states). */
+  private lastRelayStatus = "idle";
+  /** Epoch ms of the last relay `heartbeat` frame (0 = never). */
+  private lastHeartbeatAt = 0;
+  /** Last feed_status actually broadcast — the watchdog only emits on change. */
+  private lastBroadcastFeedStatus: FeedStatus | null = null;
+  private feedStatusTimer: NodeJS.Timeout | null = null;
   private readonly url: string;
 
   /** Symbols a browser/client explicitly asked the relay to arm this session.
@@ -256,11 +296,16 @@ export class PocketOptionBridgeService {
       this.spawnBridgeProcess();
     }
     if (this.ws) return;
+    this.startFeedStatusWatchdog();
     this.connect();
   }
 
   /** Stop the WS client, kill the bridge process, and cancel any pending reconnect. */
   public stop(): void {
+    if (this.feedStatusTimer) {
+      clearInterval(this.feedStatusTimer);
+      this.feedStatusTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -676,6 +721,7 @@ export class PocketOptionBridgeService {
       logger.info("[PO Bridge] Connected to Pocket Option relay", {
         url: this.url,
       });
+      this.broadcastFeedStatusIfChanged();
       // Reset readiness: a freshly (re)connected relay may still be loading its
       // assets. Re-arm every staged symbol once the `ready` frame arrives (or
       // the bounded fallback expires) — never before, to avoid racing init.
@@ -708,6 +754,7 @@ export class PocketOptionBridgeService {
       if (failed) {
         this.recordReconnectFailure();
       }
+      this.broadcastFeedStatusIfChanged();
       logger.warn("[PO Bridge] Relay connection closed — scheduling reconnect", {
         delayMs: this.reconnectDelayMs,
         circuitState: this.circuitState,
@@ -788,6 +835,9 @@ export class PocketOptionBridgeService {
       case "ready":
         this.handleReady();
         break;
+      case "heartbeat":
+        this.handleHeartbeat(frame.payload as Record<string, unknown>);
+        break;
       case "subscribed":
         this.handleSubscribed(frame.payload as Record<string, unknown>);
         break;
@@ -800,16 +850,23 @@ export class PocketOptionBridgeService {
   }
 
   private handleTick(tick: BridgeTickFrame): void {
-    if (!tick || typeof tick.price !== "number" || !tick.symbol) return;
-    if (!Number.isFinite(tick.price) || tick.price <= 0) return;
+    if (!tick || !tick.symbol) return;
+    const price = toFiniteNumber(tick.price);
+    if (price === null || price <= 0) {
+      logger.debug("[PO Bridge] Rejected non-finite tick price", {
+        symbol: tick.symbol,
+        price: tick.price,
+      });
+      return;
+    }
     // Forward the PO server timestamp so the candle buffer and tick stream
     // align exactly with Pocket Option's own chart grid — zero divergence.
-    const poTimestamp = tick.ts_ms > 0
-      ? new Date(tick.ts_ms).toISOString()
-      : undefined;
+    const tsMs = toFiniteNumber(tick.ts_ms);
+    const poTimestamp =
+      tsMs !== null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
     tickIngestionService.ingestTick(
       tick.symbol,
-      tick.price,
+      price,
       "pocket_option",
       poTimestamp,
       tick.asset_type,
@@ -846,24 +903,110 @@ export class PocketOptionBridgeService {
 
   private handleStatus(payload: { status?: string; error?: string }): void {
     const status = payload?.status || "idle";
+    this.lastRelayStatus = status;
     logger.info("[PO Bridge] Status from relay", { status, error: payload?.error });
 
     if (status === "awaiting_ssid") {
       this.lastStatus = "awaiting_ssid";
+      this.broadcastFeedStatusIfChanged();
       return;
     }
     if (status === "connected") {
       this.lastStatus = "ONLINE";
+      this.broadcastFeedStatusIfChanged();
       return;
     }
     if (
       status === "connection_error" ||
       status === "disconnected" ||
-      status === "stopped"
+      status === "stopped" ||
+      status === "stalled"
     ) {
       this.lastStatus = "DEGRADED";
+      this.broadcastFeedStatusIfChanged();
       return;
     }
+    if (status === "session_expired") {
+      this.lastStatus = "DEGRADED";
+      this.broadcastFeedStatusIfChanged();
+      return;
+    }
+  }
+
+  /** Relay `heartbeat` — the 5s liveness probe. Recorded for the heartbeat-age
+   *  rule and used to re-derive + push the authoritative feed_status. */
+  private handleHeartbeat(payload: Record<string, unknown>): void {
+    this.lastHeartbeatAt = Date.now();
+    if (typeof payload?.status === "string" && payload.status !== this.lastRelayStatus) {
+      this.lastRelayStatus = payload.status;
+      if (payload.status === "connected") this.lastStatus = "ONLINE";
+      else if (payload.status === "awaiting_ssid") this.lastStatus = "awaiting_ssid";
+      else if (
+        payload.status === "connection_error" ||
+        payload.status === "disconnected" ||
+        payload.status === "stalled"
+      ) {
+        this.lastStatus = "DEGRADED";
+      }
+    }
+    this.broadcastFeedStatusIfChanged();
+  }
+
+  /** Map current bridge state → the mission feed-status contract. 100% real:
+   *  grounded on the raw relay status + heartbeat age, never fabricated. */
+  private computeFeedStatus(): FeedStatus {
+    if (this.permanentlyDegraded) return "degraded";
+    if (this.lastHeartbeatAt > 0 && Date.now() - this.lastHeartbeatAt > HEARTBEAT_STALE_MS) {
+      return "disconnected";
+    }
+    if (this.lastRelayStatus === "awaiting_ssid") return "awaiting_ssid";
+    if (this.lastRelayStatus === "session_expired") return "auth_failed";
+    if (this.lastRelayStatus === "stalled") return "stalled";
+    if (this.lastStatus === "ONLINE" || this.connected) return "live";
+    if (this.lastStatus === "DEGRADED") return "degraded";
+    if (this.lastStatus === "awaiting_ssid") return "awaiting_ssid";
+    return "awaiting_ssid";
+  }
+
+  /**
+   * Snapshot of the CURRENT feed-status state (MASTER MISSION part 2) — used to
+   * emit `feed_status` to a freshly-connected socket immediately. Read-only:
+   * never mutates the bridge state machine.
+   */
+  public getCurrentFeedStatus(): {
+    status: FeedStatus;
+    lastHeartbeatTs?: number;
+    heartbeatAgeMs: number;
+  } {
+    return {
+      status: this.computeFeedStatus(),
+      lastHeartbeatTs:
+        this.lastHeartbeatAt > 0 ? this.lastHeartbeatAt : undefined,
+      heartbeatAgeMs: this.lastHeartbeatAt > 0 ? Date.now() - this.lastHeartbeatAt : 0,
+    };
+  }
+
+  /** Emit feed_status to all Socket.IO clients only when the value changed. */
+  private broadcastFeedStatusIfChanged(): void {
+    const status = this.computeFeedStatus();
+    if (status === this.lastBroadcastFeedStatus) return;
+    this.lastBroadcastFeedStatus = status;
+    const ageMs =
+      this.lastHeartbeatAt > 0 ? Date.now() - this.lastHeartbeatAt : 0;
+    websocketService.broadcastFeedStatus(status, {
+      lastHeartbeatTs: this.lastHeartbeatAt > 0 ? this.lastHeartbeatAt : undefined,
+      heartbeatAgeMs: ageMs,
+    });
+  }
+
+  /** Watchdog: re-derive feed_status on the heartbeat-age rule so a silent
+   *  relay (transport up, heartbeats dead) flips to `disconnected` without
+   *  waiting for an event. */
+  private startFeedStatusWatchdog(): void {
+    if (this.feedStatusTimer) return;
+    this.feedStatusTimer = setInterval(() => {
+      this.broadcastFeedStatusIfChanged();
+    }, FEED_STATUS_WATCHDOG_MS);
   }
 
   private handleSubscribed(payload: Record<string, unknown>): void {
@@ -882,12 +1025,8 @@ export class PocketOptionBridgeService {
       return;
     }
 
-    const heldPrice = payload.last_valid_price;
-    if (
-      typeof heldPrice === "number" &&
-      Number.isFinite(heldPrice) &&
-      heldPrice > 0
-    ) {
+    const heldPrice = toFiniteNumber(payload.last_valid_price);
+    if (heldPrice !== null && heldPrice > 0) {
       // Seed the SSOT + real-tick ring from the bridge's held real PO print so
       // the freshness gate and the client's "WAITING FOR REAL-TIME TICK" lock
       // clear INSTANTLY on the handshake (no waiting on a quiet tape).
@@ -901,9 +1040,10 @@ export class PocketOptionBridgeService {
       }
       // One live_tick so the chart + live pane flip armed the moment the
       // handshake lands — a genuine held PO print, never fabricated.
+      const heldAtMs = toFiniteNumber(payload.last_valid_at);
       const ts =
-        typeof payload.last_valid_at === "number" && payload.last_valid_at > 0
-          ? new Date(payload.last_valid_at).toISOString()
+        heldAtMs !== null && heldAtMs > 0
+          ? new Date(heldAtMs).toISOString()
           : new Date().toISOString();
       websocketService.broadcastLiveTick({
         symbol: norm,
@@ -914,26 +1054,25 @@ export class PocketOptionBridgeService {
 
     if (Array.isArray(payload.closed_candles)) {
       for (const mc of payload.closed_candles as Array<Record<string, unknown>>) {
-        if (
-          mc &&
-          typeof mc.time === "number" &&
-          typeof mc.open === "number" &&
-          typeof mc.close === "number" &&
-          mc.open > 0 &&
-          mc.close > 0
-        ) {
-          forexDataService.ingestPoCandle(
-            norm,
-            mc.time,
-            {
-              open: mc.open,
-              high: (mc.high as number) ?? mc.open,
-              low: (mc.low as number) ?? mc.open,
-              close: mc.close,
-            },
-            true,
-          );
-        }
+        if (!mc) continue;
+        const o = toFiniteNumber(mc.open);
+        const h = toFiniteNumber(mc.high);
+        const l = toFiniteNumber(mc.low);
+        const c = toFiniteNumber(mc.close);
+        const t = toFiniteNumber(mc.time);
+        if (t === null || o === null || c === null) continue;
+        if (o <= 0 || c <= 0) continue;
+        forexDataService.ingestPoCandle(
+          norm,
+          t,
+          {
+            open: o,
+            high: h ?? o,
+            low: l ?? o,
+            close: c,
+          },
+          true,
+        );
       }
     }
 
@@ -957,52 +1096,46 @@ export class PocketOptionBridgeService {
         close: number;
       }>;
     }>) {
-      if (
-        entry &&
-        typeof entry.symbol === "string" &&
-        typeof entry.last_valid_price === "number" &&
-        Number.isFinite(entry.last_valid_price) &&
-        entry.last_valid_price > 0
-      ) {
-        const norm = entry.symbol.trim().toUpperCase();
-        // Arm the live-quant /tick-signal forwarder (coalesced, no drops).
-        liveTickSignalDispatcher.enqueue(norm);
-        // Author the PO SSOT price so the whole platform reads the same value.
-        forexDataService.setPocketOptionPrice(norm, entry.last_valid_price);
-        // Seed the real-tick ring so a cold backend / re-joined client gets an
-        // instant fresh quote (genuine held PO print — never fabricated).
-        realtimeTickBuffer.append(norm, entry.last_valid_price);
-        // Fold into candle buffer (tick-accumulation for the ML path).
-        try {
-          forexDataService.appendTick(norm, entry.last_valid_price);
-        } catch {
-          /* non-fatal */
-        }
-        // Ingest any closed M20 candles from the snapshot so the candle buffer
-        // is pre-populated with real PO history — no skeleton bars needed.
-        if (Array.isArray(entry.closed_candles)) {
-          for (const mc of entry.closed_candles) {
-            if (
-              mc &&
-              typeof mc.time === "number" &&
-              typeof mc.open === "number" &&
-              typeof mc.close === "number" &&
-              mc.open > 0 &&
-              mc.close > 0
-            ) {
-              forexDataService.ingestPoCandle(
-                norm,
-                mc.time,
-                {
-                  open: mc.open,
-                  high: mc.high ?? mc.open,
-                  low: mc.low ?? mc.open,
-                  close: mc.close,
-                },
-                true,
-              );
-            }
-          }
+      if (!entry || typeof entry.symbol !== "string") continue;
+      const heldPrice = toFiniteNumber(entry.last_valid_price);
+      if (heldPrice === null || heldPrice <= 0) continue;
+      const norm = entry.symbol.trim().toUpperCase();
+      // Arm the live-quant /tick-signal forwarder (coalesced, no drops).
+      liveTickSignalDispatcher.enqueue(norm);
+      // Author the PO SSOT price so the whole platform reads the same value.
+      forexDataService.setPocketOptionPrice(norm, heldPrice);
+      // Seed the real-tick ring so a cold backend / re-joined client gets an
+      // instant fresh quote (genuine held PO print — never fabricated).
+      realtimeTickBuffer.append(norm, heldPrice);
+      // Fold into candle buffer (tick-accumulation for the ML path).
+      try {
+        forexDataService.appendTick(norm, heldPrice);
+      } catch {
+        /* non-fatal */
+      }
+      // Ingest any closed M20 candles from the snapshot so the candle buffer
+      // is pre-populated with real PO history — no skeleton bars needed.
+      if (Array.isArray(entry.closed_candles)) {
+        for (const mc of entry.closed_candles) {
+          if (!mc) continue;
+          const o = toFiniteNumber(mc.open);
+          const h = toFiniteNumber(mc.high);
+          const l = toFiniteNumber(mc.low);
+          const c = toFiniteNumber(mc.close);
+          const t = toFiniteNumber(mc.time);
+          if (t === null || o === null || c === null) continue;
+          if (o <= 0 || c <= 0) continue;
+          forexDataService.ingestPoCandle(
+            norm,
+            t,
+            {
+              open: o,
+              high: h ?? o,
+              low: l ?? o,
+              close: c,
+            },
+            true,
+          );
         }
       }
     }
@@ -1013,14 +1146,26 @@ export class PocketOptionBridgeService {
     // chart, signal engine and prediction pipeline consume the exact same OHLC
     // structure Pocket Option's active feed produces — zero local re-derivation.
     try {
+      const o = toFiniteNumber(candle.open);
+      const h = toFiniteNumber(candle.high);
+      const l = toFiniteNumber(candle.low);
+      const c = toFiniteNumber(candle.close);
+      const t = toFiniteNumber(candle.time);
+      if (o === null || c === null || t === null || o <= 0 || c <= 0) {
+        logger.debug("[PO Bridge] Rejected non-finite M20 candle", {
+          symbol: candle.symbol,
+          time: candle.time,
+        });
+        return;
+      }
       forexDataService.ingestPoCandle(
         candle.symbol,
-        candle.time,
+        t,
         {
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
+          open: o,
+          high: h ?? o,
+          low: l ?? o,
+          close: c,
         },
         candle.closed,
         candle.asset_type,

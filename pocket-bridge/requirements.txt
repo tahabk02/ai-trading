@@ -1,3 +1,8 @@
 BinaryOptionsToolsV2==0.2.14
 websockets>=12.0
 python-dotenv>=1.0
+# Headless SSID refresh (session/refresh_ssid.py) — the bridge tolerates its
+# absence with a clear install hint, but the container needs it.
+playwright>=1.40
+# Optional: PO_SESSION_KEY at-rest encryption (Fernet).
+# cryptography>=42.0

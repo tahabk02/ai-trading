@@ -40,70 +40,689 @@
  *   • Strictly monotonic, synchronized to system wall-clock time with predictive lead.
  */
 
-// ── Timeframe contract ──
-// Mirrors `SUPPORTED_INTERVAL_MS` in the pocket-bridge engine so the client
-// candle grid and the bridge aggregation grid are the same universe of
-// intervals (micro 20ms all the way to 10-day sweeps).
+// ── PO-Canonical Timeframe Contract ──
+// Pocket Option uses a specific set of chart intervals. We use uppercase
+// canonical keys (M1, H1, D1) matching PO's internal naming convention.
 
 export type Timeframe =
-  | "20ms"
-  | "100ms"
-  | "1s"
-  | "5s"
-  | "20s"
-  | "1m"
-  | "2m"
-  | "3m"
-  | "5m"
-  | "10m"
-  | "15m"
-  | "20m"
-  | "25m"
-  | "30m"
-  | "35m+"
-  | "1h"
-  | "4h"
-  | "1d"
-  | "2d"
-  | "3d"
-  | "5d"
-  | "10d";
+  | "S5" | "S10" | "S15" | "S30"
+  | "M1" | "M2" | "M3" | "M5" | "M10" | "M15" | "M30"
+  | "H1" | "H4" | "D1";
 
-/** Bucket width in milliseconds — `20ms` is the strict micro-tick live candle
- *  (identical numeral to the bridge engine's `SUPPORTED_INTERVAL_MS["20ms"]`). */
+/** Bucket width in milliseconds — PO canonical intervals. */
 export const TIMEFRAME_MS: Record<Timeframe, number> = {
-  "20ms": 20,
-  "100ms": 100,
-  "1s": 1_000,
-  "5s": 5_000,
-  "20s": 20_000,
-  "1m": 60_000,
-  "2m": 120_000,
-  "3m": 180_000,
-  "5m": 300_000,
-  "10m": 600_000,
-  "15m": 900_000,
-  "20m": 1_200_000,
-  "25m": 1_500_000,
-  "30m": 1_800_000,
-  "35m+": 2_100_000,
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "1d": 86_400_000,
-  "2d": 172_800_000,
-  "3d": 259_200_000,
-  "5d": 432_000_000,
-  "10d": 864_000_000,
+  "S5": 5_000,
+  "S10": 10_000,
+  "S15": 15_000,
+  "S30": 30_000,
+  "M1": 60_000,
+  "M2": 120_000,
+  "M3": 180_000,
+  "M5": 300_000,
+  "M10": 600_000,
+  "M15": 900_000,
+  "M30": 1_800_000,
+  "H1": 3_600_000,
+  "H4": 14_400_000,
+  "D1": 86_400_000,
 };
 
 export const SUPPORTED_TIMEFRAMES = Object.keys(TIMEFRAME_MS) as Timeframe[];
 
-export function isTimeframe(value: string): value is Timeframe {
-  return Object.prototype.hasOwnProperty.call(TIMEFRAME_MS, value);
+/** Alias map: reverse-numeric ("1H"→"H1", "5m"→"M5", etc.) resolved at init. */
+const ALIAS_MAP: Record<string, Timeframe> = {};
+for (const key of SUPPORTED_TIMEFRAMES) {
+  const num = key.match(/^([A-Z])(\d+)$/);  // H1 → ["H1","H","1"]
+  if (num) ALIAS_MAP[`${num[2]}${num[1].toLowerCase()}`] = key as Timeframe;
+  ALIAS_MAP[key.toLowerCase()] = key as Timeframe;          // h1 → H1
 }
 
+/** Case-insensitive check: "m1", "M1", "1h", "1H", "H1" all resolve. */
+export function isTimeframe(value: string): value is Timeframe {
+  const raw = (value || "").trim();
+  if (raw in ALIAS_MAP) return true;
+  const lower = raw.toLowerCase();
+  if (lower in ALIAS_MAP) return true;
+  return Object.prototype.hasOwnProperty.call(TIMEFRAME_MS, raw.toUpperCase());
+}
+
+/** Case-insensitive resolution to canonical PO timeframe. */
+export function normalizeTimeframe(value: string): Timeframe | null {
+  const raw = (value || "").trim();
+  if (raw in ALIAS_MAP) return ALIAS_MAP[raw];
+  const lower = raw.toLowerCase();
+  if (lower in ALIAS_MAP) return ALIAS_MAP[lower];
+  const upper = raw.toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(TIMEFRAME_MS, upper)) return upper as Timeframe;
+  return null;
+}
+
+/** Resolve a timeframe string to canonical PO form, falling back to M1. */
+export function resolveTimeframe(value: string): Timeframe {
+  return normalizeTimeframe(value) ?? "M1";
+}
+
+/** Bucket width in milliseconds from any timeframe string (case-insensitive). */
 export function timeframeToMs(timeframe: string): number {
-  return isTimeframe(timeframe) ? TIMEFRAME_MS[timeframe] : TIMEFRAME_MS["1m"];
+  const canonical = normalizeTimeframe(timeframe);
+  return canonical ? TIMEFRAME_MS[canonical] : TIMEFRAME_MS["M1"];
+}
+
+/** Bucket width in seconds from any timeframe string. */
+export function timeframeToSeconds(timeframe: string): number {
+  return Math.round(timeframeToMs(timeframe) / 1000);
+}
+
+// ── History Bar Gate (PO-parity retention table) ──
+
+/** Per-bucket-width lookback retention in ms (PO-parity). */
+export const MAX_HISTORY_LOOKBACK: Record<string, number> = {
+  [TIMEFRAME_MS["S5"]]: 3_600_000,        // 1h
+  [TIMEFRAME_MS["M1"]]: 86_400_000,       // 24h
+  [TIMEFRAME_MS["M5"]]: 604_800_000,      // 7d
+  [TIMEFRAME_MS["M15"]]: 2_592_000_000,   // 30d
+  [TIMEFRAME_MS["H1"]]: 7_776_000_000,    // 90d
+  [TIMEFRAME_MS["D1"]]: 31_536_000_000,   // 365d
+};
+
+/** Lookback retention in ms for a given bucket width. */
+export function historyLookbackMs(bucketWidthMs: number): number {
+  const key = String(bucketWidthMs);
+  if (Object.prototype.hasOwnProperty.call(MAX_HISTORY_LOOKBACK, key)) {
+    return MAX_HISTORY_LOOKBACK[key];
+  }
+  return 86_400_000;
+}
+
+/** True when a seeded bar passes the grid-alignment + lookback gate. */
+export function historyBarCheck(
+  barTimestampMs: number,
+  bucketWidthMs: number,
+  nowMs: number,
+): boolean {
+  if (!Number.isFinite(barTimestampMs) || barTimestampMs <= 0) return false;
+  if (!Number.isFinite(bucketWidthMs) || bucketWidthMs <= 0) return false;
+  if (!Number.isFinite(nowMs) || nowMs <= 0) return false;
+  if (barTimestampMs % bucketWidthMs !== 0) return false;
+  const lookback = historyLookbackMs(bucketWidthMs);
+  if (nowMs - barTimestampMs > lookback) return false;
+  if (barTimestampMs > nowMs) return false;
+  return true;
+}
+
+// ── Signal Gate (AI-confidence parity) ──
+
+/** Hard confidence threshold for directional signals (PO AI parity). */
+export const SIGNAL_CONFIDENCE_THRESHOLD = 0.965;
+
+/** Normalize a confidence value (0..1 or 0..100) into 0..1. */
+export function normalizeConfidence(raw: number): number {
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  return raw > 1 ? Math.min(raw / 100, 1) : raw;
+}
+
+/** True when a signal meets the hard confidence gate. */
+export function signalGate(
+  signal: "BUY" | "SELL" | null | undefined,
+  confidence: number,
+  threshold: number = SIGNAL_CONFIDENCE_THRESHOLD,
+): boolean {
+  if (signal !== "BUY" && signal !== "SELL") return false;
+  const conf = normalizeConfidence(confidence);
+  const thresh = Number.isFinite(threshold) && threshold > 0
+    ? threshold
+    : SIGNAL_CONFIDENCE_THRESHOLD;
+  return conf >= thresh;
+}
+
+export interface SignalView {
+  gatedSignal: "BUY" | "SELL" | null;
+  directionText: string;
+  badgeText: string | null;
+  gated: boolean;
+  confPct: number;
+  gatePct: number;
+}
+
+export function buildSignalView(
+  prediction: { signal?: string; confidence?: number } | null | undefined,
+  threshold: number = SIGNAL_CONFIDENCE_THRESHOLD,
+): SignalView {
+  const rawSignal =
+    prediction && (prediction.signal === "BUY" || prediction.signal === "SELL")
+      ? prediction.signal
+      : null;
+  const conf01 = normalizeConfidence(Number(prediction?.confidence));
+  const gated = signalGate(rawSignal, conf01, threshold);
+  const gatedSignal: "BUY" | "SELL" | null = gated ? rawSignal : null;
+  const gatePct =
+    Math.round(
+      Math.min(
+        Number.isFinite(threshold) && threshold > 0
+          ? threshold
+          : SIGNAL_CONFIDENCE_THRESHOLD,
+        1,
+      ) * 1000,
+    ) / 10;
+  const confPct = Math.round(conf01 * 100);
+  return {
+    gatedSignal,
+    confPct,
+    gatePct,
+    badgeText: !rawSignal
+      ? null
+      : gated
+        ? `SIGNAL: ${rawSignal}`
+        : `NO SIGNAL — confidence ${confPct}% < ${gatePct}%`,
+    directionText: gatedSignal !== null ? gatedSignal : "NO SIGNAL",
+    gated,
+  };
+}
+
+// ── Chart Layout Constants (PO-parity) ──
+
+export const INITIAL_BAR_SPACING_PX = 12;
+export const MIN_BAR_SPACING_PX = 6;
+export const DENSE_VISIBLE_BARS = 30;
+export const BARS_PER_FRAME = 30;
+export const TARGET_RIGHT_GUTTER = 4;
+
+// ── Projection Slots ──
+
+export interface ProjectionSlot {
+  index: number;
+  timeSec: number;
+}
+
+export function projectionSlots(
+  tipTimestampMs: number,
+  bucketWidthMs: number,
+  leadMinutes: number,
+): ProjectionSlot[] {
+  if (!Number.isFinite(tipTimestampMs) || tipTimestampMs <= 0) return [];
+  if (!Number.isFinite(bucketWidthMs) || bucketWidthMs <= 0) return [];
+  const bwMin = Math.max(bucketWidthMs / 60_000, 1);
+  const n = Math.max(1, Math.round((Number(leadMinutes) || 1) / bwMin));
+  const tipSec = Math.floor(tipTimestampMs / 1000);
+  const bwSec = Math.round(bucketWidthMs / 1000);
+  if (bwSec <= 0) return [];
+  const slots: ProjectionSlot[] = [];
+  for (let i = 1; i <= n; i++) {
+    slots.push({ index: i, timeSec: tipSec + i * bwSec });
+  }
+  return slots;
+}
+
+export function targetIntervals(leadMinutes: number, timeframeMinutes: number): number {
+  const lead = Number(leadMinutes);
+  const tf = Number(timeframeMinutes);
+  if (!Number.isFinite(lead) || !Number.isFinite(tf) || tf <= 0) return 1;
+  return Math.max(1, Math.min(30, Math.round(lead / tf)));
+}
+
+export function targetIntervalsFor(expirationSeconds: number, timeframeSeconds: number): number {
+  const exp = Number(expirationSeconds);
+  const tf = Number(timeframeSeconds);
+  if (!Number.isFinite(exp) || !Number.isFinite(tf) || tf <= 0) return 1;
+  return Math.max(1, Math.min(30, Math.round(exp / tf)));
+}
+
+export interface TargetSlot {
+  index: number;
+  timeSec: number;
+  offsetSec: number;
+}
+
+export function targetSlots(
+  tipTimestampSec: number,
+  bucketSec: number,
+  count: number,
+): TargetSlot[] {
+  if (!Number.isFinite(tipTimestampSec) || tipTimestampSec <= 0) return [];
+  if (!Number.isFinite(bucketSec) || bucketSec <= 0) return [];
+  const n = Math.max(1, Math.round(Number(count) || 1));
+  const floor = Math.floor(tipTimestampSec / bucketSec) * bucketSec;
+  const slots: TargetSlot[] = [];
+  for (let i = 1; i <= n; i++) {
+    slots.push({
+      index: i,
+      timeSec: floor + i * bucketSec,
+      offsetSec: i * bucketSec,
+    });
+  }
+  return slots;
+}
+
+// ── Axis Time Formatter ──
+
+export function formatAxisTime(timestampSec: number, bucketWidthMs: number): string {
+  if (!Number.isFinite(timestampSec) || timestampSec <= 0) return "";
+  const bw = Number(bucketWidthMs) || 60_000;
+  const d = new Date(timestampSec * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  const day = d.getUTCDate();
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const mon = months[d.getUTCMonth()];
+  if (bw < 60_000) return `${hh}:${mm}:${ss}`;
+  if (bw < 86_400_000) return `${hh}:${mm}`;
+  return `${day} ${mon}`;
+}
+
+// ── Target Candle Engine ──
+
+export const TARGET_RGB: Record<string, [number, number, number]> = {
+  BUY: [38, 166, 154],
+  SELL: [239, 83, 80],
+  NEUTRAL: [148, 163, 184],
+};
+
+export function targetColorFor(signal: string | null | undefined): string {
+  if (signal === "BUY") return "#26a69a";
+  if (signal === "SELL") return "#ef5350";
+  return "#94a3b8";
+}
+
+export function targetAlpha(index: number, intervals?: number): number {
+  const n =
+    Number.isFinite(intervals) && (intervals as number) > 0
+      ? (intervals as number)
+      : 10;
+  const decay = 0.3 / n;
+  const floor = 0.65;
+  return Math.max(floor, 0.95 - index * decay);
+}
+
+/** Per-bar rgba string from the signal colour + the alpha decay (chart-ready). */
+export function targetRgba(
+  signal: string | null | undefined,
+  index: number,
+  intervals?: number,
+): string {
+  const rgb =
+    signal === "BUY"
+      ? TARGET_RGB.BUY
+      : signal === "SELL"
+        ? TARGET_RGB.SELL
+        : TARGET_RGB.NEUTRAL;
+  const a = targetAlpha(index, intervals);
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`;
+}
+
+export interface TargetFrameCandle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  color: string;
+  borderColor: string;
+  wickColor: string;
+  alpha: number;
+  offsetSec: number;
+  index: number;
+}
+
+export interface TargetCandleData extends TargetFrameCandle {}
+
+export function buildTargetFrame(opts: {
+  liveTipBucketSec: number;
+  timeframeSec: number;
+  intervals: number;
+  liveClose: number;
+  target: number;
+  atr: number;
+  signal: string | null | undefined;
+}): TargetFrameCandle[] {
+  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal } = opts;
+  if (!Number.isFinite(liveTipBucketSec) || liveTipBucketSec <= 0) return [];
+  if (!Number.isFinite(intervals) || intervals < 1) return [];
+  if (!Number.isFinite(timeframeSec) || timeframeSec <= 0) return [];
+  if (!Number.isFinite(liveClose) || liveClose <= 0) return [];
+  if (!Number.isFinite(target) || target <= 0) return [];
+  const n = Math.max(1, Math.round(intervals));
+  const delta = target - liveClose;
+  const borderColor = targetColorFor(signal);
+  const wickColor = borderColor;
+  // VOLATILITY CUSHION — ATR × 0.35 per bar, tapering LINEARLY to zero as
+  // progress → 1 (taper = (n − k) / n). The final projected candle therefore
+  // lands exactly on targetPrice with no overshoot. A NaN/≤0 ATR falls back
+  // to a flat-line projection (wick = 0, never thrown, never garbage). An
+  // absolute safety cap (50% of the anchor level) kills pathological ATR
+  // values, and the low is clamped at 0 so geometry is always finite.
+  const atrValid = Number.isFinite(atr) && atr > 0;
+  const basePrice = Math.max(Math.abs(liveClose), Math.abs(target));
+  const safetyCap = Math.max(basePrice * 0.5, 1e-9);
+  const frame: TargetFrameCandle[] = [];
+  let prevClose = liveClose;
+  for (let i = 1; i <= n; i++) {
+    const k = i;
+    const close = liveClose + delta * (k / n);
+    const open = i === 1 ? liveClose : prevClose;
+    const taper = (n - k) / n;
+    const wick = Math.min(atrValid ? atr * 0.35 * taper : 0, safetyCap);
+    const high = Math.max(open, close) + wick;
+    const low = Math.max(0, Math.min(open, close) - wick);
+    const alpha = targetAlpha(k, n);
+    frame.push({
+      time: liveTipBucketSec + k * timeframeSec,
+      open,
+      high,
+      low,
+      close,
+      color: targetRgba(signal, k, n),
+      borderColor,
+      wickColor,
+      alpha,
+      offsetSec: k * timeframeSec,
+      index: k,
+    });
+    prevClose = close;
+  }
+  return frame;
+}
+
+export function resolveLookaheadHorizon(leadMinutes: number): number {
+  const v = Number(leadMinutes);
+  if (!Number.isFinite(v) || v <= 0) return 1;
+  return Math.max(1, Math.round(v));
+}
+
+export interface TargetViewportRange {
+  from: number;
+  to: number;
+}
+
+export function targetViewportRange(
+  mainCount: number,
+  intervals: number,
+  rightGutter: number,
+): TargetViewportRange {
+  const from = Math.max(0, mainCount - DENSE_VISIBLE_BARS);
+  const to = mainCount + Math.max(0, intervals) + Math.max(0, rightGutter);
+  return { from, to };
+}
+
+/** Build predictive target candles for the chart projection layer.
+ *  Candles ALWAYS render when the four data preconditions hold — the 96.5%
+ *  confidence gate ONLY affects the BUY/SELL label, NOT the candle geometry.
+ */
+export function buildTargetCandles(opts: {
+  liveTipBucketMs: number;
+  liveClose: number;
+  targetPrice: number;
+  atr: number;
+  signal: string | null | undefined;
+  expirationSeconds: number;
+  timeframeSeconds: number;
+}): TargetCandleData[] {
+  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, expirationSeconds, timeframeSeconds } = opts;
+  if (!Number.isFinite(liveTipBucketMs) || liveTipBucketMs <= 0) return [];
+  if (!Number.isFinite(targetPrice) || targetPrice <= 0) return [];
+  if (!Number.isFinite(timeframeSeconds) || timeframeSeconds <= 0) return [];
+  if (!Number.isFinite(expirationSeconds) || expirationSeconds <= 0) return [];
+  const tipSec = Math.floor(liveTipBucketMs / 1000);
+  const intervals = Math.max(1, Math.min(30, Math.round(expirationSeconds / timeframeSeconds)));
+  return buildTargetFrame({
+    liveTipBucketSec: tipSec,
+    timeframeSec: timeframeSeconds,
+    intervals,
+    liveClose,
+    target: targetPrice,
+    atr,
+    signal,
+  });
+}
+
+// ── ARCHITECTURAL OVERHAUL: DETERMINISTIC PROJECTION ENGINE ──
+// Separates the high-frequency WebSocket tick stream from the target-candle
+// projection matrix. Micro price fluctuations NEVER rebuild geometry — only a
+// structural change (tip bucket advance, targetPrice, timeframe, expiration,
+// gated signal, or anchor ATR) shifts the key and triggers a rebuild. The
+// array reference is stable across identical keys, so renderers can skip
+// repaints entirely by reference equality. Zero Date.now() anchoring.
+
+/** Round a value to `places` decimals so float noise can never bust the key. */
+function quantizeH(v: number, places: number): number {
+  if (!Number.isFinite(v)) return 0;
+  const p = Math.pow(10, places);
+  return Math.round(v * p) / p;
+}
+
+export interface TargetProjectionInputs {
+  /** Exact grid floor-bucket seconds of the live tip (never a raw wall clock). */
+  liveTipBucketSec: number;
+  timeframeSec: number;
+  expirationSec: number;
+  /** Instantaneous live close — only read on a structural rebuild. */
+  liveClose: number;
+  targetPrice: number;
+  atr: number;
+  signal: "BUY" | "SELL" | null;
+}
+
+export interface TargetProjectionSnapshot {
+  /** Structural key of the projection currently rendered. "" = no projection. */
+  key: string;
+  intervals: number;
+  candles: TargetCandleData[];
+  /** Live close the projection was geometrically anchored to when locked. */
+  anchorLiveClose: number;
+  targetPrice: number;
+  firstSlotSec: number;
+  lastSlotSec: number;
+  /** True when the snapshot is NOT identical to the previous present() call. */
+  changed: boolean;
+}
+
+/**
+ * Structural hash of a projection. Excludes the exact live close and wall time
+ * by design — only bucket-aligned, expiry-bound shifters can invalidate it.
+ */
+export function targetProjectionKey(inputs: TargetProjectionInputs): string {
+  const intervals = targetIntervalsFor(inputs.expirationSec, inputs.timeframeSec);
+  return [
+    "tip",
+    Math.floor(inputs.liveTipBucketSec),
+    "tf",
+    Number(inputs.timeframeSec) || 0,
+    "exp",
+    Number(inputs.expirationSec) || 0,
+    "n",
+    intervals,
+    "tgt",
+    quantizeH(inputs.targetPrice, 7),
+    "atr",
+    quantizeH(inputs.atr, 7),
+    "sig",
+    inputs.signal ?? "N",
+  ].join("|");
+}
+
+/**
+ * Deterministic, memoized projection matrix. Calling present() with an
+ * unchanged structural key returns the EXACT SAME candle array reference, so
+ * the chart can skip series repaints by reference equality. The projection
+ * re-anchors its `liveClose` baseline ONLY when the key shifts (new bucket or
+ * a structural target/timeframe/expiration change) — never on micro ticks.
+ */
+export class TargetProjectionEngine {
+  private key = "";
+  private candles: TargetCandleData[] = [];
+  private anchorLiveClose = 0;
+
+  /** 1:1-deterministic snapshot. Returns identical array ref on unchanged key. */
+  present(inputs: TargetProjectionInputs): TargetProjectionSnapshot {
+    const tipSec = Math.floor(Number(inputs.liveTipBucketSec) || 0);
+    const tfSec = Number(inputs.timeframeSec) || 0;
+    const expSec = Number(inputs.expirationSec) || 0;
+    const intervals = targetIntervalsFor(expSec, tfSec);
+    const valid =
+      tipSec > 0 &&
+      tfSec > 0 &&
+      expSec > 0 &&
+      Number.isFinite(inputs.targetPrice) &&
+      inputs.targetPrice > 0;
+    if (!valid) {
+      const changed = this.key !== "";
+      this.key = "";
+      this.candles = [];
+      this.anchorLiveClose = 0;
+      return {
+        key: "",
+        intervals,
+        candles: this.candles,
+        anchorLiveClose: 0,
+        targetPrice: inputs.targetPrice,
+        firstSlotSec: 0,
+        lastSlotSec: 0,
+        changed,
+      };
+    }
+    const key = targetProjectionKey({
+      liveTipBucketSec: tipSec,
+      timeframeSec: tfSec,
+      expirationSec: expSec,
+      liveClose: inputs.liveClose,
+      targetPrice: inputs.targetPrice,
+      atr: inputs.atr,
+      signal: inputs.signal,
+    });
+    if (key === this.key) {
+      return {
+        key,
+        intervals,
+        candles: this.candles,
+        anchorLiveClose: this.anchorLiveClose,
+        targetPrice: inputs.targetPrice,
+        firstSlotSec: tipSec + tfSec,
+        lastSlotSec: tipSec + intervals * tfSec,
+        changed: false,
+      };
+    }
+    const anchor =
+      Number.isFinite(inputs.liveClose) && inputs.liveClose > 0
+        ? inputs.liveClose
+        : this.anchorLiveClose > 0
+          ? this.anchorLiveClose
+          : 0;
+    this.candles = buildTargetCandles({
+      liveTipBucketMs: tipSec * 1000,
+      liveClose: anchor,
+      targetPrice: inputs.targetPrice,
+      atr: inputs.atr,
+      signal: inputs.signal,
+      expirationSeconds: expSec,
+      timeframeSeconds: tfSec,
+    });
+    this.key = key;
+    this.anchorLiveClose = anchor;
+    return {
+      key,
+      intervals,
+      candles: this.candles,
+      anchorLiveClose: anchor,
+      targetPrice: inputs.targetPrice,
+      firstSlotSec: tipSec + tfSec,
+      lastSlotSec: tipSec + intervals * tfSec,
+      changed: true,
+    };
+  }
+
+  /** Drop the memo so the next present() with ANY key is treated as new. */
+  reset(): void {
+    this.key = "";
+    this.candles = [];
+    this.anchorLiveClose = 0;
+  }
+
+  get currentKey(): string {
+    return this.key;
+  }
+
+  get currentAnchor(): number {
+    return this.anchorLiveClose;
+  }
+}
+
+// ── SIGNAL STABILITY & STATE FREEZING ──
+// A directional signal commits at a bucket boundary and is IMMUTABLE for the
+// active bucket duration (freeze window). Confidence jitter around the 96.5%
+// gate can only flip the UI label after the bucket elapses, and a return to
+// neutral must persist for `holdNeutralEvals` consecutive reads — so the
+// BUY/SELL label never shimmers on every second tick.
+
+export interface SignalHoldBufferOptions {
+  /** Consecutive neutral reads before a held directional signal clears. */
+  holdNeutralEvals?: number;
+  /** Freeze window in wall seconds (default M1 = 60s). */
+  commitBucketSec?: number;
+}
+
+export class SignalHoldBuffer {
+  private held: "BUY" | "SELL" | null = null;
+  private committedSec = Number.MIN_SAFE_INTEGER;
+  private nullStreak = 0;
+  private readonly holdNeutralEvals: number;
+  private readonly commitBucketSec: number;
+
+  constructor(opts?: SignalHoldBufferOptions) {
+    this.holdNeutralEvals = Math.max(1, opts?.holdNeutralEvals ?? 2);
+    this.commitBucketSec = Math.max(1, opts?.commitBucketSec ?? 60);
+  }
+
+  /** Feed the raw gated signal. Returns the STABILIZED signal. */
+  evaluate(
+    raw: "BUY" | "SELL" | null,
+    wallSec: number,
+    bucketSec?: number,
+  ): "BUY" | "SELL" | null {
+    const freeze = Math.max(1, bucketSec ?? this.commitBucketSec);
+    // Currently held directional signal — frozen for its active bucket
+    if (this.held !== null) {
+      const frozen = wallSec - this.committedSec < freeze;
+      if (frozen) return this.held; // immutable within the freeze window
+      // Bucket elapsed — evaluate for change
+      if (raw === null) {
+        this.nullStreak += 1;
+        if (this.nullStreak >= this.holdNeutralEvals) {
+          this.held = null;
+          this.nullStreak = 0;
+          this.committedSec = wallSec;
+        }
+        // committedSec is NOT updated on a non-committing read; the bucket
+        // window stays open so successive neutral reads can count toward the
+        // holdNeutralEvals threshold without a second full-bucket freeze.
+        return this.held;
+      }
+      // Structural directional candidate arrives after the freeze → commit now
+      this.held = raw;
+      this.nullStreak = 0;
+      this.committedSec = wallSec;
+      return this.held;
+    }
+    // Currently neutral — directional commits immediately; neutral accumulates
+    if (raw !== null) {
+      this.held = raw;
+      this.nullStreak = 0;
+      this.committedSec = wallSec;
+    } else {
+      this.nullStreak += 1;
+    }
+    return this.held;
+  }
+
+  /** Reset to neutral. */
+  reset(): void {
+    this.held = null;
+    this.committedSec = Number.MIN_SAFE_INTEGER;
+    this.nullStreak = 0;
+  }
+
+  get current(): "BUY" | "SELL" | null {
+    return this.held;
+  }
 }
 
 // ── Data contracts ──
@@ -172,6 +791,22 @@ export interface HeikinAshiState {
   minLow: number;
   /** Running maximum RAW high folded so far — the upper bound for HA_Open. */
   maxHigh: number;
+}
+
+/** Debug surface for the aggregator — returned by getDebug(). */
+export interface AggregatorDebug {
+  symbol?: string;
+  timeframe: string;
+  bucketMs: number;
+  tickCount: number;
+  bucketWrites: number;
+  bucketsCreated: number;
+  bucketsUpdated: number;
+  gapCount: number;
+  historyRejectedCount: number;
+  historyLiveRejected: number;
+  projectionSlot0OffsetMs: number;
+  [key: string]: unknown;
 }
 
 /** HA_Close = (Open + High + Low + Close) / 4. */
@@ -554,6 +1189,13 @@ interface SymbolState {
   volScale: number;
   volStreak: number;
   volSide: number;
+  tickCount: number;
+  bucketWrites: number;
+  bucketsCreated: number;
+  bucketsUpdated: number;
+  gapCount: number;
+  historyRejectedCount: number;
+  historyLiveRejected: number;
 }
 
 const DEFAULT_MAX_CANDLES = 500;
@@ -765,8 +1407,8 @@ export function normaliseTick(
   if (!symbol) return null;
 
   const rawPrice = Number(r.price ?? r.close);
-  const price = clampPriceToReality(rawPrice, baseline ?? 0);
-  if (!Number.isFinite(price) || price <= 0) return null;
+  if (!Number.isFinite(rawPrice) || rawPrice <= 0) return null;
+  const price = rawPrice;
 
   let timestamp: number;
   if (typeof r.timestamp === "number") {
@@ -951,8 +1593,8 @@ export class RealtimeCandleAggregator {
    *  timestamp so the wall-clock axis rolls on `Date.now()` without drift. */
   private clockOffsetMs = 0;
 
-  constructor(timeframe: Timeframe = "1m", options: AggregatorOptions = {}) {
-    this.timeframe = isTimeframe(timeframe) ? timeframe : "1m";
+  constructor(timeframe: Timeframe = "M1", options: AggregatorOptions = {}) {
+    this.timeframe = isTimeframe(timeframe) ? timeframe : "M1";
     this.bucketMs = TIMEFRAME_MS[this.timeframe];
     this.maxCandles = options.maxCandles ?? DEFAULT_MAX_CANDLES;
     this.maxTickHistory = options.maxTickHistory ?? DEFAULT_MAX_TICKS;
@@ -1470,11 +2112,24 @@ export class RealtimeCandleAggregator {
     const norm = symbol.trim().toUpperCase();
     const state = this.ensure(norm);
 
+    // ── HISTORY BAR GATE (PO-parity retention) ──
+    // Off-grid bars and bars older than the bucket's lookback window are never
+    // seeded onto the chart (stray bars must never leak onto the axis). The
+    // count is surfaced through getDebug().historyRejectedCount.
+    const nowMs = this.timingNow() > 0 ? this.timingNow() : Date.now();
+    let rejected = 0;
+    const gated = (Array.isArray(candles) ? candles : []).filter((c) => {
+      const ok = historyBarCheck(c.timestamp, this.bucketMs, nowMs);
+      if (!ok) rejected += 1;
+      return ok;
+    });
+    state.historyRejectedCount = rejected;
+
     // SYSTEMATIC-SKEW GRID NORMALIZATION — a backend replay can arrive anchored
     // to a shifted wall-clock grid (e.g. systematic ~21h-ahead, lag≈75780s).
     // Re-anchor the whole series onto the active session-tip grid in whole
     // bucket multiples so seeded chain + live bucket share one axis.
-    const clean = this.normalizeSeedGrid(candles)
+    const clean = this.normalizeSeedGrid(gated)
       .filter(
         (c) =>
           Number.isFinite(c.timestamp) &&
@@ -1544,6 +2199,12 @@ export class RealtimeCandleAggregator {
     const normSymbol = tick.symbol.trim().toUpperCase();
     const state = this.ensure(normSymbol);
 
+    // Future-tick guard: a tick stamped >2s into the future is rejected.
+    const nowWall = Date.now();
+    if (tick.timestamp > nowWall + 2_000) return null;
+
+    state.tickCount += 1;
+
     tick.price = clampPriceToReality(
       tick.price,
       this.previousCloseOf(normSymbol),
@@ -1609,11 +2270,19 @@ export class RealtimeCandleAggregator {
       };
       state.isLiveSynthetic = false;
       state.phase = "LIVE";
+      state.bucketsCreated += 1;
+      state.bucketWrites += 1;
     } else if (currentBucket > state.live.timestamp) {
       // ── STRICTLY-NEWER BUCKET → ROLLOVER ──
       // Finalise the forming bar and open the fresh leading bucket from the
       // genuine print. Only a tick mapped onto a LATER leading slot can
       // advance the timeline; `<` is a stale print (handled below).
+      // Count skipped intermediate buckets as synthetic gaps.
+      const skipped = Math.floor((currentBucket - state.live.timestamp) / this.bucketMs) - 1;
+      if (skipped > 0) {
+        state.gapCount += skipped;
+        state.bucketWrites += skipped;
+      }
       const finished = { ...state.live };
       const haFinished = toHeikinAshiBar(finished, state.prevHa);
       state.closed.push(finished);
@@ -1644,6 +2313,8 @@ export class RealtimeCandleAggregator {
       };
       state.isLiveSynthetic = false;
       state.phase = "LIVE";
+      state.bucketsCreated += 1;
+      state.bucketWrites += 1;
     } else if (state.live.timestamp === currentBucket) {
       // Fixed lifecycle: the candle owns the whole interval. A real tick only
       // morphs OHLC in place — open stays pinned to the interval start, never
@@ -1652,6 +2323,8 @@ export class RealtimeCandleAggregator {
       state.live.low = Math.min(state.live.low, spot);
       state.live.close = spot;
       state.live.volume += tick.volume ?? 0;
+      state.bucketsUpdated += 1;
+      state.bucketWrites += 1;
       if (state.isLiveSynthetic) {
         state.isLiveSynthetic = false;
         state.phase = "LIVE";
@@ -2009,6 +2682,48 @@ export class RealtimeCandleAggregator {
   public getLiveCandle(symbol: string): Candle | null {
     const state = this.symbols.get(symbol.trim().toUpperCase());
     return state ? this.haLive(state) : null;
+  }
+
+  /** Exact expiry geometry for the live forming candle. */
+  public getLiveCandleClose(nowMs?: number): {
+    candleCloseMs: number;
+    timeframeMs: number;
+    remainingMs: number;
+    groundedTsMs: number;
+  } | null {
+    const symbol = this.activeSymbol;
+    const state = symbol ? this.symbols.get(symbol) : null;
+    const live = state?.live;
+    if (!live || !live.timestamp) return null;
+    const now = nowMs != null && nowMs > 0 ? nowMs : this.timingNow();
+    const groundedTsMs = this.bucketForTimestamp(live.timestamp);
+    const candleCloseMs = groundedTsMs + this.bucketMs;
+    const remainingMs = Math.max(0, candleCloseMs - now);
+    return {
+      candleCloseMs,
+      timeframeMs: this.bucketMs,
+      remainingMs,
+      groundedTsMs,
+    };
+  }
+
+  /** Debug surface for the aggregator (PO-parity diagnostics). */
+  public getDebug(symbol: string): AggregatorDebug {
+    const state = this.symbols.get((symbol || "").trim().toUpperCase());
+    const projectionSlot0OffsetMs = this.leadMs > 0 ? this.leadMs : this.bucketMs;
+    return {
+      symbol: (symbol || "").trim().toUpperCase(),
+      timeframe: this.timeframe,
+      bucketMs: this.bucketMs,
+      tickCount: state?.tickCount ?? 0,
+      bucketWrites: state?.bucketWrites ?? 0,
+      bucketsCreated: state?.bucketsCreated ?? 0,
+      bucketsUpdated: state?.bucketsUpdated ?? 0,
+      gapCount: state?.gapCount ?? 0,
+      historyRejectedCount: state?.historyRejectedCount ?? 0,
+      historyLiveRejected: state?.historyLiveRejected ?? 0,
+      projectionSlot0OffsetMs,
+    };
   }
 
   /** Real tick price (RAW — NOT Heikin-Ashi close) for price lines and projections. */
@@ -2875,6 +3590,13 @@ export class RealtimeCandleAggregator {
         volScale: 0,
         volStreak: 0,
         volSide: 0,
+        tickCount: 0,
+        bucketWrites: 0,
+        bucketsCreated: 0,
+        bucketsUpdated: 0,
+        gapCount: 0,
+        historyRejectedCount: 0,
+        historyLiveRejected: 0,
       };
       this.symbols.set(symbol, state);
     }

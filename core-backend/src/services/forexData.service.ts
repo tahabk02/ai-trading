@@ -23,6 +23,7 @@
 import axios, { AxiosInstance } from "axios";
 import { logger } from "../utils/logger";
 import { renderFallbackChainLog } from "../lib/feedResilience";
+import { canonicalizeSymbol } from "../utils/symbolFormat";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TYPES
@@ -76,7 +77,7 @@ interface ComputeAtrOptions {
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_POLLING_INTERVAL_MS = 10_000;
 /**
  * Max age (ms) of a held "last real" spot price before it is refused as live.
@@ -105,15 +106,40 @@ const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
 /** Well-known symbols the GitHub repo may store. */
 const KNOWN_FOREX_SYMBOLS = [
-  "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF",
-  "AUD/USD", "NZD/USD", "USD/CAD", "EUR/GBP",
-  "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD",
-  "EUR/NZD", "EUR/TRY", "GBP/JPY", "GBP/CHF",
-  "GBP/AUD", "GBP/CAD", "AUD/JPY", "CAD/JPY",
-  "CHF/JPY", "AUD/CAD", "AUD/NZD", "NZD/JPY",
-  "CAD/CHF", "EUR/RUB", "USD/TRY", "USD/ZAR",
-  "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
-  "BTC/USD", "ETH/USD",
+  "EUR/USD",
+  "GBP/USD",
+  "USD/JPY",
+  "USD/CHF",
+  "AUD/USD",
+  "NZD/USD",
+  "USD/CAD",
+  "EUR/GBP",
+  "EUR/JPY",
+  "EUR/CHF",
+  "EUR/AUD",
+  "EUR/CAD",
+  "EUR/NZD",
+  "EUR/TRY",
+  "GBP/JPY",
+  "GBP/CHF",
+  "GBP/AUD",
+  "GBP/CAD",
+  "AUD/JPY",
+  "CAD/JPY",
+  "CHF/JPY",
+  "AUD/CAD",
+  "AUD/NZD",
+  "NZD/JPY",
+  "CAD/CHF",
+  "EUR/RUB",
+  "USD/TRY",
+  "USD/ZAR",
+  "USD/MXN",
+  "USD/SGD",
+  "MAD/USD",
+  "KES/USD",
+  "BTC/USD",
+  "ETH/USD",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,8 +155,7 @@ class ForexDataService {
   private candleBuffer: Map<string, ForexCandle[]> = new Map();
 
   /** Per-symbol last-known spot price (for cross-method access). */
-  private lastSpotCache: Map<string, { price: number; ts: number }> =
-    new Map();
+  private lastSpotCache: Map<string, { price: number; ts: number }> = new Map();
 
   /**
    * Authoritative Pocket Option prices, fed by the SSOT bridge. When a PO price
@@ -160,8 +185,15 @@ class ForexDataService {
   // cascade and detect recovery after a transient outage. A source that
   // recently failed is retried sooner (not skipped) so the tiered cascade
   // self-heals without waiting for the stale hold to expire.
-  private sourceHealth: Map<string, { ok: boolean; lastCheck: number; failCount: number }> =
-    new Map();
+  private sourceHealth: Map<
+    string,
+    {
+      ok: boolean;
+      lastCheck: number;
+      failCount: number;
+      lastError: string | null;
+    }
+  > = new Map();
   /** True when the last getLiveSpotFresh() fell through to stale-cache or
    *  failed entirely — triggers aggressive retry on the next poll cycle. */
   private recoveryMode = false;
@@ -297,9 +329,7 @@ class ForexDataService {
     const tick = entry as Record<string, unknown>;
 
     const symbol =
-      typeof tick.symbol === "string"
-        ? tick.symbol.trim().toUpperCase()
-        : "";
+      typeof tick.symbol === "string" ? tick.symbol.trim().toUpperCase() : "";
     const price = Number(tick.price);
 
     if (!symbol || !Number.isFinite(price) || price <= 0) return;
@@ -352,8 +382,14 @@ class ForexDataService {
     // and prediction pipeline all consume THIS value, achieving PO parity.
     const po = this.pocketOptionCache.get(norm);
     if (po && Date.now() - po.ts < 15_000 && po.price > 0) {
-      const poBid = typeof po.bid === "number" && Number.isFinite(po.bid) && po.bid > 0 ? po.bid : undefined;
-      const poAsk = typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0 ? po.ask : undefined;
+      const poBid =
+        typeof po.bid === "number" && Number.isFinite(po.bid) && po.bid > 0
+          ? po.bid
+          : undefined;
+      const poAsk =
+        typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0
+          ? po.ask
+          : undefined;
       return {
         success: true,
         price: po.price,
@@ -367,8 +403,14 @@ class ForexDataService {
     // freshness below 5s gap; between 15s..60s we hold the PO rate to avoid
     // arbitrary cross-circuit jumps that would show as chart gaps.
     if (po && po.price > 0 && Date.now() - po.ts < 60_000) {
-      const poBid = typeof po.bid === "number" && Number.isFinite(po.bid) && po.bid > 0 ? po.bid : undefined;
-      const poAsk = typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0 ? po.ask : undefined;
+      const poBid =
+        typeof po.bid === "number" && Number.isFinite(po.bid) && po.bid > 0
+          ? po.bid
+          : undefined;
+      const poAsk =
+        typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0
+          ? po.ask
+          : undefined;
       return {
         success: true,
         price: po.price,
@@ -397,7 +439,11 @@ class ForexDataService {
 
     // Tier 1: Frankfurter (ECB published rates, free)
     const frankResult = await this.fetchFrankfurterSpot(norm);
-    this.recordSourceHealth("frankfurter", frankResult.success);
+    this.recordSourceHealth(
+      "frankfurter",
+      frankResult.success,
+      frankResult.error,
+    );
     if (frankResult.success) {
       this.recoveryMode = false;
       return frankResult;
@@ -405,7 +451,11 @@ class ForexDataService {
 
     // Tier 2: Open Exchange Rates API (free tier)
     const openErResult = await this.fetchOpenErSpot(norm);
-    this.recordSourceHealth("open_er_api", openErResult.success);
+    this.recordSourceHealth(
+      "open_er_api",
+      openErResult.success,
+      openErResult.error,
+    );
     if (openErResult.success) {
       this.recoveryMode = false;
       return openErResult;
@@ -415,26 +465,13 @@ class ForexDataService {
     let cgResult: ForexSpotResult | undefined;
     if (norm === "BTC/USD" || norm === "ETH/USD") {
       cgResult = await this.fetchCoinGeckoSpot(norm);
-      this.recordSourceHealth("coingecko", cgResult.success);
+      this.recordSourceHealth("coingecko", cgResult.success, cgResult.error);
       if (cgResult.success) {
         this.recoveryMode = false;
         return cgResult;
       }
     }
 
-    // ── Stale-cache hold (stream continuity, NOT fabrication) ──
-    // If every live source is unreachable but we hold a previously-observed
-    // REAL price for this symbol, keep the stream alive with that last-genuine
-    // price instead of failing. This prevents the tick ingestion pipeline from
-    // permanently dying with "All spot rate sources exhausted": a recovered
-    // network re-anchors the next fresh fetch immediately. The price is a real
-    // observed value — never invented.
-    //
-    // BOUNDED: the hold is only served while it is still reasonably fresh
-    // (< STALE_HOLD_MAX_AGE_MS). If the last genuine print is older than that
-    // the stream has gone cold in earnest, so we report an honest failure
-    // rather than paint a dead price as live. This is what keeps the UI from
-    // freezing on an old quote (e.g. 1.1622) long after the market moved.
     const held = this.lastSpotCache.get(norm);
     if (
       held &&
@@ -442,21 +479,10 @@ class ForexDataService {
       held.price > 0 &&
       Date.now() - held.ts < STALE_HOLD_MAX_AGE_MS
     ) {
-      logger.debug("[ForexData] All live sources down — holding last real rate", {
+      logger.warn("[ForexData] All live sources failed; stale price withheld", {
         symbol: norm,
-        price: held.price,
         ageMs: Date.now() - held.ts,
-        source: "held_stale_real",
       });
-      // Enter recovery mode so the next poll cycle retries all tiers
-      // aggressively without throttle delay — the moment any API recovers
-      // the stale hold is instantly replaced with a fresh price.
-      this.recoveryMode = true;
-      return {
-        success: true,
-        price: held.price,
-        source: "held_stale_real",
-      };
     }
 
     // All sources exhausted and no real baseline — enter recovery mode and
@@ -470,16 +496,19 @@ class ForexDataService {
         {
           source: "pocket_option_ssot",
           ok: !!(po && po.price > 0 && Date.now() - po.ts < 15_000),
-          reason: po && po.price > 0 && Date.now() - po.ts < 15_000
-            ? undefined
-            : po && po.price > 0
-              ? `stale_${Math.round((Date.now() - po.ts) / 1000)}s_held`
-              : "no_ssot_cache",
+          reason:
+            po && po.price > 0 && Date.now() - po.ts < 15_000
+              ? undefined
+              : po && po.price > 0
+                ? `stale_${Math.round((Date.now() - po.ts) / 1000)}s_held`
+                : "no_ssot_cache",
         },
         {
           source: "github_repo_cached",
           ok: !!(cached && Date.now() - cached.ts < 15_000),
-          reason: cached ? `age_${Math.round((Date.now() - cached.ts) / 1000)}s` : "no_cache",
+          reason: cached
+            ? `age_${Math.round((Date.now() - cached.ts) / 1000)}s`
+            : "no_cache",
         },
         { source: "frankfurter", ok: false, reason: frankResult.error },
         { source: "open_er_api", ok: false, reason: openErResult.error },
@@ -509,8 +538,14 @@ class ForexDataService {
     // price the live chart renders.
     const po = this.pocketOptionCache.get(norm);
     if (po && po.price > 0 && Date.now() - po.ts < 120_000) {
-      const poBid = typeof po.bid === "number" && Number.isFinite(po.bid) && po.bid > 0 ? po.bid : undefined;
-      const poAsk = typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0 ? po.ask : undefined;
+      const poBid =
+        typeof po.bid === "number" && Number.isFinite(po.bid) && po.bid > 0
+          ? po.bid
+          : undefined;
+      const poAsk =
+        typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0
+          ? po.ask
+          : undefined;
       return {
         success: true,
         price: po.price,
@@ -536,9 +571,7 @@ class ForexDataService {
 
   // ── Frankfurter API (ECB rates) ──────────────────────────────────────────
 
-  private async fetchFrankfurterSpot(
-    symbol: string,
-  ): Promise<ForexSpotResult> {
+  private async fetchFrankfurterSpot(symbol: string): Promise<ForexSpotResult> {
     try {
       await this.throttleApiCall();
 
@@ -824,17 +857,15 @@ class ForexDataService {
       // Frankfurter provides up to ~360 days of historical daily rates
       const endDate = new Date();
       const startDate = new Date();
-      startDate.setDate(
-        startDate.getDate() - Math.min(limit + 30, 365),
-      );
+      startDate.setDate(startDate.getDate() - Math.min(limit + 30, 365));
 
       const fmt = (d: Date) => d.toISOString().split("T")[0];
       const url = `${FRANKFURTER_BASE}/${fmt(startDate)}..${fmt(endDate)}?from=${base}&to=${quote}`;
       const response = await this.client.get(url);
 
       if (response.status === 200 && response.data?.rates) {
-        const rates: Record<string, Record<string, number>> =
-          response.data.rates;
+        const rates: Record<string, Record<string, number>> = response.data
+          .rates;
         const entries = Object.entries(rates).sort(
           ([a], [b]) => new Date(a).getTime() - new Date(b).getTime(),
         );
@@ -859,9 +890,7 @@ class ForexDataService {
         );
 
         // Only return positive prices
-        const valid = bars.filter(
-          (b) => b.close > 0 && b.open > 0,
-        );
+        const valid = bars.filter((b) => b.close > 0 && b.open > 0);
 
         if (valid.length > 0) {
           return {
@@ -924,8 +953,7 @@ class ForexDataService {
       const response = await this.client.get(url);
 
       if (response.status === 200 && Array.isArray(response.data)) {
-        const raw: [number, number, number, number, number][] =
-          response.data;
+        const raw: [number, number, number, number, number][] = response.data;
         const bars: ForexCandle[] = raw.map(([ts, o, h, l, c]) => ({
           timestamp: ts,
           open: Number(o),
@@ -1217,13 +1245,10 @@ class ForexDataService {
     let atr: number;
     if (trueRanges.length < period) {
       // Not enough data for full period — use available data
-      atr =
-        trueRanges.reduce((sum, v) => sum + v, 0) / trueRanges.length;
+      atr = trueRanges.reduce((sum, v) => sum + v, 0) / trueRanges.length;
     } else {
       // Initial ATR = SMA of first `period` true ranges
-      atr =
-        trueRanges.slice(0, period).reduce((sum, v) => sum + v, 0) /
-        period;
+      atr = trueRanges.slice(0, period).reduce((sum, v) => sum + v, 0) / period;
 
       // Wilder smoothing for remaining periods
       for (let i = period; i < trueRanges.length; i++) {
@@ -1233,8 +1258,7 @@ class ForexDataService {
 
     // Volatility percentage: ATR / current close * 100
     const lastClose = bars[bars.length - 1].close;
-    const volatilityPct =
-      lastClose > 0 ? (atr / lastClose) * 100 : 0;
+    const volatilityPct = lastClose > 0 ? (atr / lastClose) * 100 : 0;
 
     return {
       atr: Number(atr.toFixed(8)),
@@ -1347,13 +1371,18 @@ class ForexDataService {
    * Record that a data source succeeded or failed on its latest probe.
    * Used by the tiered cascade to re-order retries and detect recovery.
    */
-  private recordSourceHealth(source: string, success: boolean): void {
+  private recordSourceHealth(
+    source: string,
+    success: boolean,
+    error?: string,
+  ): void {
     const prev = this.sourceHealth.get(source);
     const failCount = success ? 0 : (prev?.failCount ?? 0) + 1;
     this.sourceHealth.set(source, {
       ok: success,
       lastCheck: Date.now(),
       failCount,
+      lastError: success ? null : error || "unknown",
     });
     if (success) {
       this.lastFreshApiSuccessAt = Date.now();
@@ -1379,11 +1408,7 @@ class ForexDataService {
   getLastKnownSpot(symbol: string): ForexSpotResult {
     const norm = (symbol || "").trim().toUpperCase();
     const cached = this.lastSpotCache.get(norm);
-    if (
-      cached &&
-      Number.isFinite(cached.price) &&
-      cached.price > 0
-    ) {
+    if (cached && Number.isFinite(cached.price) && cached.price > 0) {
       return {
         success: true,
         price: cached.price,
@@ -1409,8 +1434,24 @@ class ForexDataService {
   /**
    * Get a snapshot of source health for diagnostics.
    */
-  public getSourceHealth(): Record<string, { ok: boolean; lastCheck: number; failCount: number }> {
-    const out: Record<string, { ok: boolean; lastCheck: number; failCount: number }> = {};
+  public getSourceHealth(): Record<
+    string,
+    {
+      ok: boolean;
+      lastCheck: number;
+      failCount: number;
+      lastError: string | null;
+    }
+  > {
+    const out: Record<
+      string,
+      {
+        ok: boolean;
+        lastCheck: number;
+        failCount: number;
+        lastError: string | null;
+      }
+    > = {};
     for (const [k, v] of this.sourceHealth) out[k] = { ...v };
     return out;
   }
@@ -1461,11 +1502,13 @@ class ForexDataService {
 
   /** True when the PO bridge has delivered a price for this symbol recently. */
   isPocketOptionCovered(symbol: string, maxAgeMs = 60_000): boolean {
-    const po = this.pocketOptionCache.get(
-      (symbol || "").trim().toUpperCase(),
+    const po = this.pocketOptionCache.get((symbol || "").trim().toUpperCase());
+    return (
+      !!po &&
+      Number.isFinite(po.price) &&
+      po.price > 0 &&
+      Date.now() - po.ts < maxAgeMs
     );
-    return !!po && Number.isFinite(po.price) && po.price > 0 &&
-      Date.now() - po.ts < maxAgeMs;
   }
 
   /**
@@ -1477,28 +1520,13 @@ class ForexDataService {
    * caller (backed by the whitelist) decides whether to reject them.
    */
   toCanonicalSymbol(raw: string): string {
-    if (!raw || typeof raw !== "string") return "";
-    let s = raw.trim().toUpperCase();
-    s = s.replace(/\s*OTC\s*$/, "");
-    s = s.replace(/=X$/, "");
-    s = s.replace(/\.(FX|FOREX|CS|TO)$/, "");
-    s = s.replace(/[\-_.\s]+/g, "/");
-    s = s.replace(/\/{2,}/g, "/");
-    s = s.replace(/^\//, "").replace(/\/$/, "");
-    if (s.includes("/")) return s;
-    // Compact 6-char: "EURUSD" → "EUR/USD"
-    if (s.length === 6 && /^[A-Z]{6}$/.test(s)) {
-      return `${s.slice(0, 3)}/${s.slice(3)}`;
-    }
-    return s;
+    return canonicalizeSymbol(raw);
   }
 
   /**
    * Split a symbol like "EUR/USD" into { base: "EUR", quote: "USD" }.
    */
-  private splitSymbol(
-    symbol: string,
-  ): { base: string; quote: string } {
+  private splitSymbol(symbol: string): { base: string; quote: string } {
     const norm = symbol.trim().toUpperCase();
 
     // Handle slash format: EUR/USD
