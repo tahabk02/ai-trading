@@ -1,5 +1,5 @@
 """
-test_unbiased_matrix.py — VERIFICATION OF THE STRICT 96.5% MULTI-BOOK CONFLUENCE GATE
+test_unbiased_matrix.py — VERIFICATION OF THE STRICT 98% MULTI-BOOK CONFLUENCE GATE
 
 Runs the unbiased quant matrix against REALISTIC synthetic market scenarios
 (each with genuine mathematical variance) and asserts the v11 contract:
@@ -7,17 +7,17 @@ Runs the unbiased quant matrix against REALISTIC synthetic market scenarios
   1. MIXED DIRECTIONALITY: the direction ARBITRATION (signed 12-factor score)
      stays mixed (bullish > 0, bearish < 0) — the engine NEVER collapses to a
      single direction. A fully-converged strong trend ORGANICALLY CLEARS the
-     96.5% strict multi-book confluence and dispatches; any directional attempt
+     98% strict multi-book confluence and dispatches; any directional attempt
      whose pillars are not all converged is a market-waiting verdict
      (CONFLUENCE_BELOW_THERMAL) that names the gate, the blockers and the real
      sub-thermal number (never padded) while KEEPING its true BUY/SELL
      direction — HOLD is never returned.
   2. REAL RSI/MACD/SPREAD FACTOR HYGIENE: rsi_14/macd_momentum/spread_quality
      are the SIGNED [-1,+1] strengths (raw RSI readings belong in diagnostics).
-  3. THE TRUE 96.5% THERMAL GATE — SOLE DISPATCH MECHANISM (v11): CALL/PUT
+  3. THE TRUE 98% THERMAL GATE — SOLE DISPATCH MECHANISM (v11): CALL/PUT
      exists ONLY when the strict multiplicative convergence of the ten trading
      books (geometric-mean alignment through a logistic sharpener, inflection
-     0.90 → 96.5%) clears DEFINITIVE_CONFIDENCE_MIN AND the volatility
+     0.90 → 98%) clears DEFINITIVE_CONFIDENCE_MIN AND the volatility
      (Bollinger/ATR), momentum (Murphy/DONCHIAN/Nison) and microstructure
      (Aldridge queue + volume + evidence) pillars are ALL live and aligned
      (logical AND; a silent volume book = unconverged microstructure = held).
@@ -25,7 +25,7 @@ Runs the unbiased quant matrix against REALISTIC synthetic market scenarios
      keeps its deterministic tie-break direction as an honest market-waiting
      CONFLUENCE_BELOW_THERMAL (confidence is NEVER clamped; it always equals
      the real confluence number). NO HOLD state exists.
-  4. HIGH-CONFIDENCE ALERT fires ONLY on a dispatched (non-gated) >= 96.5%
+  4. HIGH-CONFIDENCE ALERT fires ONLY on a dispatched (non-gated) >= 98%
      verdict. A gated market-waiting verdict NEVER fires the alert — even when
      its raw confluence number reads high.
   5. TIME-AWARE HORIZON: target distance grows with √horizon (1m → 10d).
@@ -33,7 +33,7 @@ Runs the unbiased quant matrix against REALISTIC synthetic market scenarios
      REAL micro factors (live tick move → instant delta → tick velocity), then
      the score sign — NEVER HOLD, never an invented direction.
   7. HOLD-LOCK REMOVED: a silent volume channel must not veto the trend's
-     direction score (arbitration stays BUY); the 96.5% gate still enforces an
+     direction score (arbitration stays BUY); the 98% gate still enforces an
      honest market-waiting CONFLUENCE_BELOW_THERMAL (microstructure order-flow
      not converged — the strict PILLAR_INCOMPLETE rule blocks dispatch) but the
      SELL/BUY direction is kept.
@@ -42,7 +42,7 @@ Runs the unbiased quant matrix against REALISTIC synthetic market scenarios
      (score/gate/geo_mean/clusters/blockers); CONFLUENCE_BELOW_THERMAL when a
      directional attempt is gated, and the reported confidence ALWAYS equals
      the real confluence number.
-  9. (v9) DEFINITIVE 96.5% EMISSION: a tape where every book converges (fresh
+  9. (v9) DEFINITIVE 98% EMISSION: a tape where every book converges (fresh
      Donchian breakout + ATR expansion above mid-band + Murphy momentum stack
      + volume surge + Nison structure + queue at the ask) fires a real BUY at
      ~97-99% with high_confidence_alert. The SAME moving tape WITHOUT a live
@@ -100,7 +100,7 @@ def make_candles(closes, base_spread=0.0008, volume=None):
 
 
 def scenario_bullish(n=120):
-    """Steady uptrend — arbitration must be BUY (but gated below 96.5)."""
+    """Steady uptrend — arbitration must be BUY (but gated below 98)."""
     rng = np.random.default_rng(42)  # test-only determinism, not engine code
     drift = np.linspace(0, 0.03, n)
     noise = rng.normal(0, 0.0015, n).cumsum() * 0.3
@@ -108,7 +108,7 @@ def scenario_bullish(n=120):
 
 
 def scenario_bearish(n=120):
-    """Steady downtrend — arbitration must be SELL (but gated below 96.5)."""
+    """Steady downtrend — arbitration must be SELL (but gated below 98)."""
     rng = np.random.default_rng(7)
     drift = np.linspace(0, -0.03, n)
     noise = rng.normal(0, 0.0015, n).cumsum() * 0.3
@@ -134,7 +134,7 @@ def scenario_bull_no_volume(n=120):
 
     The volume factor is neutral (0.0) in this feed so the direction
     arbitration must still register a strong BUY from the price-action
-    factors and KEEP it (never demote to HOLD) — but the 96.5% confluence
+    factors and KEEP it (never demote to HOLD) — but the 98% confluence
     gate (microstructure pillar not fully converged) honestly flags the
     verdict market-waiting.
     """
@@ -230,9 +230,9 @@ def main():
             if not np.isfinite(val):
                 failures.append(f"{name} factor {k} not finite")
 
-    # ── TEST 3: THE TRUE 96.5% THERMAL GATE (v11 never-HOLD confluence) ──
+    # ── TEST 3: THE TRUE 98% THERMAL GATE (v11 never-HOLD confluence) ──
     # A fully-converged strong trend (every pillar LIVE and aligned via the
-    # agreement × magnitude index) ORGANICALLY CLEARS 96.5% and dispatches.
+    # agreement × magnitude index) ORGANICALLY CLEARS 98% and dispatches.
     # A directional attempt whose books do NOT all converge (counter-votes push
     # the convergence index sub-thermal) KEEPS its true BUY/SELL direction and
     # is flagged market-waiting (CONFLUENCE_BELOW_THERMAL) — NEVER demoted to
@@ -249,7 +249,7 @@ def main():
             if v.diagnostics.get("confidence_gated"):
                 failures.append("bull dispatched verdict wrongly tagged confidence_gated")
             if v.high_confidence_alert is not True:
-                failures.append("bull (dispatched >=96.5%) must fire high_confidence_alert")
+                failures.append("bull (dispatched >=98%) must fire high_confidence_alert")
         else:
             if v.direction != "SELL":
                 failures.append(
@@ -263,7 +263,7 @@ def main():
             if v.waiting_reason != "CONFLUENCE_BELOW_THERMAL":
                 failures.append(f"{name} waiting_reason={v.waiting_reason}, expected CONFLUENCE_BELOW_THERMAL")
             if v.confidence >= DEFINITIVE_CONFIDENCE_MIN:
-                failures.append(f"{name} gated confidence {v.confidence} not below 96.5")
+                failures.append(f"{name} gated confidence {v.confidence} not below 98")
             if v.high_confidence_alert:
                 failures.append(f"{name} fired the alert on a gated market-waiting verdict")
         # The reported confidence must be the REAL confluence number (never
@@ -288,7 +288,7 @@ def main():
         if v.high_confidence_alert:
             failures.append(f"{name} fired the high-confidence alert on a gated market-waiting verdict")
 
-    # ── TEST 4: HIGH-CONFIDENCE ALERT FIRES ONLY ON A 96.5%+ DISPATCH ──
+    # ── TEST 4: HIGH-CONFIDENCE ALERT FIRES ONLY ON A 98%+ DISPATCH ──
     # bull (fully-converged, dispatched at ~99%) legitimately FIRES the alert;
     # bear (gated market-waiting at ~90%) must stay silent.
     if not bull.high_confidence_alert:
@@ -330,7 +330,7 @@ def main():
 
     # ── TEST 7: SILENT-VOLUME TREND — direction kept, gate holds ──
     # Arbitration stays BUY (and KEEPS its direction — never demoted to HOLD),
-    # but without the microstructure order-flow book converging the 96.5% gate
+    # but without the microstructure order-flow book converging the 98% gate
     # flags the verdict market-waiting (CONFLUENCE_BELOW_THERMAL).
     bull_nv = evaluate_quant_matrix(
         scenario_bull_no_volume(), live_price=None, timeframe="1h"
@@ -377,7 +377,7 @@ def main():
                 failures.append(f"{name} confluence missing pillar {p}")
     # v11 reason contract (never-HOLD two-factor convergence): a fully-converged
     # strong trend (all three pillars LIVE and aligned — every member book has
-    # real evidence) ORGANICALLY CLEARS the 96.5% thermal gate and dispatches;
+    # real evidence) ORGANICALLY CLEARS the 98% thermal gate and dispatches;
     # a directional attempt whose microstructure did NOT fully converge (silent
     # volume book) or a counter-argument strong enough to keep a book off the
     # vote is gated → CONFLUENCE_BELOW_THERMAL market-wait, direction KEPT
@@ -406,7 +406,7 @@ def main():
         f"flat:{flat.diagnostics['book']['confluence']['score']}"
     )
 
-    # ── TEST 9 (v9): DEFINITIVE 96.5% EMISSION ──
+    # ── TEST 9 (v9): DEFINITIVE 98% EMISSION ──
     cand, spot, p_bid, p_ask = scenario_perfect_confluence()
     perfect = evaluate_quant_matrix(
         cand, live_price=spot, timeframe="1h", bid=p_bid, ask=p_ask
@@ -427,7 +427,7 @@ def main():
             f"{DEFINITIVE_CONFIDENCE_MIN}% gate"
         )
     if not perfect.high_confidence_alert:
-        failures.append("Definitive 96.5%+ BUY must fire the high-confidence alert")
+        failures.append("Definitive 98%+ BUY must fire the high-confidence alert")
     if perfect.market_waiting or perfect.waiting_reason is not None:
         failures.append("Dispatched BUY must have market_waiting=False and no waiting_reason")
     if bk["gate"] != "DEFINITIVE":
@@ -505,9 +505,9 @@ def main():
         sys.exit(1)
     else:
         print("ALL UNBIAS TESTS PASSED ✓  (mixed arbitration, real RSI/MACD/spread "
-              "factors, strict 96.5% multiplicative confluence gate, alert only on "
+              "factors, strict 98% multiplicative confluence gate, alert only on "
               "definitive, √horizon scaling, zero-tie policy, HOLD-lock fix, "
-              "10-book confluence + market-waiting contract, definitive 96.5% emission)")
+              "10-book confluence + market-waiting contract, definitive 98% emission)")
 
 
 if __name__ == "__main__":

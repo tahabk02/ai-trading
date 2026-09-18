@@ -80,10 +80,7 @@ export class CacheService {
 
     try {
       const Redis = (await import("ioredis")).default;
-      this.redis = new Redis({
-        host: secrets.REDIS_HOST,
-        port: secrets.REDIS_PORT,
-        password: secrets.REDIS_PASSWORD || undefined,
+      const options = {
         maxRetriesPerRequest: 1,
         retryStrategy: (times: number) => {
           if (times >= 2) {
@@ -96,7 +93,17 @@ export class CacheService {
         },
         lazyConnect: true,
         connectTimeout: 5_000,
-      });
+      };
+      if (secrets.REDIS_URL) {
+        this.redis = new Redis(secrets.REDIS_URL, options);
+      } else {
+        this.redis = new Redis({
+          host: secrets.REDIS_HOST,
+          port: secrets.REDIS_PORT,
+          password: secrets.REDIS_PASSWORD || undefined,
+          ...options,
+        });
+      }
 
       // Silence individual error/end events — the retry strategy handles logging
       this.redis.on("error", () => {});

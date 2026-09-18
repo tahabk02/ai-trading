@@ -118,6 +118,12 @@ async def amain(settings: BridgeSettings) -> None:
     # Let the relay tell newly connected clients immediately whether the bridge
     # is already ready (see RelayServer.handler).
     relay.is_ready = lambda: bridge.assets_ready
+    relay.asset_provider = bridge.available_assets_payload
+
+    async def on_unsubscribe(_websocket, payload: Dict) -> None:
+        await bridge.request_unsubscription(str(payload.get("symbol", "")))
+
+    relay.on_unsubscribe = on_unsubscribe
 
     # ── INITIAL TICK HANDSHAKE ──
     # A relay client (the Node backend, acting on a browser subscribe) pushes

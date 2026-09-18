@@ -12,6 +12,7 @@ const prisma = new PrismaClient();
 
 // ── Constants ──
 const MINIMUM_REQUIRED_BARS = 30;
+const MINIMUM_FAST_PATH_BARS = 2;
 
 // ── LIVE-PRICE FRESHNESS GATE ──
 // The AI pipeline is fed EXCLUSIVELY by the real-time tick tape. If the
@@ -90,11 +91,11 @@ const TIMEFRAME_DESIRED_BARS: Record<string, number> = {
 };
 
 /** HIGH-CONFIDENCE NOTIFICATION THRESHOLD — fires a priority WS toast above this.
- *  Mirrors the AI Engine's ALERT threshold. Since v10 the AI Engine's
- *  `high_confidence_alert` fires ONLY on an organically converged DEFINITIVE
- *  (>=96.5%) 10-book verdict (no secondary pathway, no dynamic floor), the
- *  priority toast threshold is locked to that same 96.5% thermal gate. */
-export const HIGH_CONFIDENCE_THRESHOLD = 96.5;
+ *  Mirrors the AI Engine's ALERT threshold. Since v12 the AI Engine's
+ *  `high_confidence_alert` fires on an organically converged DEFINITIVE
+ *  (>=98%) 10-book verdict (no secondary pathway, no dynamic floor), the
+ *  priority toast threshold is locked to that same 98% thermal gate. */
+export const HIGH_CONFIDENCE_THRESHOLD = 98.0;
 
 // ════════════════════════════════════════════════════════════════════
 // SHORT-TTL /predict RESULT CACHE — kills the duplicate-inference storm
@@ -243,15 +244,14 @@ const buildAiEnginePredictUrl = (baseUrl: string): string => {
 };
 
 const AI_ENGINE_PREDICT_URL = buildAiEnginePredictUrl(secrets.AI_ENGINE_URL);
-// ── Extended AI Engine timeout ──
-// A cold-cache RandomForest train alone takes ~1.3s, and /predict requests can
-// queue briefly behind the AI Engine's event loop while heavy confluence
-// computation runs. The previous 3s budget was aborted by axios (exactly 3.0s
-// of socket inactivity) even when the engine completed the request in
-// 300–700ms — a consistent 503 source. 12s keeps a legitimate slow-but-alive
-// engine alive while still returning fast enough for the client's backoff
-// loop (retryAfterMs) to stay snappy on a genuinely dead engine.
-const PREDICT_TIMEOUT_MS = 12_000;
+// ── AI Engine timeout ──
+// Hard 3s inference budget (operator contractual ceiling). A request that does
+// not complete within 3s is classified `ai_timeout` and surfaced as a JSON
+// 503 { error: "ai_timeout", retryAfterMs } — the client re-polls with
+// exponential backoff. The engine's own cold-cache warmup may occasionally
+// exceed this; that is a legitimate timeout, surfaced honestly, never a bare
+// 503 body.
+const PREDICT_TIMEOUT_MS = 3_000;
 const PREDICT_MAX_RETRIES = 1;
 
 // ════════════════════════════════════════════════════════════════════════
@@ -300,8 +300,8 @@ function mapCandlesToAiFormat(bars: ForexCandle[]) {
 
 /**
  * HIGH-CONFIDENCE WEBSOCKET EVENT — fires when a dispatched signal's
- * confidence crosses the strict 96.5% DEFINITIVE thermal gate (aligned with
- * the v10 AI Engine alert threshold — only organically converged 10-book
+ * confidence crosses the 60% DEFINITIVE thermal gate (aligned with
+ * the v10 AI Engine alert threshold — organically converged 10-book
  * confluence can ever reach it). The frontend renders a priority toast with an
  * alert sound on receipt of `high_confidence_signal`.
  */
@@ -340,7 +340,50 @@ function maybeBroadcastHighConfidence(prediction: {
 }
 
 // ── Signal CRUD ──
+/**
+ * Distinguish "the database is unreachable" from "the query failed". A DB
+ * outage is a RECOVERABLE infrastructure condition (503 + retry), not a bug in
+ * the request (500). Prisma surfaces it as a known error code, an
+ * initialization error, or a connection-level message — all of which mean the
+ * caller should retry, never that the API is broken.
+ */
+function isDbUnavailable(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  if (code && ["P1001", "P1008", "P1017", "P2024"].includes(code)) return true;
+  const name = (error as { name?: string } | null)?.name;
+  if (name === "PrismaClientInitializationError") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /can'?t reach database server|connection (pool|refused)|Timed out fetching a new connection|ECONNREFUSED (?:127\.0\.0\.1|localhost|::1):5433/i.test(
+    message,
+  );
+}
+
+/**
+ * Redis/cache outages are a SEPARATE recoverable condition from a DB outage.
+ * ioredis surfaces them as `MaxRetriesPerRequestError` / `ReplyError`, an
+ * `NR_CLOSED` code, or a connection message naming Redis — all of which mean
+ * "cache unavailable", never "database unavailable". Checked BEFORE the DB
+ * classifier because a refused Redis connection carries a bare ECONNREFUSED.
+ */
+function isCacheUnavailable(error: unknown): boolean {
+  const name = (error as { name?: string } | null)?.name ?? "";
+  if (
+    /redis/i.test(name) ||
+    name === "MaxRetriesPerRequestError" ||
+    name === "ReplyError"
+  ) {
+    return true;
+  }
+  const code = (error as { code?: string } | null)?.code;
+  if (code === "NR_CLOSED") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /redis|MaxRetriesPerRequest|Stream isn'?t writeable|ECONNREFUSED .*:6379/i.test(
+    message,
+  );
+}
+
 export const getSignals = async (req: Request, res: Response) => {
+  const t0 = Date.now();
   try {
     const { symbol, limit = "50" } = req.query;
     const signals = await prisma.signal.findMany({
@@ -348,33 +391,69 @@ export const getSignals = async (req: Request, res: Response) => {
       orderBy: { createdAt: "desc" },
       take: Math.min(Number(limit), 100),
     });
+    logger.info(`[signals] status=200 latency_ms=${Date.now() - t0}`);
     return res.json(signals);
   } catch (error) {
-    logger.error("Error fetching signals", { error });
+    const latencyMs = Date.now() - t0;
+    if (isCacheUnavailable(error)) {
+      logger.error(
+        `[signals] status=503 cache_unavailable latency_ms=${latencyMs}`,
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return res.status(503).json({ error: "cache_unavailable" });
+    }
+    if (isDbUnavailable(error)) {
+      logger.error(
+        `[signals] status=503 db_unavailable latency_ms=${latencyMs}`,
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return res.status(503).json({ error: "db_unavailable" });
+    }
+    logger.error(`[signals] status=500 latency_ms=${latencyMs}`, { error });
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
 
 export const getSignalById = async (req: Request, res: Response) => {
+  const t0 = Date.now();
   try {
     const { id } = req.params;
     const signal = await prisma.signal.findUnique({ where: { id } });
     if (!signal) return res.status(404).json({ error: "Signal not found" });
     return res.json(signal);
   } catch (error) {
+    const latencyMs = Date.now() - t0;
+    if (isCacheUnavailable(error)) {
+      logger.error(
+        `[signals] status=503 cache_unavailable latency_ms=${latencyMs}`,
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return res.status(503).json({ error: "cache_unavailable" });
+    }
+    if (isDbUnavailable(error)) {
+      logger.error(
+        `[signals] status=503 db_unavailable latency_ms=${latencyMs}`,
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return res.status(503).json({ error: "db_unavailable" });
+    }
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
 
 // ── Prediction Pipeline ──
 export const predictSignal = async (req: Request, res: Response) => {
-  const { symbol, timeframe } = req.body as {
+  const { symbol, timeframe, silent } = req.body as {
     symbol?: string;
     timeframe?: string;
+    /** Batch-suppression flag: `/multi-predict` sets it so a 34-symbol grid
+     *  refresh never fires 34 global high-confidence toasts. Single /predict
+     *  callers leave it unset and keep the existing toast behavior. */
+    silent?: boolean;
   };
 
   if (!symbol || typeof symbol !== "string" || symbol.trim().length === 0) {
-    logger.info("[predict] symbol=missing timeframe=unknown status=error");
+    logger.info("[predict] symbol=missing tf=unknown status=error");
     return res.status(400).json({
       error: "Validation Error",
       message: 'A non-empty "symbol" field is required.',
@@ -387,7 +466,7 @@ export const predictSignal = async (req: Request, res: Response) => {
     timeframe.trim().length === 0
   ) {
     logger.info(
-      `[predict] symbol=${symbol.trim()} timeframe=missing status=error`,
+      `[predict] symbol=${symbol.trim()} tf=missing status=error`,
     );
     return res.status(400).json({
       error: "Validation Error",
@@ -412,7 +491,7 @@ export const predictSignal = async (req: Request, res: Response) => {
       symbol: normalizedSymbol,
     });
     logger.info(
-      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=error`,
+      `[predict] symbol=${normalizedSymbol} tf=${normalizedTimeframe.toLowerCase()} status=error`,
     );
     return res.status(400).json({
       error: "Symbol not permitted",
@@ -558,7 +637,7 @@ export const predictSignal = async (req: Request, res: Response) => {
       },
     );
     logger.info(
-      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=error`,
+      `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=error`,
     );
     return res.status(503).json({
       error: "Awaiting real-time tick",
@@ -621,6 +700,28 @@ export const predictSignal = async (req: Request, res: Response) => {
       ) {
         effectiveLivePrice = bufferedLive;
       }
+    } else if (buffered.length >= MINIMUM_FAST_PATH_BARS) {
+      // ── MICRO-QUANT FAST PATH ──
+      // Enough real bars for a fast-path micro-quant verdict (2+ bars) but not
+      // enough for the full ML pipeline. Forward to the AI engine which will
+      // run evaluate_live_tick_signal instead of the full confluence+ML path.
+      logger.info(
+        "[signal.controller] Micro-quant fast path — forwarding real bars to AI engine",
+        {
+          symbol: normalizedSymbol,
+          realBars: bars.length,
+          bufferedBars: buffered.length,
+          fastPathMinimum: MINIMUM_FAST_PATH_BARS,
+        },
+      );
+      bars = buffered;
+      if (
+        bufferedLive != null &&
+        Number.isFinite(bufferedLive) &&
+        bufferedLive > 0
+      ) {
+        effectiveLivePrice = bufferedLive;
+      }
     } else {
       logger.warn(
         "[signal.controller] Real historical bars accumulating — awaiting live data (zero-fabrication)",
@@ -632,7 +733,7 @@ export const predictSignal = async (req: Request, res: Response) => {
         },
       );
       logger.info(
-        `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=error`,
+        `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=error`,
       );
       return res.status(503).json({
         error: "Awaiting live market data",
@@ -714,10 +815,7 @@ export const predictSignal = async (req: Request, res: Response) => {
 
     const elapsed = Date.now() - t0;
     logger.info(
-      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=ok`,
-    );
-    logger.info(
-      `[predict] ai_engine_url=${AI_ENGINE_PREDICT_URL} latency_ms=${elapsed}`,
+      `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=ok latency_ms=${elapsed}`,
     );
 
     // ════════════════════════════════════════════════════════════════════
@@ -846,8 +944,12 @@ export const predictSignal = async (req: Request, res: Response) => {
       })),
     };
 
-    // ── HIGH-CONFIDENCE (>=96.5%) WEBSOCKET NOTIFICATION EVENT ──
-    maybeBroadcastHighConfidence(finalResponse);
+    // ── HIGH-CONFIDENCE (>=60%) WEBSOCKET NOTIFICATION EVENT ──
+    // Suppressed in batch (/multi-predict) mode so a grid horizon change never
+    // spams 34 priority toasts — the terminal surfaces verdicts in-card.
+    if (!silent) {
+      maybeBroadcastHighConfidence(finalResponse);
+    }
 
     // Cache the successful result so concurrent /predict bursts reuse it for
     // the TTL window instead of duplicating the spot/history fetch + inference.
@@ -873,11 +975,9 @@ export const predictSignal = async (req: Request, res: Response) => {
     // ════════════════════════════════════════════════════════════════════
     const aiFailure = classifyAiEngineFailure(aiError);
 
+    const latency = Date.now() - t0;
     logger.info(
-      `[predict] symbol=${normalizedSymbol} timeframe=${normalizedTimeframe} status=${aiFailure.kind === "timeout" ? "timeout" : "error"}`,
-    );
-    logger.info(
-      `[predict] ai_engine_url=${AI_ENGINE_PREDICT_URL} latency_ms=${elapsed}`,
+      `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=${aiFailure.kind === "timeout" ? "timeout" : "error"} latency_ms=${latency}`,
     );
 
     logger.warn(
@@ -909,6 +1009,7 @@ export const predictSignal = async (req: Request, res: Response) => {
 
     return res.status(503).json({
       error: "ai_unavailable",
+      detail: aiFailure.detail,
       message:
         "The AI Engine is currently unavailable or rejected the payload. " +
         "No direction was dispatched — retrying.",
@@ -925,4 +1026,155 @@ export const predictSignal = async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   }
+};
+
+// ════════════════════════════════════════════════════════════════════
+// MULTI-PREDICT — POST /api/v1/multi-predict
+// ════════════════════════════════════════════════════════════════════
+// The market-terminal grid's heavier "refresh on horizon change" channel.
+// Fans a symbol batch (e.g. all 34 pairs at a new horizon) through the EXACT
+// same /predict pipeline via a minimal Express shim — every freshness gate,
+// the 5s result cache, ATR targeting and the real-tape fallbacks apply
+// identically, and the shared cache collapses duplicates against single /predict
+// calls from other surfaces. `silent: true` is injected so a 34-card refresh
+// never fires 34 global high-confidence toasts.
+//
+// Concurrency is BOUNDED: the grid must not storm the AI Engine the way 34
+// parallel clients would. Duplicate work already made impossible by the 5s
+// cache — this pool only bounds truly fresh computations.
+// ════════════════════════════════════════════════════════════════════
+const MULTI_PREDICT_MAX_SYMBOLS = 40;
+const MULTI_PREDICT_CONCURRENCY = 6;
+
+type SymbolPredictOutcome = {
+  ok: boolean;
+  status: number;
+  data?: unknown;
+  error?: unknown;
+};
+
+/**
+ * Run the shared /predict pipeline for ONE symbol by driving the existing
+ * `predictSignal` handler through a minimal req/res shim. Reusing the real
+ * handler (rather than copying its ~580-line body) guarantees the multi-feed
+ * is byte-for-byte based on the same gates, cache and verdict contract.
+ */
+function shimPredict(
+  symbol: string,
+  timeframe: string,
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve) => {
+    const shimRes = {
+      statusCode: 200,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      setHeader() {
+        return this;
+      },
+      json(body: unknown) {
+        resolve({ status: this.statusCode, body });
+      },
+    };
+    const shimReq = {
+      body: { symbol, timeframe, silent: true },
+    };
+    Promise.resolve(predictSignal(shimReq as unknown as Request,
+      shimRes as unknown as Response)).catch((err: unknown) => {
+      resolve({
+        status: 500,
+        body: {
+          error: "internal",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+    });
+  });
+}
+
+export const multiPredict = async (req: Request, res: Response) => {
+  const body = req.body as { symbols?: unknown; timeframe?: unknown };
+  const rawSymbols = Array.isArray(body.symbols) ? body.symbols : [];
+  const timeframe =
+    typeof body.timeframe === "string" && body.timeframe.trim()
+      ? body.timeframe.trim()
+      : "1m";
+
+  if (rawSymbols.length === 0) {
+    return res.status(400).json({
+      error: "Validation Error",
+      message: 'A non-empty "symbols" array is required.',
+    });
+  }
+  if (rawSymbols.length > MULTI_PREDICT_MAX_SYMBOLS) {
+    return res.status(400).json({
+      error: "Validation Error",
+      message: `"symbols" is limited to ${MULTI_PREDICT_MAX_SYMBOLS} instruments.`,
+    });
+  }
+
+  // Deduplicate preserving order; only accept string symbols.
+  const seen = new Set<string>();
+  const symbols: string[] = [];
+  for (const raw of rawSymbols) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim().toUpperCase();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    symbols.push(trimmed);
+  }
+
+  const requestedAt = new Date().toISOString();
+  const results = new Map<string, SymbolPredictOutcome>();
+
+  // ── BOUNDED CONCURRENCY POOL ──
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= symbols.length) return;
+      const symbol = symbols[index];
+      try {
+        const { status, body } = await shimPredict(symbol, timeframe);
+        results.set(symbol, {
+          ok: status === 200,
+          status,
+          data: status === 200 ? body : undefined,
+          error: status === 200 ? undefined : body,
+        });
+        logger.info(`[multi-predict] symbol=${symbol} timeframe=${timeframe} status=${status}`);
+      } catch (err) {
+        logger.warn("[multi-predict] Unexpected prediction failure", {
+          symbol,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        results.set(symbol, {
+          ok: false,
+          status: 500,
+          error: { error: "internal", message: "Prediction pipeline failed." },
+        });
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(MULTI_PREDICT_CONCURRENCY, symbols.length) },
+      () => worker()),
+  );
+
+  const resultsObject: Record<string, SymbolPredictOutcome> = {};
+  for (const [symbol, outcome] of results) {
+    resultsObject[symbol] = outcome;
+  }
+
+  return res.json({
+    success: true,
+    count: symbols.length,
+    timeframe,
+    requestedAt,
+    results: resultsObject,
+    generatedAt: new Date().toISOString(),
+  });
 };

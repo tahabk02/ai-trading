@@ -9,6 +9,7 @@ import { detectLang } from "@/utils/i18n";
 import { formatPairPrice } from "@/utils/format";
 import { getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
+import { TierBadge } from "@/components/shared/tier-badge";
 import {
   useTradingStore,
   selectCurrentPrice,
@@ -27,6 +28,8 @@ interface SignalProps {
     signalType?: "BUY" | "SELL";
     price?: number | null;
     confidence?: number | null;
+    /** AI Engine dispatch tier T1…T5 (PART 6). */
+    tier?: string | null;
     createdAt?: string | null;
     indicators?: {
       adx?: number | null;
@@ -63,6 +66,20 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
     Math.max(normalizedConf > 1 ? normalizedConf : normalizedConf * 100, 0),
     100,
   );
+  // ── PART 6 TIER-COLORED CONFIDENCE — palette mirrors the engine ladder ──
+  // T1 emerald (>=96.5), T2 teal (>=90), T3 amber (>=80), T4 orange (>=70),
+  // T5 gray. Replaces the old ad-hoc >90/>80/>72 bands with the canonical
+  // T1-T5 tiers the engine dispatches.
+  const unknownTierColor =
+    displayConfidence >= 96.5
+      ? "text-emerald-400"
+      : displayConfidence >= 90
+        ? "text-teal-300"
+        : displayConfidence >= 80
+          ? "text-amber-400"
+          : displayConfidence >= 70
+            ? "text-orange-400"
+            : "text-slate-400";
 
   const handleViewChart = () => {
     if (symbol && symbol !== "--") {
@@ -131,18 +148,21 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           <p
             className={cn(
               "text-sm sm:text-lg font-bold truncate tabular-nums",
-              displayConfidence > 90
-                ? "text-emerald-400"
-                : displayConfidence >= 80
-                  ? "text-blue-400"
-                  : displayConfidence >= 72
-                    ? "text-amber-400"
-                    : "text-slate-300",
+              unknownTierColor,
             )}
           >
             {displayConfidence.toFixed(1)}%
           </p>
         </div>
+      </div>
+
+      {/* ── PART 6: HONEST TIER BADGE ── */}
+      <div className="mt-2 flex items-center justify-end">
+        <TierBadge
+          tier={signal?.tier}
+          confidence={displayConfidence}
+          size="sm"
+        />
       </div>
 
       {/* ── Footer: Analysis + View Chart button ── */}

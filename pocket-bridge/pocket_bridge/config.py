@@ -425,6 +425,7 @@ def canonical_symbol(raw: str) -> str:
       * every separator style is unified onto ``/``.
     """
     s = (raw or "").strip().upper()
+    s = re.sub(r"[_\-\s]OTC$", "", s)
     s = re.sub(r"\s*OTC\s*$", "", s)
     s = s.replace("=X", "")
     s = s.replace(".FX", "").replace(".FOREX", "").replace(".CS", "").replace(".TO", "")
@@ -434,6 +435,13 @@ def canonical_symbol(raw: str) -> str:
     if "/" not in s and len(s) == 6 and s.isalpha():
         s = f"{s[:3]}/{s[3:]}"
     return s
+
+
+def canonical_active_asset(raw: str) -> str:
+    """Convert a broker asset name into a frontend/backend symbol key."""
+    value = (raw or "").strip().upper()
+    value = re.sub(r"[_\-\s]OTC$", "", value)
+    return canonical_symbol(value)
 
 
 def asset_type_for_symbol(symbol: str) -> str:

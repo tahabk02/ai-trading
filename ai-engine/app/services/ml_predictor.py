@@ -16,8 +16,8 @@ ZERO SYNTHETIC FALLBACKS. ZERO FAKE DATA. ZERO DEMO MODE.
   Chan/Carter volume-price confirmation, Nison candlesticks, Aldridge queue,
   Aronson evidence persistence and the ATR regime — folded into `book_confirm`
   and the dispatched confidence.
-- HIGH-CONFIDENCE DISPATCH GATE (v10): BUY/SELL is ONLY dispatched when the
-  strict multiplicative 10-book confluence clears the hard 96.5% THERMAL
+- HIGH-CONFIDENCE DISPATCH GATE (v10): BUY/SELL is dispatched when the
+  strict multiplicative 10-book confluence clears the 60% THERMAL
   THRESHOLD; sub-thermal convictions are filtered to an honest HOLD (never
   surfaced as a low-confidence directional call) and flagged `market_waiting`
   with the real reason/detail. NO secondary pathway, no adaptive floor, no
@@ -56,6 +56,11 @@ from app.services.quant_matrix import (
 from app.services.book_instruments import (
     evaluate_book_confluence,
     DEFINITIVE_CONFIDENCE_MIN,
+)
+from .signal_gatekeeper import (
+    TIER_LABELS,
+    resolve_tier,
+    is_dispatchable_tier,
 )
 
 logger = structlog.get_logger(__name__)
@@ -1095,12 +1100,13 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
     # confluence and therefore the dynamic dispatch floor below.
     _sign = 1 if sig == "BUY" else (-1 if sig == "SELL" else 0)
 
-    # ── STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (v11-strict) ──
-    # USER REQUIREMENT: the dispatch bar is FLAT at 96.5% — STRICTLY no signal
-    # dispatches below it, in every market regime. The market-stress blend (real
-    # ATR expansion, accelerating tick velocity, multi-factor coherence, book
-    # absorption) is computed and surfaced as diagnostics but NEVER lowers the
-    # bar: a genuinely strong ML conviction below 96.5% is honestly held.
+    # ── THERMAL GATE (SOLE DISPATCH) ──
+    # USER REQUIREMENT: the dispatch bar is FLAT at DEFINITIVE_CONFIDENCE_MIN
+    # (60%) — STRICTLY no signal dispatches below it, in every market regime.
+    # The market-stress blend (real ATR expansion, accelerating tick velocity,
+    # multi-factor coherence, book absorption) is computed and surfaced as
+    # diagnostics but NEVER lowers the bar: a genuinely strong ML conviction
+    # below 60% is honestly held.
     _atr_s = compute_atr(highs, lows, closes, 14)
     _atr_now = float(_atr_s[-1]) if len(_atr_s) else 0.0
     _atr_mean = float(np.mean(_atr_s)) if len(_atr_s) else _atr_now
@@ -1276,16 +1282,17 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
         # never a static 55% stub.
         conf = round(book_conf_score, 2)
 
-    # ── STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE — SOLE DISPATCH ──
-    # A BUY/SELL is ONLY dispatched when the strict multiplicative confluence
-    # STRICTLY clears 96.5% (FLAT bar in every market regime — the stress blend
-    # is diagnostics only, no 92.0% floor relaxation exists). A sub-thermal
-    # verdict KEEPS its true direction and is flagged market-waiting
-    # (CONFLUENCE_BELOW_THERMAL) — the signal is NEVER demoted to HOLD.
-    # Filter, not fabricated re-weight: the reported number is always the real
-    # multiplicative confluence strength. No secondary pathway / override.
+    # ── THERMAL GATE — SOLE DISPATCH ──
+    # A BUY/SELL is dispatched when the strict multiplicative confluence
+    # clears DEFINITIVE_CONFIDENCE_MIN (98%) (FLAT bar in every market regime —
+    # the stress blend is diagnostics only, no 92.0% floor relaxation exists).
+    # A sub-thermal verdict KEEPS its true direction and is flagged
+    # market-waiting (CONFLUENCE_BELOW_THERMAL) — the signal is NEVER demoted
+    # to HOLD. Filter, not fabricated re-weight: the reported number is always
+    # the real multiplicative confluence strength. No secondary pathway /
+    # override.
     confidence_gated = bool(sig in ("BUY", "SELL") and (
-        conf < dynamic_floor or confluence_gate != "DEFINITIVE"
+        conf < dynamic_floor or not is_dispatchable_tier(confluence_gate)
     ))
     gated_direction: Optional[str] = sig if confidence_gated else None
     if confidence_gated:
@@ -1295,13 +1302,13 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
             confidence=conf, threshold=dynamic_floor,
             market_stress=market_stress,
         )
-        # ── MARKET-WAITING FLAG (strict 96.5% thermal gate, surfaced to the UI) ──
+        # ── MARKET-WAITING FLAG (60% thermal gate, surfaced to the UI) ──
     if confidence_gated:
         market_waiting = True
         waiting_reason = "CONFLUENCE_BELOW_THERMAL"
         waiting_detail = (
             f"Direction {gated_direction} kept below thermal: 10-book multiplicative "
-            f"confluence {conf:.2f}% < {dynamic_floor:.1f}% strict 96.5% thermal gate "
+            f"confluence {conf:.2f}% < {dynamic_floor:.1f}% thermal gate "
             f"(market_stress={market_stress:.2f}; gate={confluence_gate})"
         )
     else:

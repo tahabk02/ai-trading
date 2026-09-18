@@ -1,87 +1,80 @@
 import { logger } from "../utils/logger";
 import { canonicalizeSymbol } from "../utils/symbolFormat";
 
-// ── Aggregated timeframes — the multi-resolution bucket grid ──
-// The server computes this dynamic ladder for every live symbol and emits each
+// ── Aggregated timeframes — Pocket Option's canonical multi-resolution grid ──
+// The server computes this exact PO ladder for every live symbol and emits each
 // close to EXACTLY the (symbol, timeframe) channel a client subscribed to, so a
-// 10s (M10) client never sees 1h frames and vice versa. Sub-minute custom
-// intervals (10s / 11s / 20s / 30s) are PO-parity bucket widths on the broker
-// clock grid; higher standard frames (1m → 10d) form the settled chart ladder.
+// S10 client never sees H1 frames and vice versa. Labels are the PO canonical
+// codes (S=seconds, M=minutes, H=hours, D=days): the same codes the client
+// market terminal and the pocket-bridge emit. Legacy shorthand aliases ("5s",
+// "1m", "1h", …) still resolve via canonicalTimeframe() for back-compat.
 export type AggregatedTimeframe =
-  | "1s"
-  | "5s"
-  | "10s"
-  | "11s"
-  | "20s"
-  | "30s"
-  | "1m"
-  | "2m"
-  | "3m"
-  | "5m"
-  | "10m"
-  | "15m"
-  | "20m"
-  | "25m"
-  | "30m"
-  | "35m+"
-  | "1h"
-  | "4h"
-  | "1d"
-  | "2d"
-  | "3d"
-  | "5d"
-  | "10d";
+  | "S5"
+  | "S10"
+  | "S15"
+  | "S30"
+  | "M1"
+  | "M2"
+  | "M3"
+  | "M5"
+  | "M10"
+  | "M15"
+  | "M30"
+  | "H1"
+  | "H4"
+  | "D1";
 
 export const SERVER_CANDLE_TFS: AggregatedTimeframe[] = [
-  "1s",
-  "5s",
-  "10s",
-  "11s",
-  "20s",
-  "30s",
-  "1m",
-  "2m",
-  "3m",
-  "5m",
-  "10m",
-  "15m",
-  "20m",
-  "25m",
-  "30m",
-  "35m+",
-  "1h",
-  "4h",
-  "1d",
-  "2d",
-  "3d",
-  "5d",
-  "10d",
+  "S5",
+  "S10",
+  "S15",
+  "S30",
+  "M1",
+  "M2",
+  "M3",
+  "M5",
+  "M10",
+  "M15",
+  "M30",
+  "H1",
+  "H4",
+  "D1",
 ];
 
 const TF_MS: Record<AggregatedTimeframe, number> = {
-  "1s": 1_000,
-  "5s": 5_000,
-  "10s": 10_000,
-  "11s": 11_000,
-  "20s": 20_000,
-  "30s": 30_000,
-  "1m": 60_000,
-  "2m": 120_000,
-  "3m": 180_000,
-  "5m": 300_000,
-  "10m": 600_000,
-  "15m": 900_000,
-  "20m": 1_200_000,
-  "25m": 1_500_000,
-  "30m": 1_800_000,
-  "35m+": 2_100_000,
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "1d": 86_400_000,
-  "2d": 172_800_000,
-  "3d": 259_200_000,
-  "5d": 432_000_000,
-  "10d": 864_000_000,
+  S5: 5_000,
+  S10: 10_000,
+  S15: 15_000,
+  S30: 30_000,
+  M1: 60_000,
+  M2: 120_000,
+  M3: 180_000,
+  M5: 300_000,
+  M10: 600_000,
+  M15: 900_000,
+  M30: 1_800_000,
+  H1: 3_600_000,
+  H4: 14_400_000,
+  D1: 86_400_000,
+};
+
+// Legacy shorthand → PO canonical (so "5s", "1m", "1h" still resolve after the
+// grid moved to PO codes — historical clients and stored settings keep working).
+const TF_ALIASES: Record<string, AggregatedTimeframe> = {
+  "5s": "S5",
+  "10s": "S10",
+  "15s": "S15",
+  "30s": "S30",
+  "1m": "M1",
+  "2m": "M2",
+  "3m": "M3",
+  "5m": "M5",
+  "10m": "M10",
+  "15m": "M15",
+  "30m": "M30",
+  "1h": "H1",
+  "4h": "H4",
+  "1d": "D1",
 };
 
 const TF_LABELS: Record<number, string> = Object.fromEntries(
@@ -174,10 +167,7 @@ function floorBucket(tsMs: number, tfMs: number): number {
 export class RealtimeCandleAggregatorService {
   private static instance: RealtimeCandleAggregatorService;
 
-  private readonly states = new Map<
-    string,
-    Map<number /*tfMs*/, TfState>
-  >();
+  private readonly states = new Map<string, Map<number /*tfMs*/, TfState>>();
   private closedHandler: ClosedHandler | null = null;
   private parityHandler: ParityHandler | null = null;
   private readonly parity = new Map<string, SymbolParity>();
@@ -231,6 +221,13 @@ export class RealtimeCandleAggregatorService {
     this.clockOffsetMs = 0;
   }
 
+  removeSymbol(symbol: string): void {
+    const norm = canonicalizeSymbol(symbol);
+    if (!norm) return;
+    this.states.delete(norm);
+    this.parity.delete(norm);
+  }
+
   // ── Tick ingestion (fed from websocketService.broadcastLiveTick) ──
   addTick(symbol: string, price: number, tsMs: number, volume = 0): void {
     if (!symbol) return;
@@ -282,10 +279,7 @@ export class RealtimeCandleAggregatorService {
       // uses) — ancient packets are dropped as non-factual.
       if (state.closed.length > 0) {
         const last = state.closed[state.closed.length - 1];
-        if (
-          last.timestamp === bucket &&
-          this.latestTsMs - tsMs <= REORDER_MS
-        ) {
+        if (last.timestamp === bucket && this.latestTsMs - tsMs <= REORDER_MS) {
           this.adjustClosed(last, price, tsMs, volume);
           this.parityRecord(norm, tf);
           this.closedHandler?.({ ...last });
@@ -294,23 +288,23 @@ export class RealtimeCandleAggregatorService {
     }
   }
 
-  // ── Timeframe resolution (server-side authoritative grid) ──
-  /** True when the label is part of the server's multi-resolution grid. */
+  // ── Timeframe resolution (server-side authoritative PO grid) ──
+  /** True when the label resolves onto the server's PO multi-resolution grid. */
   isSupportedTimeframe(label: string): boolean {
-    return Object.prototype.hasOwnProperty.call(
-      TF_MS,
-      (label || "").trim().toLowerCase(),
-    );
+    return this.canonicalTimeframe(label) !== null;
   }
 
-  /** Canonical grid label for a requested timeframe (alias-aware). */
+  /** Canonical PO grid label for a requested timeframe (alias-aware). */
   canonicalTimeframe(label: string): AggregatedTimeframe | null {
-    const raw = (label || "").trim().toLowerCase();
-    if (Object.prototype.hasOwnProperty.call(TF_MS, raw)) {
-      return raw as AggregatedTimeframe;
+    const raw = (label || "").trim();
+    if (!raw) return null;
+    // 1. Exact PO canonical code (case-insensitive): "S5", "m1", "H1" …
+    const upper = raw.toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(TF_MS, upper)) {
+      return upper as AggregatedTimeframe;
     }
-    if (raw === "35m") return "35m+";
-    return null;
+    // 2. Legacy shorthand alias: "5s", "1m", "1h" …
+    return TF_ALIASES[raw.toLowerCase()] ?? null;
   }
 
   // ── History replay (on socket subscribe) ──
@@ -414,7 +408,8 @@ export class RealtimeCandleAggregatorService {
       for (const [tf, writes] of p.byTf) {
         const seen = p.seenByTf.get(tf) ?? 0;
         const wd = writes - seen;
-        const next = tickDelta > 0 && wd === 0 ? (p.zeroByTf.get(tf) ?? 0) + 1 : 0;
+        const next =
+          tickDelta > 0 && wd === 0 ? (p.zeroByTf.get(tf) ?? 0) + 1 : 0;
         p.zeroByTf.set(tf, next);
         p.seenByTf.set(tf, writes);
         if (

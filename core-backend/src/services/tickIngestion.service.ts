@@ -50,6 +50,17 @@ export interface LiveMarketTick {
    * standard forex vs crypto without ever mixing the classes.
    */
   assetType: string;
+  /**
+   * TEMPORARY LATENCY DIAGNOSTICS (websocket-feed audit — additive, optional,
+   * never required for normal operation). Stamped by the Pocket Option relay
+   * which decorates every outbound frame with `seq` + `ts_utc`; the backend
+   * stamps `receivedUtcMs` when the frame physically arrives. Forwarded to the
+   * browser so the tick-latency probe can decompose broker→bridge→backend→browser.
+   */
+  seq?: number;
+  tsUtc?: number;
+  receivedUtcMs?: number;
+  bridgeLegMs?: number;
 }
 
 export class LiveTickIngestionService {
@@ -563,6 +574,7 @@ export class LiveTickIngestionService {
     source: string,
     timestamp?: string,
     assetType?: string,
+    diag?: { seq?: number; tsUtc?: number; receivedUtcMs?: number },
   ): void {
     // Canonicalize the incoming symbol to the strict "/" whitelist format so a
     // Pocket Option tick ("EURUSD", "BTCUSD", "EUR-USD") lands on the SAME
@@ -611,6 +623,21 @@ export class LiveTickIngestionService {
       // STRICT CLASSIFICATION — honor the bridge's own `asset_type` stamp
       // (authoritative from the PO asset resolution), else classify locally.
       assetType: assetType || symbolRegistry.getAssetSubType(norm),
+      // LATENCY DIAGNOSTICS (additive): relay seq + emission wall-clock +
+      // backend reception stamp. `bridgeLegMs` = backend receipt − relay emit
+      // (same-host, so wall-clock comparison is valid). Forwarded opaquely to
+      // the client's tick-latency probe via the broadcast spread.
+      ...(diag != null
+        ? {
+            seq: diag.seq,
+            tsUtc: diag.tsUtc,
+            receivedUtcMs: diag.receivedUtcMs,
+            bridgeLegMs:
+              diag.tsUtc != null && diag.tsUtc > 0 && diag.receivedUtcMs != null
+                ? Math.max(0, diag.receivedUtcMs - diag.tsUtc)
+                : undefined,
+          }
+        : {}),
     };
 
     // Broadcast strict live tick to WebSocket clients (symbol room).

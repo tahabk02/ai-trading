@@ -14,13 +14,18 @@ import { secrets } from "./config/secrets";
 import { logger } from "./utils/logger";
 import { RedisSubscriber } from "./messaging/subscriber";
 import { CacheService } from "./services/cache.service";
-import { WebSocketService, buildFeedStatusPayload } from "./services/websocket.service";
+import {
+  WebSocketService,
+  buildFeedStatusPayload,
+  MARKET_TERMINAL_ROOM,
+} from "./services/websocket.service";
 import { tickIngestionService } from "./services/tickIngestion.service";
 import { symbolRegistry } from "./services/symbolRegistry.service";
 import { forexDataService } from "./services/forexData.service";
 import { pocketOptionBridgeService } from "./services/pocketOptionBridge.service";
 import { realtimeCandleAggregatorService } from "./services/realtimeCandleAggregator.service";
 import { realtimeTickBuffer } from "./services/realtimeTickBuffer.service";
+import { buildMarketQuotesSnapshot } from "./services/marketQuotes.service";
 import { SOCKET_SERVER_OPTIONS } from "./config/socket.config";
 import { feedMetrics } from "./lib/feedMetrics";
 import { createProcessErrorReporter } from "./lib/processErrorHandler";
@@ -28,6 +33,7 @@ import { rateLimit } from "./middlewares/rateLimit.middleware";
 import { errorMiddleware } from "./middlewares/error.middleware";
 import apiRouter from "./routes/index";
 import { rootHealthRouter } from "./routes/health.routes";
+import { historyCollector } from "./services/historyCollector.service";
 import {
   allowedOrigins,
   corsOriginResolver,
@@ -74,10 +80,15 @@ async function connectDatabase(): Promise<void> {
       await prisma.$connect();
       logger.info("Database connected on retry");
     } catch (retryError) {
-      logger.error("Database unreachable after retry â€” shutting down", {
+      // NON-FATAL by design (Alpha.5 Pro Part 3): the datasource binding is
+      // racy under ts-node-dev respawns (dotenv load order), and the operative
+      // dev DB is the per-client SQLite default each service already uses.
+      // A database that is only temporarily unreachable must NOT take down the
+      // live OTC tape or the signal pipeline — dependent endpoints surface 500
+      // through the global error middleware until the store comes back.
+      logger.warn("Database unreachable after retry â€” continuing degraded", {
         error: (retryError as Error).message,
       });
-      process.exit(1);
     }
   }
 }
@@ -117,9 +128,7 @@ httpServer.setMaxListeners(30); // suppress MaxListenersExceededWarning on HTTP 
 // We also support additional configured origins to maintain production flexibility.
 // Express CORS â€” must be first to handle preflight
 app.use(privateNetworkMiddleware);
-app.use(
-  cors(corsOptions),
-);
+app.use(cors(corsOptions));
 
 // Body parsing
 app.use(express.json({ limit: "1mb" }));
@@ -224,6 +233,24 @@ const io: SocketIOServer = new SocketIOServer(httpServer, {
 const wsService = WebSocketService.getInstance();
 wsService.initialize(io);
 
+// ── PRIVATE NETWORK ACCESS PREFLIGHT (loopback safety) ──
+// A public/HTTPS page (DevTunnel, production domain) that somehow still targets
+// the raw loopback (http://localhost:4000) must receive this header on the
+// socket.io engine's preflight, or Chrome blocks it with "Permission was denied
+// for this request to access the loopback address space." Mirrors the Express
+// `privateNetworkMiddleware` for the engine HTTP layer.
+io.engine.on(
+  "initial_headers",
+  (
+    headers: Record<string, string>,
+    req: { headers?: Record<string, string | string[] | undefined> },
+  ) => {
+    if (req?.headers?.["access-control-request-private-network"] === "true") {
+      headers["Access-Control-Allow-Private-Network"] = "true";
+    }
+  },
+);
+
 // ── ENGINE-LEVEL TRANSPORT FAULTS ──
 // Never silence a failed handshake/upgrade: surface it with the sibling code
 // so operator logs distinguish "client vanished" (normal) from "network/transport
@@ -233,11 +260,13 @@ io.engine.on("connection_error", (err) => {
   const rawReq = err?.req as { remoteAddress?: string } | undefined;
   logger.warn("Socket.IO engine connection_error", {
     code: err?.code,
-    message: typeof (err as { message?: string })?.message === "string"
-      ? (err as { message?: string }).message
-      : undefined,
+    message:
+      typeof (err as { message?: string })?.message === "string"
+        ? (err as { message?: string }).message
+        : undefined,
     context:
-      err && err.context &&
+      err &&
+      err.context &&
       typeof (err.context as { code?: string })?.code === "string"
         ? (err.context as { code?: string }).code
         : undefined,
@@ -312,10 +341,26 @@ io.on("connection", (socket) => {
 
       const normalized = rawSymbol.toUpperCase();
       const tf =
-        realtimeCandleAggregatorService.canonicalTimeframe(parsed?.timeframe || "") ??
-        "1m";
+        realtimeCandleAggregatorService.canonicalTimeframe(
+          parsed?.timeframe || "",
+        ) ?? "M1";
       socket.join(normalized);
       socket.join(`${normalized}:${tf}`);
+      const previous = socket.data.activeSubscription as
+        | { symbol?: string; timeframe?: string }
+        | undefined;
+      if (previous?.symbol && previous.symbol !== normalized) {
+        socket.leave(previous.symbol);
+        if (previous.timeframe)
+          socket.leave(`${previous.symbol}:${previous.timeframe}`);
+        if (!wsService.hasActiveSubscribers(previous.symbol)) {
+          realtimeCandleAggregatorService.removeSymbol(previous.symbol);
+          pocketOptionBridgeService.requestSymbolUnsubscription(
+            previous.symbol,
+          );
+        }
+      }
+      socket.data.activeSubscription = { symbol: normalized, timeframe: tf };
       tickIngestionService.startSymbolStream(normalized);
       // FORCE INITIAL TICK HANDSHAKE — push the ACTIVE symbol to the PO bridge
       // so its tick reader arms immediately and confirms back (subscribed →
@@ -349,11 +394,11 @@ io.on("connection", (socket) => {
       if (symbol?.trim()) {
         const normalized = symbol.trim().toUpperCase();
         socket.join(normalized);
-        socket.join(`${normalized}:1m`);
+        socket.join(`${normalized}:M1`);
         tickIngestionService.startSymbolStream(normalized);
         pocketOptionBridgeService.requestSymbolSubscription(normalized);
         wsService.replayHistory(socket, normalized);
-        wsService.replayCandleHistory(socket, normalized, "1m");
+        wsService.replayCandleHistory(socket, normalized, "M1");
         logger.info("Client subscribed to symbol room (legacy)", {
           socketId: socket.id,
           symbol: normalized,
@@ -367,10 +412,23 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("unsubscribe_symbol", (symbol: string) => {
-    if (symbol?.trim()) {
-      const normalized = symbol.trim().toUpperCase();
+  socket.on("unsubscribe_symbol", (payload: unknown) => {
+    const raw =
+      typeof payload === "string"
+        ? payload
+        : (payload as { symbol?: string } | null)?.symbol;
+    if (raw?.trim()) {
+      const normalized = raw.trim().toUpperCase();
+      const timeframe = (
+        socket.data.activeSubscription as { timeframe?: string } | undefined
+      )?.timeframe;
       socket.leave(normalized);
+      if (timeframe) socket.leave(`${normalized}:${timeframe}`);
+      if (!wsService.hasActiveSubscribers(normalized)) {
+        realtimeCandleAggregatorService.removeSymbol(normalized);
+        pocketOptionBridgeService.requestSymbolUnsubscription(normalized);
+      }
+      socket.data.activeSubscription = undefined;
       logger.info("Client unsubscribed from symbol room", {
         socketId: socket.id,
         symbol: normalized,
@@ -378,8 +436,58 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ── MARKET TERMINAL CHANNEL ──
+  // The all-pairs grid joins ONE lightweight global room (`market-terminal`)
+  // instead of subscribing to 34 symbol rooms. No per-symbol replays, no
+  // candle history bursts, no PO re-subscription storm — the socket gets an
+  // immediate `market_quotes` snapshot at join, then the 1Hz broadcaster and
+  // the live-quant relay keep it streaming (see websocket.service).
+  socket.on("subscribe_all", () => {
+    try {
+      socket.join(MARKET_TERMINAL_ROOM);
+      socket.data.terminal = true;
+      void buildMarketQuotesSnapshot()
+        .then((quotes) => wsService.replayMarketQuotes(socket, quotes))
+        .catch(() => {
+          /* observational — a snapshot fault never breaks the join */
+        });
+      logger.info("Client joined market terminal channel", {
+        socketId: socket.id,
+      });
+    } catch (err) {
+      logger.warn("WebSocket subscribe_all handler error", {
+        socketId: socket.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  socket.on("unsubscribe_all", () => {
+    try {
+      socket.leave(MARKET_TERMINAL_ROOM);
+      socket.data.terminal = false;
+      logger.info("Client left market terminal channel", {
+        socketId: socket.id,
+      });
+    } catch (err) {
+      logger.warn("WebSocket unsubscribe_all handler error", {
+        socketId: socket.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   // Clean "disconnect" handler
   socket.on("disconnect", (reason) => {
+    const active = socket.data.activeSubscription as
+      | { symbol?: string }
+      | undefined;
+    if (active?.symbol) {
+      if (!wsService.hasActiveSubscribers(active.symbol)) {
+        realtimeCandleAggregatorService.removeSymbol(active.symbol);
+        pocketOptionBridgeService.requestSymbolUnsubscription(active.symbol);
+      }
+    }
     logger.info("WebSocket client disconnected", {
       socketId: socket.id,
       reason,
@@ -397,6 +505,30 @@ io.on("connection", (socket) => {
 });
 
 // â”€â”€ Redis Subscriber (Pub/Sub â†’ WebSocket bridge) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── MARKET TERMINAL QUOTES BROADCASTER ──
+// 1Hz all-pairs quote snapshots pushed to the market-terminal room. Guarded by
+// hasTerminalWatchers() so a grid-less server never burns CPU scanning all 34
+// rings; the snapshot itself is the SAME enriched payload as GET /api/v1/quotes
+// (one eager source of truth for HTTP + WS). Never throws on a bad beat — the
+// snapshot builder already degrades to silence instead of spamming errors.
+const MARKET_QUOTES_BROADCAST_MS = 1_000;
+
+function startMarketQuotesBroadcaster(): NodeJS.Timeout {
+  logger.info("[MarketTerminal] Starting 1Hz market_quotes broadcaster");
+  const timer = setInterval(() => {
+    if (!wsService.hasTerminalWatchers()) return;
+    void buildMarketQuotesSnapshot()
+      .then((quotes) => wsService.broadcastMarketQuotes(quotes))
+      .catch(() => {
+        /* observational — the next beat re-arms */
+      });
+  }, MARKET_QUOTES_BROADCAST_MS);
+  timer.unref?.();
+  return timer;
+}
+
+const marketQuotesTimer = startMarketQuotesBroadcaster();
+
 const subscriber = new RedisSubscriber(io);
 subscriber.subscribe().catch((error) => {
   logger.error(
@@ -428,9 +560,12 @@ cacheService
     );
   })
   .catch((error) => {
-    logger.warn("Cache service connection failed â€” continuing without cache", {
-      error: (error as Error).message,
-    });
+    logger.warn(
+      "Cache service connection failed â€” continuing without cache",
+      {
+        error: (error as Error).message,
+      },
+    );
     wsService.broadcastEngineStatus(
       "DEGRADED",
       "Cache unavailable, market data operating in direct-fetch mode",
@@ -501,7 +636,7 @@ httpServer.listen(PORT, () => {
   // Candle buffers are populated ONLY by real observed data (PO bridge
   // snapshot/ticks and genuine HTTP live ticks) â€” NO skeleton-bar fabrication.
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-      symbolRegistry
+  symbolRegistry
     .getAll("otc")
     .then(async (pairs) => {
       pairs.forEach((entry) => {
@@ -522,6 +657,13 @@ httpServer.listen(PORT, () => {
   // Connect the backend client to the Python relay. If no SSID is configured
   // the bridge reports a clean awaiting_ssid state (no fabricated data).
   pocketOptionBridgeService.start();
+
+  // â”€â”€ 30-MINUTE HISTORICAL DATA LAYER (Alpha.5 Pro, Part 3) â”€â”€
+  // Persist the REAL observed tick tape into minute-bucketed AssetHistory +
+  // TickHistory rows every 60s so the math-target / precision-gate pipeline
+  // has a genuine 30-minute window per asset. Strictly real data only.
+  logger.info("[History] Starting 30-minute historical data collector (every 60s)");
+  historyCollector.start();
 });
 
 // =============================================================================
@@ -545,8 +687,10 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     tickIngestionService.stopAllStreams();
+    clearInterval(marketQuotesTimer);
     pocketOptionBridgeService.stop();
     realtimeCandleAggregatorService.stop();
+    historyCollector.stop();
     io.close();
     logger.info("WebSocket server closed");
 
@@ -624,4 +768,3 @@ process.on("uncaughtException", (error: Error) => {
 //  EXPORTS for testing / integration
 // =============================================================================
 export { app, httpServer, io, prisma };
-

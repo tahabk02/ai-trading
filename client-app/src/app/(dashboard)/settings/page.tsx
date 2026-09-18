@@ -228,16 +228,10 @@ export default function SettingsPage() {
                       key={opt.mode}
                       type="button"
                       onClick={() => setTheme(opt.mode)}
-                      disabled={opt.mode !== "dark"}
                       aria-pressed={theme === opt.mode}
-                      title={
-                        opt.mode !== "dark"
-                          ? t("darkLockedTitle")
-                          : opt.label
-                      }
+                      title={opt.label}
                       className={cn(
                         "flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold uppercase tracking-wider transition-all border active:scale-[0.98]",
-                        "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
                         theme === opt.mode
                           ? "bg-blue-600 text-white border-blue-600 shadow-sm"
                           : "bg-slate-50 dark:bg-slate-950/60 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800",

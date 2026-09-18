@@ -1,21 +1,21 @@
 "use client";
 
 /**
- * useTheme.tsx — INSTITUTIONAL DARK THEME ENGINE (light mode PURGED)
+ * useTheme.tsx — DARK / LIGHT THEME ENGINE
  *
  * Zero-flash architecture:
- *  1. A blocking inline script in `layout.tsx` stamps `class="dark"` +
- *     `color-scheme: dark` on <html> BEFORE first paint.
- *  2. This provider hydrates to the SAME dark state, so the resolved theme on
- *     first client render matches the pre-paint DOM — no flash.
+ *  1. A blocking inline script in `layout.tsx` stamps `class="dark|light"` +
+ *     `color-scheme` on <html> BEFORE first paint.
+ *  2. This provider hydrates to the SAME resolved state, so the first client
+ *     render matches the pre-paint DOM — no flash.
  *  3. Tailwind `darkMode: "class"` consumes the <html> class for styling.
  *
- * LIGHT/SYSTEM LOCK: the product ships ONE palette — the unified obsidian
- * institutional dark (#0B0E14). Older builds persisted `light`/`system`
- * under THEME_STORAGE_KEY; every entry point here (storage read, media
- * resolution, setTheme, toggleTheme, pre-paint script) COERCES to "dark", so
- * no stale localStorage flag or OS preference can ever re-break the UI into
- * a blinding white surface.
+ * DEFAULTS & PERSISTENCE:
+ *  • Default is institutional obsidian DARK.
+ *  • The user's choice (dark | light | system) persists under THEME_STORAGE_KEY.
+ *  • "system" resolves against the live `prefers-color-scheme` media query.
+ *  • Every color lives in the theme object in `src/styles/globals.css` — this
+ *    hook only owns the class + persistence, never raw colors.
  */
 
 import React, {
@@ -35,19 +35,37 @@ export const THEME_STORAGE_KEY = "alpha5_theme";
 /** Deep obsidian dark trading aesthetic — the production default. */
 export const DEFAULT_THEME: ThemeMode = "dark";
 
-/** Read the persisted theme mode (SSR-safe). */
-export function getStoredTheme(): ThemeMode {
-  // ── INSTITUTIONAL DARK LOCK ──
-  // Any light/system value persisted by older builds is ignored — the unified
-  // obsidian palette is the only shipped UI. Storage writes are forced to
-  // "dark" elsewhere, so this is a one-time migration guard.
-  return DEFAULT_THEME;
+function isThemeMode(value: unknown): value is ThemeMode {
+  return value === "dark" || value === "light" || value === "system";
 }
 
-/** Resolve "system" against the live media query. */
+/** Read the persisted theme mode (SSR-safe, defaults to dark). */
+export function getStoredTheme(): ThemeMode {
+  if (typeof window === "undefined") return DEFAULT_THEME;
+  try {
+    const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return isThemeMode(raw) ? raw : DEFAULT_THEME;
+  } catch {
+    // localStorage unavailable (privacy mode) — fall back to dark.
+    return DEFAULT_THEME;
+  }
+}
+
+/** Resolve "system" against the live media query (dark when unknown). */
 export function resolveSystemTheme(): ResolvedTheme {
-  // Locked: the OS preference can never pull the terminal into light mode.
-  return "dark";
+  if (typeof window === "undefined" || !window.matchMedia) return "dark";
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  } catch {
+    return "dark";
+  }
+}
+
+/** Resolve any mode to the concrete theme applied to the DOM. */
+export function resolveTheme(mode: ThemeMode): ResolvedTheme {
+  return mode === "system" ? resolveSystemTheme() : mode;
 }
 
 /**
@@ -79,48 +97,53 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  // Initial state matches the inline pre-paint script's outcome so the very
-  // first client render is already correct — zero flash, zero hydration diff.
+  // Initial state matches the pre-paint default (dark) so the very first
+  // client render is already correct — zero flash, zero hydration diff.
   const [theme, setThemeState] = useState<ThemeMode>(DEFAULT_THEME);
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>("dark");
   const [mounted, setMounted] = useState(false);
 
   // ── Hydrate from localStorage (same source as the pre-paint script) ──
   useEffect(() => {
-    // Locked to dark: purge any persisted light/system flag on hydration and
-    // re-stamp the deep obsidian surface so a previous session's mode cannot
-    // survive into this one.
-    setThemeState("dark");
-    setResolvedTheme("dark");
-    applyThemeToDom("dark");
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
-    } catch {
-      // localStorage unavailable — in-memory dark is sufficient.
-    }
+    const stored = getStoredTheme();
+    const resolved = resolveTheme(stored);
+    setThemeState(stored);
+    setResolvedTheme(resolved);
+    applyThemeToDom(resolved);
     setMounted(true);
   }, []);
 
-  const setTheme = useCallback((_mode: ThemeMode) => {
-    // ── INSTITUTIONAL DARK LOCK ──
-    // Light/system mode is removed from the product. Any caller (legacy header
-    // cycling, settings picker) requesting a non-dark mode is coerced to dark —
-    // the unified obsidian palette is the only shipped UI.
-    setThemeState("dark");
-    setResolvedTheme("dark");
-    applyThemeToDom("dark");
+  // ── Track the OS preference while in "system" mode ──
+  useEffect(() => {
+    if (theme !== "system" || typeof window === "undefined" || !window.matchMedia)
+      return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      const resolved: ResolvedTheme = mq.matches ? "dark" : "light";
+      setResolvedTheme(resolved);
+      applyThemeToDom(resolved);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
+
+  const setTheme = useCallback((mode: ThemeMode) => {
+    const next = isThemeMode(mode) ? mode : DEFAULT_THEME;
+    const resolved = resolveTheme(next);
+    setThemeState(next);
+    setResolvedTheme(resolved);
+    applyThemeToDom(resolved);
     try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
+      window.localStorage.setItem(THEME_STORAGE_KEY, next);
     } catch {
       // localStorage unavailable (privacy mode) — in-memory only
     }
   }, []);
 
   const toggleTheme = useCallback(() => {
-    // Locked to dark — the legacy light/dark toggle is a permanent no-op that
-    // always stays on the institutional obsidian palette.
-    setTheme("dark");
-  }, [setTheme]);
+    // Flip from whatever is CURRENTLY on screen → deterministic dark/light.
+    setTheme(resolvedTheme === "dark" ? "light" : "dark");
+  }, [resolvedTheme, setTheme]);
 
   const value = useMemo<ThemeContextValue>(
     () => ({ theme, resolvedTheme, setTheme, toggleTheme, mounted }),
@@ -150,11 +173,10 @@ export function useTheme(): ThemeContextValue {
 
 /**
  * THE ZERO-FLASH PRE-PAINT SCRIPT — injected as a blocking <script> in
- * <head> via Next.js <Script strategy="beforeInteractive"> or dangerously-
- * setInnerHTML in layout. Runs BEFORE first paint and stamps the darker
- * color-scheme + `dark` class unconditionally — the palette is locked, so no
- * localStorage read or system preference is ever consulted here.
+ * <head> (Next.js <Script strategy="beforeInteractive">). Runs BEFORE first
+ * paint: reads the persisted mode, resolves `system` against the media query,
+ * and stamps `class="dark|light"` + `color-scheme`. Never throws.
  */
-export const THEME_PREPAINT_SCRIPT = `(function(){try{var d=document.documentElement;d.classList.remove("dark","light");d.classList.add("dark");d.style.colorScheme="dark";}catch(e){document.documentElement.classList.add("dark");}})();`;
+export const THEME_PREPAINT_SCRIPT = `(function(){try{var m="dark";try{var s=localStorage.getItem("${THEME_STORAGE_KEY}");if(s==="light"){m="light";}else if(s==="system"){m=(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light";}}catch(e){}var d=document.documentElement;d.classList.remove("dark","light");d.classList.add(m);d.style.colorScheme=m;}catch(e){document.documentElement.classList.add("dark");}})();`;
 
 export default ThemeProvider;

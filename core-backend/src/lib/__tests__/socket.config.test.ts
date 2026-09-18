@@ -12,11 +12,37 @@ describe("MASTER MISSION part 2 — socket.io stability", () => {
     expect(SOCKET_SERVER_OPTIONS.transports).toContain("websocket");
     expect(SOCKET_SERVER_OPTIONS.transports).toContain("polling");
     const cors = SOCKET_SERVER_OPTIONS.cors as {
-      origin?: string;
+      origin?:
+        | string
+        | ((
+            origin: string | undefined,
+            callback: (err: Error | null, allow?: boolean) => void,
+          ) => void);
       credentials?: boolean;
     };
-    expect(cors.origin).toBe(FRONTEND_ORIGIN);
+    expect(typeof cors.origin).toBe("function");
+    // Shared resolver — allows the frontend origin explicitly, rejects strangers.
+    const resolver = cors.origin as NonNullable<typeof cors.origin> &
+      ((
+        origin: string | undefined,
+        callback: (err: Error | null, allow?: boolean) => void,
+      ) => void);
+    const resolve = (origin: string) =>
+      new Promise<boolean>((resolve, reject) =>
+        resolver(origin, (err, allow) =>
+          err ? reject(err) : resolve(allow === true),
+        ),
+      );
     expect(cors.credentials).toBe(true);
+    return Promise.all([
+      expect(resolve(FRONTEND_ORIGIN)).resolves.toBe(true),
+      expect(
+        resolve("https://b3lrfrj9-3000.uks1.devtunnels.ms"),
+      ).resolves.toBe(true),
+      expect(resolve("https://evil.example.test")).rejects.toThrow(
+        /not allowed by CORS/,
+      ),
+    ]);
   });
 
   it("test_feed_status_event_emitted_on_connect — payload carries status, symbols, last_tick_ts", () => {

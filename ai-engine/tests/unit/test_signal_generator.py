@@ -14,7 +14,7 @@ def _candles():
 
 
 def _generator(monkeypatch, confidence: float) -> SignalGenerator:
-    generator = SignalGenerator(confidence_threshold=0.965)
+    generator = SignalGenerator(confidence_threshold=0.98)
     monkeypatch.setattr(
         generator.ta_service,
         "calculate_indicators",

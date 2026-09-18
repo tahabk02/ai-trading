@@ -5,7 +5,10 @@ import { logger } from "../utils/logger";
 import { secrets } from "../config/secrets";
 import axios from "axios";
 import { forexDataService } from "../services/forexData.service";
+import { realtimeTickBuffer } from "../services/realtimeTickBuffer.service";
+import { pocketOptionBridgeService } from "../services/pocketOptionBridge.service";
 import { orderbookHealth } from "../controllers/orderbook.controller";
+import { historyCollector } from "../services/historyCollector.service";
 import packageJson from "../../package.json";
 import { allowedOrigins } from "../config/cors";
 
@@ -131,6 +134,45 @@ export const rootHealthRouter: Router = (() => {
     const body = buildDataHealthSnapshot();
     res.status(body.status === "down" ? 503 : 200).json(body);
   });
+  r.get("/feed", (_req: Request, res: Response) => {
+    res.json(buildFeedHealthSnapshot());
+  });
+  r.get("/orderbook", (_req: Request, res: Response) => {
+    res.json({
+      status: orderbookHealth.last_error == null ? "ok" : "down",
+      latency_ms: orderbookHealth.last_latency_ms,
+      last_error: orderbookHealth.last_error,
+      last_ok_ts: orderbookHealth.last_ok_ts,
+      timestamp: new Date().toISOString(),
+    });
+  });
+  // GET /health/history?symbol=XYZ — 30-minute persisted-window proof for one
+  // asset (Alpha.5 Pro Part 3). Mirrors /api/v1/health/history on the ROOT
+  // namespace so the autopilot probes stay consistent.
+  r.get("/history", async (req: Request, res: Response) => {
+    const symbol = String(req.query.symbol ?? req.query.s ?? "")
+      .trim()
+      .toUpperCase();
+    if (!symbol) {
+      res.status(400).json({ error: "symbol is required" });
+      return;
+    }
+    try {
+      const health = await historyCollector.getHistoryHealth(symbol);
+      res.status(health.window_complete ? 200 : 202).json(health);
+    } catch (err) {
+      logger.error("Health check: history probe crashed", { error: err });
+      res.status(503).json({
+        symbol,
+        bars_30m: 0,
+        ticks_30m: 0,
+        min_bucket_ms: null,
+        max_bucket_ms: null,
+        window_complete: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
   return r;
 })();
 
@@ -184,6 +226,47 @@ router.get("/ai", async (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /health/feed — one snapshot function shared by /api/v1/health/feed and
+ * the root /health/feed (single source of truth for live-feed health).
+ *
+ *   status: "live" | "degraded" | "awaiting_ssid" | "auth_failed"
+ *   last_tick_ts   ISO instant of the newest GENUINE tick on the real tape.
+ *   ticks_received session-lifetime real tick count (ring-buffer service).
+ *   candles_emitted session-lifetime count of REAL candles written (PO M20
+ *                  bars + live-tick bucket rollovers).
+ *
+ * Every number is real observed data — never fabricated by this endpoint.
+ */
+export function buildFeedHealthSnapshot(): {
+  status: "live" | "degraded" | "awaiting_ssid" | "auth_failed";
+  last_tick_ts: string | null;
+  ticks_received: number;
+  candles_emitted: number;
+  detail: string;
+  timestamp: string;
+} {
+  const feed = pocketOptionBridgeService.getCurrentFeedStatus().status;
+  let status: "live" | "degraded" | "awaiting_ssid" | "auth_failed";
+  if (feed === "live") status = "live";
+  else if (feed === "awaiting_ssid") status = "awaiting_ssid";
+  else if (feed === "auth_failed") status = "auth_failed";
+  else status = "degraded";
+
+  const tracked = realtimeTickBuffer.getTrackedSymbols();
+  let ticks = 0;
+  for (const symbol of tracked) ticks += realtimeTickBuffer.getTickCount(symbol);
+
+  return {
+    status,
+    last_tick_ts: realtimeTickBuffer.getGlobalLastTickAt() ?? null,
+    ticks_received: ticks,
+    candles_emitted: forexDataService.getCandleEmissionCount(),
+    detail: feed,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
  * GET /health/orderbook
  *
  * Reports the /orderbook endpoint's last outcome from the controller's health
@@ -204,6 +287,15 @@ router.get("/orderbook", (_req: Request, res: Response) => {
 router.get("/data", (_req: Request, res: Response) => {
   const body = buildDataHealthSnapshot();
   return res.status(body.status === "down" ? 503 : 200).json(body);
+});
+
+/**
+ * GET /health/feed — live-feed health snapshot (mirror of root namespace).
+ * Reports feed status, last genuine tick, ticks_received and candles_emitted
+ * so the market terminal can surface live bridge health.
+ */
+router.get("/feed", (_req: Request, res: Response) => {
+  res.json(buildFeedHealthSnapshot());
 });
 
 /**

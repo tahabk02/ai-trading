@@ -28,9 +28,25 @@ vi.mock("../../services/forexData.service", () => ({
 
 const axiosMock = vi.hoisted(() => ({
   get: vi.fn(),
+  post: vi.fn(),
+  put: vi.fn(),
+  delete: vi.fn(),
+  create: vi.fn(() => ({
+    get: axiosMock.get,
+    post: axiosMock.post,
+    put: axiosMock.put,
+    delete: axiosMock.delete,
+    interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+  })),
 }));
 vi.mock("axios", () => ({
-  default: { get: axiosMock.get },
+  default: {
+    get: axiosMock.get,
+    post: axiosMock.post,
+    put: axiosMock.put,
+    delete: axiosMock.delete,
+    create: axiosMock.create,
+  },
 }));
 
 import { rootHealthBody, rootHealthRouter } from "../../routes/health.routes";
@@ -168,5 +184,14 @@ describe("ROOT GET /health (MASTER MISSION 1.3 — autopilot probe)", () => {
     expect(code).toBe(200);
     expect(body.status).toBe("ok");
     expect(Array.isArray(body.sources)).toBe(true);
+  });
+
+  it("test_health_orderbook_returns_200 — root /health/orderbook answers 200 JSON {status, latency_ms, last_ok_ts}", async () => {
+    const { calls } = await dispatch("/orderbook");
+    expect(calls.length).toBe(1);
+    const { code, body } = calls[0];
+    expect(code).toBe(200);
+    expect(typeof body.latency_ms).toBe("number");
+    expect(typeof body.timestamp).toBe("string");
   });
 });

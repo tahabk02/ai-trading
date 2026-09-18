@@ -27,6 +27,7 @@ import tradingAccuracyVerifier, {
 // ── localStorage key ──
 const LS_TIMEFRAME_KEY = "selected_timeframe";
 const LS_LEAD_OFFSET_KEY = "selected_lead_offset_ms";
+const LS_HORIZON_KEY = "selected_horizon_minutes";
 
 // ── SUB-MINUTE CHART GRID ↔ AI THERMAL HORIZON BRIDGE ──
 // PO canonical sub-minute timeframes (S5..S30). The ai-engine thermal
@@ -37,15 +38,55 @@ const LS_LEAD_OFFSET_KEY = "selected_lead_offset_ms";
 // channel), so a healthy live stream always resolves a genuine directional
 // signal instead of a whitelist-dead 422.
 const PO_TO_BACKEND_TF: Record<string, string> = {
-  S5: "1m", S10: "1m", S15: "1m", S30: "1m",
-  M1: "1m", M2: "2m", M3: "3m", M5: "5m",
-  M10: "10m", M15: "15m", M30: "30m",
-  H1: "1h", H4: "4h", D1: "1d",
+  S5: "1m",
+  S10: "1m",
+  S15: "1m",
+  S30: "1m",
+  M1: "1m",
+  M2: "2m",
+  M3: "3m",
+  M5: "5m",
+  M10: "10m",
+  M15: "15m",
+  M30: "30m",
+  H1: "1h",
+  H4: "4h",
+  D1: "1d",
 };
 export function aiTimeframeFor(timeframe: string): string {
   const upper = (timeframe || "").trim().toUpperCase();
   if (PO_TO_BACKEND_TF[upper]) return PO_TO_BACKEND_TF[upper];
   return (timeframe || "").trim().toLowerCase() || "1m";
+}
+
+// ── TARGET-EXPIRY HORIZON GRID (Alpha.5 Pro) ──
+// User-selectable "when does this trade expire" buckets, deliberately
+// DECOUPLED from the chart's candle-build `selectedTimeframe`. Each horizon
+// maps 1:1 onto a backend thermal channel; the ai-engine's horizon engine
+// builds a rolling feature buffer sized to the horizon and emits an
+// EWMA-stabilized CALL/PUT + calibrated-confidence contract per tick.
+export const HORIZON_OPTIONS_MINUTES = [1, 2, 3, 5, 10] as const;
+export const HORIZON_TO_BACKEND_TF: Record<number, string> = {
+  1: "1m",
+  2: "2m",
+  3: "3m",
+  5: "5m",
+  10: "10m",
+};
+/** Snap any input to the nearest supported horizon minute (default 5m). */
+export function resolveHorizonMinutes(minutes?: number | null): number {
+  const raw = Number(minutes);
+  if (!Number.isFinite(raw) || raw <= 0) return 5;
+  return (HORIZON_OPTIONS_MINUTES as readonly number[]).reduce(
+    (best, opt) =>
+      Math.abs(opt - raw) < Math.abs(best - raw) ? opt : best,
+    HORIZON_OPTIONS_MINUTES[0],
+  );
+}
+export function horizonBackendTf(minutes?: number | null): string {
+  return (
+    HORIZON_TO_BACKEND_TF[resolveHorizonMinutes(minutes)] ?? "5m"
+  );
 }
 
 // ── SERVER-AUTHORITATIVE CLOSED CANDLE CONTRACT ──
@@ -187,10 +228,14 @@ function schedulePredictionRetry(key: string): void {
   );
 }
 
-function predictionKey(symbol: string, timeframe: string): string {
+function predictionKey(
+  symbol: string,
+  timeframe: string,
+  horizonMinutes?: number,
+): string {
   return `${(symbol || "").trim().toUpperCase()}|${(timeframe || "")
     .trim()
-    .toLowerCase()}`;
+    .toLowerCase()}|h${resolveHorizonMinutes(horizonMinutes)}`;
 }
 
 /**
@@ -229,12 +274,31 @@ function getPersistedLeadOffset(): number | null {
   return null;
 }
 
+/**
+ * Read the persisted target-expiry horizon (minutes) from localStorage.
+ * Snap-resolved to the supported grid (1/2/3/5/10); anything invalid falls
+ * back to the deterministic 5m default.
+ */
+function getPersistedHorizon(): number {
+  if (typeof window === "undefined") return 5;
+  try {
+    const stored = localStorage.getItem(LS_HORIZON_KEY);
+    if (stored != null && stored !== "") {
+      return resolveHorizonMinutes(Number(stored));
+    }
+  } catch {
+    // localStorage may be unavailable (SSR, privacy mode, etc.)
+  }
+  return 5;
+}
+
 // ── Types ──
 
 export interface SymbolEntry {
   symbol: string;
   name: string;
-  type: "stock" | "crypto" | "etf" | "otc";
+  type: "stock" | "crypto" | "etf" | "otc" | "commodity";
+  assetSubType?: "forex" | "otc" | "crypto" | "commodity";
   exchange: string;
   currency: string;
   /** Dynamic return percentage (e.g. 92) — served by /symbols from live ATR */
@@ -252,18 +316,49 @@ export interface QuantTickSnapshot {
   receivedAt: number;
 }
 
-export type POExpiration = 1 | 5 | 10 | 15 | 20 | 30 | 60 | 120 | 180 | 300 | 600 | 900 | 1800 | 3600 | 14400 | 43200 | 86400;
-export const PO_EXPIRATION_SECONDS_SET = new Set<number>([1,5,10,15,20,30,60,120,180,300,600,900,1800,3600,14400,43200,86400]);
+export type POExpiration =
+  | 1
+  | 5
+  | 10
+  | 15
+  | 20
+  | 30
+  | 60
+  | 120
+  | 180
+  | 300
+  | 600
+  | 900
+  | 1800
+  | 3600
+  | 14400
+  | 43200
+  | 86400;
+export const PO_EXPIRATION_SECONDS_SET = new Set<number>([
+  1, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1800, 3600, 14400, 43200,
+  86400,
+]);
 function snapToNearestExpiration(seconds: number): POExpiration {
   if (!Number.isFinite(seconds) || seconds <= 0) return 60;
-  const arr = [1,5,10,15,20,30,60,120,180,300,600,900,1800,3600,14400,43200,86400];
+  const arr = [
+    1, 5, 10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1800, 3600, 14400, 43200,
+    86400,
+  ];
   let best = arr[0];
-  for (const v of arr) { if (Math.abs(seconds - v) < Math.abs(seconds - best)) best = v; }
+  for (const v of arr) {
+    if (Math.abs(seconds - v) < Math.abs(seconds - best)) best = v;
+  }
   return best as POExpiration;
 }
 
 export interface TradingState {
-  feedStatus: "awaiting_ssid" | "auth_failed" | "degraded" | "live" | "stalled" | "disconnected";
+  feedStatus:
+    | "awaiting_ssid"
+    | "auth_failed"
+    | "degraded"
+    | "live"
+    | "stalled"
+    | "disconnected";
   /** Currently selected trading symbol */
   activeSymbol: string;
 
@@ -352,8 +447,21 @@ export interface TradingState {
   /** Internal request tracking ID to prevent race conditions */
   _lastRequestId: number;
 
-  selectedTimeframe: "S5" | "S10" | "S15" | "S30" | "M1" | "M2" | "M3" | "M5" |
-    "M10" | "M15" | "M30" | "H1" | "H4" | "D1";
+  selectedTimeframe:
+    | "S5"
+    | "S10"
+    | "S15"
+    | "S30"
+    | "M1"
+    | "M2"
+    | "M3"
+    | "M5"
+    | "M10"
+    | "M15"
+    | "M30"
+    | "H1"
+    | "H4"
+    | "D1";
   /** Derived timeframe in seconds (e.g. "M5" → 300). Auto-synced with selectedTimeframe. */
   selectedTimeframeSeconds: number;
 
@@ -364,6 +472,16 @@ export interface TradingState {
    * max(1, min(30, round(selectedExpirationSeconds / selectedTimeframeSeconds))).
    */
   selectedExpirationSeconds: number;
+
+  /**
+   * TARGET-EXPIRY HORIZON (minutes) — the stabilized AI horizon window
+   * (1m/2m/3m/5m/10m) that drives the horizon engine's rolling feature buffer
+   * + EWMA-stabilized CALL/PUT contract. Fully decoupled from BOTH
+   * `selectedTimeframe` (candle bucket) and `selectedExpirationSeconds`
+   * (trade execution expiry); it is a pure inference-window dimension.
+   * Deterministic SSR default 5; hydrated post-mount from localStorage.
+   */
+  selectedHorizonMinutes: number;
 
   /** Predictive lead-time offset (ms) — how far ahead of the external feed the
    *  forming candle is projected. NULL selects the aggregator default (exactly
@@ -420,6 +538,18 @@ export interface TradingState {
    */
   hydrateLeadOffset: () => void;
   /**
+   * HYDRATION-SAFE persisted target-expiry horizon restore. `selectedHorizonMinutes`
+   * starts at the deterministic 5m so server markup matches first paint;
+   * this re-applies the user's localStorage choice post-mount.
+   */
+  hydrateSelectedHorizon: () => void;
+  /**
+   * Set the target-expiry horizon (minutes). Resets the current prediction so
+   * no stale horizon's contract renders under the new selector state, then
+   * immediately forces a fresh /predict on the new horizon.
+   */
+  setSelectedHorizonMinutes: (minutes: number) => void;
+  /**
    * Configure the chart's PREDICTIVE LEAD-TIME OFFSET — the wall-clock amount
    * of time the forming candle is projected ahead of the external platform
    * (e.g. 20s / 1m). NULL restores the aggregator default (exactly one
@@ -432,6 +562,7 @@ export interface TradingState {
     timeframe?: string,
     signal?: AbortSignal,
     force?: boolean,
+    horizonMinutes?: number,
   ) => Promise<void>;
   addLiveSignal: (signal: SignalData) => void;
   setLiveSignals: (signals: SignalData[]) => void;
@@ -530,6 +661,42 @@ export interface TradingState {
  */
 export let realtimeAggregator: RealtimeCandleAggregator;
 
+// ── TRUE MODULE SINGLETON ACROSS DEV ROUTE CHUNKS ──
+// Next.js App Router DEV compiles each route page AND the app shell (layout)
+// as SEPARATE webpack registries. Any module imported from BOTH sides —
+// useTradingStore here — is evaluated TWICE, which previously produced two
+// zustand stores AND two RealtimeCandleAggregator instances. That split is
+// invisible to most of the UI but breaks the zero-hop chart path: the app-shell
+// socket folded `live_tick` into ITS aggregator while the dynamically-imported
+// FinancialChart subscribed to ITS OWN aggregator — the chart could stay
+// permanently blank (zero candles, window.__chartDebug null) with the stream
+// banner showing LIVE. Hoisting the single authoritative aggregator (plus its
+// one-time boot bookkeeping) onto globalThis forces every chunk — AND every
+// Fast-Refresh re-evaluation of this module — to bind the exact same instance.
+interface AlphaGlobalWithAggregator {
+  __alpha5RealtimeCandleAggregator?: RealtimeCandleAggregator;
+  __alpha5RealtimeCandleAggregatorBooted?: boolean;
+}
+const alphaGlobal =
+  typeof globalThis !== "undefined"
+    ? (globalThis as unknown as AlphaGlobalWithAggregator)
+    : null;
+const reuseShardAggregatorOrCreate = (
+  options: ConstructorParameters<typeof RealtimeCandleAggregator>[1],
+): RealtimeCandleAggregator => {
+  const existing = alphaGlobal?.__alpha5RealtimeCandleAggregator;
+  if (existing) return existing;
+  const created = new RealtimeCandleAggregator("M1", options);
+  if (alphaGlobal) alphaGlobal.__alpha5RealtimeCandleAggregator = created;
+  return created;
+};
+const shouldBootAggregator = (): boolean => {
+  if (!alphaGlobal) return true; // node/tests always boot a fresh local engine
+  if (alphaGlobal.__alpha5RealtimeCandleAggregatorBooted) return false;
+  alphaGlobal.__alpha5RealtimeCandleAggregatorBooted = true;
+  return true;
+};
+
 /** Minimum gap between heavy `realtimeCandles` React publishes (per symbol).
  *  Live chart morphs run on the zero-hop aggregator subscription, so the store
  *  only needs to refresh the React-merged series on bucket rollover or every
@@ -587,10 +754,17 @@ export const useTradingStore = create<TradingState>((set, get) => {
     });
   };
 
-  // ── SINGLETON REAL-TIME CANDLE AGGREGATOR ──
-  // Owned by the store so the chart, the AI pipeline, and the timeframe
-  // selector all share ONE authoritative OHLCV aggregation engine.
-  const aggregator = new RealtimeCandleAggregator("M1", {
+  // ── TRUE MODULE SINGLETON REAL-TIME CANDLE AGGREGATOR ──
+  // Shared by the chart, the AI pipeline, and the timeframe selector as the
+  // ONE authoritative OHLCV aggregation engine. The instance itself (and its
+  // one-time boot) is hoisted onto globalThis so the layout chunk and the
+  // route chunk can NEVER diverge into two engines (see header note) — the
+  // hook's per-evaluation zip store all bind this same engine. On second+
+  // module evaluations the options block is still rebuilt (callbacks capture
+  // each evaluation's own store symbol resolution) but the ENGINE is reused.
+  const aggregatorOptions: ConstructorParameters<
+    typeof RealtimeCandleAggregator
+  >[1] = {
     zeroFabrication: true,
     onCandleClose: (candle, symbol, timeframe) => {
       // ════════════════════════════════════════════════════════════════
@@ -640,7 +814,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
     onCandleUpdate: (candle, symbol) => {
       syncStoreCandle(candle, symbol);
     },
-  });
+  };
+  const aggregator = reuseShardAggregatorOrCreate(aggregatorOptions);
   // Zero-hop handle for the chart engine's direct live subscription.
   realtimeAggregator = aggregator;
 
@@ -650,10 +825,15 @@ export const useTradingStore = create<TradingState>((set, get) => {
   // live bar opens on the exact timeframe boundary the moment it has a real
   // price, with zero dependency on an external feed handshake. The projector
   // drives the DEFAULT pair immediately; the switch handler re-aims it.
-  aggregator.registerSymbols(OTC_FOREX_PAIRS.map((p) => p.symbol));
-  aggregator.setActiveSymbol(DEFAULT_SYMBOL);
-  aggregator.startHeartbeat();
-  aggregator.startProjector();
+  // Runs ONCE for the whole application: a second layout/page chunk evaluation
+  // of this module must not start duplicate heartbeats/projectors on the
+  // shared engine.
+  if (shouldBootAggregator()) {
+    aggregator.registerSymbols(OTC_FOREX_PAIRS.map((p) => p.symbol));
+    aggregator.setActiveSymbol(DEFAULT_SYMBOL);
+    aggregator.startHeartbeat();
+    aggregator.startProjector();
+  }
 
   return {
     // ── State defaults ──
@@ -704,8 +884,13 @@ export const useTradingStore = create<TradingState>((set, get) => {
     })),
 
     // ── Pocket Option Trading Defaults ──
-    expirationSeconds: 60, // 1 minute default
-    selectedExpirationSeconds: 60, // chart expiration = 1 minute default (decoupled from timeframe)
+    expirationSeconds: 60, // 1 minute default (trade execution expiry)
+    selectedExpirationSeconds: 300, // chart projection = 5m default (decoupled from timeframe)
+    // ── DETERMINISTIC SSR DEFAULT (hydration safety) ──
+    // Like selectedTimeframe, the horizon starts deterministic (5m) so server
+    // markup matches first paint; hydrateSelectedHorizon() re-applies the
+    // user's persisted choice post-mount.
+    selectedHorizonMinutes: 5,
     countdownSeconds: 0,
     isTradeActive: false,
     lastTradeResult: null,
@@ -777,7 +962,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
       if (!cleanSymbol) return;
 
       // ── STRICT WHITELIST ENFORCEMENT ──
-      // Only the 13 OTC pairs are selectable. AAPL, BTC/USDT, NVDA → rejected.
+      // Only the 34 whitelisted instruments are selectable (32 OTC forex +
+      // BTC/USD + ETH/USD). AAPL, NVDA, SPY → rejected.
       if (!isWhitelistedOtcpair(cleanSymbol)) {
         set({
           error: `Symbol ${cleanSymbol} is not on the OTC whitelist.`,
@@ -789,7 +975,11 @@ export const useTradingStore = create<TradingState>((set, get) => {
       // Drop any pending recovery retry for the PREVIOUS pair — switching
       // symbols supersedes the old backoff (the new pair fetches immediately).
       clearPredictionRetry(
-        predictionKey(get().activeSymbol, get().selectedTimeframe),
+        predictionKey(
+          get().activeSymbol,
+          get().selectedTimeframe,
+          get().selectedHorizonMinutes,
+        ),
       );
 
       // ── INSTANT EVALUATION FALLBACK ──
@@ -876,6 +1066,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
         predictionKey(
           get().activeSymbol,
           aiTimeframeFor(get().selectedTimeframe),
+          get().selectedHorizonMinutes,
         ),
       );
 
@@ -920,11 +1111,63 @@ export const useTradingStore = create<TradingState>((set, get) => {
       }
     },
 
+    // ── TARGET-EXPIRY HORIZON (Alpha.5 Pro) ──
+    hydrateSelectedHorizon: () => {
+      const persisted = getPersistedHorizon();
+      if (persisted !== get().selectedHorizonMinutes) {
+        // Pure state restore — never an extra /predict on first paint; the
+        // dashboard's regular prediction bootstrap picks up the correct
+        // horizon automatically.
+        set({ selectedHorizonMinutes: persisted });
+      }
+    },
+
+    setSelectedHorizonMinutes: (minutes: number) => {
+      const hz = resolveHorizonMinutes(minutes);
+      if (hz === get().selectedHorizonMinutes) return;
+
+      // Switching horizons supersedes any queued recovery retry for the
+      // previous (symbol, timeframe, horizon) combination.
+      clearPredictionRetry(
+        predictionKey(
+          get().activeSymbol,
+          aiTimeframeFor(get().selectedTimeframe),
+          get().selectedHorizonMinutes,
+        ),
+      );
+
+      try {
+        localStorage.setItem(LS_HORIZON_KEY, String(hz));
+      } catch {
+        // localStorage may be unavailable
+      }
+
+      set((state) => ({
+        selectedHorizonMinutes: hz,
+        // Never render the PREVIOUS horizon's stabilized contract under the
+        // newly selected horizon — the forced refetch below rebuilds it.
+        predictionData: null,
+        _priceVersion: state._priceVersion + 1,
+      }));
+
+      const currentSymbol = get().activeSymbol;
+      if (currentSymbol) {
+        get().getPrediction(
+          currentSymbol,
+          get().selectedTimeframe,
+          undefined,
+          true,
+          hz,
+        );
+      }
+    },
+
     getPrediction: async (
       symbol: string,
       timeframe?: string,
       signal?: AbortSignal,
       force?: boolean,
+      horizonMinutes?: number,
     ) => {
       const effectiveTf = timeframe || get().selectedTimeframe || "1d";
       // Sub-minute chart grids (20s/1s/100ms/20ms) are coerced to their nearest
@@ -933,7 +1176,14 @@ export const useTradingStore = create<TradingState>((set, get) => {
       // request (and its dedupe/retry keys) ride the 1m channel so the quant
       // engine evaluates real data instead of rejecting with a fatal 422.
       const aiTf = aiTimeframeFor(effectiveTf);
-      const key = predictionKey(symbol, aiTf);
+      // Target-expiry horizon: explicit param wins, else the store's current
+      // selection. Every down-stream identity (in-flight, debounce, retry
+      // key) rides (symbol, aiTf, horizon) so switching horizons is treated
+      // as a distinct evaluation — never a stale-cache hit.
+      const hz = resolveHorizonMinutes(
+        horizonMinutes ?? get().selectedHorizonMinutes,
+      );
+      const key = predictionKey(symbol, aiTf, hz);
 
       // ── REQUEST COALESCING (kills the /predict storm) ──
       // 1) Identity dedup: at most ONE network fetch per (symbol, timeframe).
@@ -976,7 +1226,7 @@ export const useTradingStore = create<TradingState>((set, get) => {
 
       const run: Promise<void> = (async () => {
         try {
-          const data = await apiClient.getPrediction(symbol, aiTf, signal);
+          const data = await apiClient.getPrediction(symbol, aiTf, signal, hz);
 
           if (get()._lastRequestId !== requestId) return;
 
@@ -2211,6 +2461,10 @@ export const selectSelectedExpiration = (state: TradingState) =>
   state.selectedExpirationSeconds;
 export const selectSetSelectedTimeframe = (state: TradingState) =>
   state.setSelectedTimeframe;
+export const selectSelectedHorizon = (state: TradingState) =>
+  state.selectedHorizonMinutes;
+export const selectSetSelectedHorizon = (state: TradingState) =>
+  state.setSelectedHorizonMinutes;
 export const selectSymbolsList = (state: TradingState) => state.symbolsList;
 export const selectFetchSymbols = (state: TradingState) => state.fetchSymbols;
 export const selectFetchRecentSignals = (state: TradingState) =>
@@ -2228,6 +2482,8 @@ export const selectPredictionState = (state: TradingState) => ({
   setActiveSymbol: state.setActiveSymbol,
   selectedTimeframe: state.selectedTimeframe,
   setSelectedTimeframe: state.setSelectedTimeframe,
+  selectedHorizonMinutes: state.selectedHorizonMinutes,
+  setSelectedHorizonMinutes: state.setSelectedHorizonMinutes,
   symbolsList: state.symbolsList,
   fetchSymbols: state.fetchSymbols,
 });

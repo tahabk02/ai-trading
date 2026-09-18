@@ -40,6 +40,8 @@
  *   • Strictly monotonic, synchronized to system wall-clock time with predictive lead.
  */
 
+import { targetCandlesEnabled } from "./signalTiers";
+
 // ── PO-Canonical Timeframe Contract ──
 // Pocket Option uses a specific set of chart intervals. We use uppercase
 // canonical keys (M1, H1, D1) matching PO's internal naming convention.
@@ -152,8 +154,10 @@ export function historyBarCheck(
 
 // ── Signal Gate (AI-confidence parity) ──
 
-/** Hard confidence threshold for directional signals (PO AI parity). */
-export const SIGNAL_CONFIDENCE_THRESHOLD = 0.965;
+/** Hard confidence threshold for directional signals (PO AI parity).
+ *  Mirrors the AI Engine's canonical HARD_GATE = 0.98 — the only signals the
+ *  client renders as directional are the engine's 0.98-dispatched emissions. */
+export const SIGNAL_CONFIDENCE_THRESHOLD = 0.98;
 
 /** Normalize a confidence value (0..1 or 0..100) into 0..1. */
 export function normalizeConfidence(raw: number): number {
@@ -325,13 +329,9 @@ export function targetColorFor(signal: string | null | undefined): string {
 }
 
 export function targetAlpha(index: number, intervals?: number): number {
-  const n =
-    Number.isFinite(intervals) && (intervals as number) > 0
-      ? (intervals as number)
-      : 10;
-  const decay = 0.3 / n;
-  const floor = 0.65;
-  return Math.max(floor, 0.95 - index * decay);
+  // PO-PARITY OVERLAY DECAY (Alpha.5 Pro): alpha = max(0.35, 0.95 - i*0.08)
+  // — a FIXED per-slot step of 0.08, floor 0.35, independent of bar spacing.
+  return Math.max(0.35, 0.95 - index * 0.08);
 }
 
 /** Per-bar rgba string from the signal colour + the alpha decay (chart-ready). */
@@ -348,6 +348,27 @@ export function targetRgba(
         : TARGET_RGB.NEUTRAL;
   const a = targetAlpha(index, intervals);
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`;
+}
+
+/**
+ * HOLLOW/OUTLINE overlay fill alpha. The predictive target layer is meant to
+ * sit ON TOP of the real candles as a distinct outline: the body fill stays
+ * ~transparent so the underlying series shows through, while the solid
+ * directional border + wick carry the BUY/SELL colour cue.
+ */
+export const HOLLOW_FILL_ALPHA = 0.08;
+
+/** Near-transparent body fill string for the hollow overlay (chart-ready). */
+export function targetHollowFillRgba(
+  signal: string | null | undefined,
+): string {
+  const rgb =
+    signal === "BUY"
+      ? TARGET_RGB.BUY
+      : signal === "SELL"
+        ? TARGET_RGB.SELL
+        : TARGET_RGB.NEUTRAL;
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${HOLLOW_FILL_ALPHA.toFixed(3)})`;
 }
 
 export interface TargetFrameCandle {
@@ -385,6 +406,13 @@ export function buildTargetFrame(opts: {
   const delta = target - liveClose;
   const borderColor = targetColorFor(signal);
   const wickColor = borderColor;
+  // MATH TAPER (Alpha.5 Pro, Part 4) — the projected close follows the
+  // math-target arc instead of a straight line:
+  //   arc(t) = 0.5·t + 0.5·t²   with t = k/n ∈ (0, 1]
+  // the mean-reversion leg pulls slowly in the early slots while the momentum
+  // leg accelerates into the tail — yet the arc STILL lands exactly on
+  // `target` at expiry (arc(1) = 1). At t=0.5 the arc is 0.375, clearly
+  // non-linear. No Date.now(), no random walk — deterministic per slot.
   // VOLATILITY CUSHION — ATR × 0.35 per bar, tapering LINEARLY to zero as
   // progress → 1 (taper = (n − k) / n). The final projected candle therefore
   // lands exactly on targetPrice with no overshoot. A NaN/≤0 ATR falls back
@@ -398,7 +426,9 @@ export function buildTargetFrame(opts: {
   let prevClose = liveClose;
   for (let i = 1; i <= n; i++) {
     const k = i;
-    const close = liveClose + delta * (k / n);
+    const t = k / n;
+    const arc = 0.5 * t + 0.5 * t * t;
+    const close = liveClose + delta * arc;
     const open = i === 1 ? liveClose : prevClose;
     const taper = (n - k) / n;
     const wick = Math.min(atrValid ? atr * 0.35 * taper : 0, safetyCap);
@@ -411,7 +441,7 @@ export function buildTargetFrame(opts: {
       high,
       low,
       close,
-      color: targetRgba(signal, k, n),
+      color: targetHollowFillRgba(signal),
       borderColor,
       wickColor,
       alpha,
@@ -447,6 +477,9 @@ export function targetViewportRange(
 /** Build predictive target candles for the chart projection layer.
  *  Candles ALWAYS render when the four data preconditions hold — the 96.5%
  *  confidence gate ONLY affects the BUY/SELL label, NOT the candle geometry.
+ *  PART 6: when a signal `tier` is provided, the overlay renders ONLY for
+ *  T1–T3 (targetCandlesEnabled). Sub-T3 tiers (T4 LOW / T5 WEAK) return an
+ *  empty overlay — the trajectory is NOT drawn for weak bands.
  */
 export function buildTargetCandles(opts: {
   liveTipBucketMs: number;
@@ -454,10 +487,13 @@ export function buildTargetCandles(opts: {
   targetPrice: number;
   atr: number;
   signal: string | null | undefined;
+  /** PART 6 — engine tier (T1…T5). Empty overlay unless T1–T3. */
+  tier?: string | null | undefined;
   expirationSeconds: number;
   timeframeSeconds: number;
 }): TargetCandleData[] {
-  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, expirationSeconds, timeframeSeconds } = opts;
+  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, tier, expirationSeconds, timeframeSeconds } = opts;
+  if (tier && !targetCandlesEnabled(tier)) return [];
   if (!Number.isFinite(liveTipBucketMs) || liveTipBucketMs <= 0) return [];
   if (!Number.isFinite(targetPrice) || targetPrice <= 0) return [];
   if (!Number.isFinite(timeframeSeconds) || timeframeSeconds <= 0) return [];
@@ -500,6 +536,8 @@ export interface TargetProjectionInputs {
   targetPrice: number;
   atr: number;
   signal: "BUY" | "SELL" | null;
+  /** PART 6 — engine tier (T1…T5). Empty overlay unless T1–T3. */
+  tier?: string | null;
 }
 
 export interface TargetProjectionSnapshot {
@@ -537,6 +575,8 @@ export function targetProjectionKey(inputs: TargetProjectionInputs): string {
     quantizeH(inputs.atr, 7),
     "sig",
     inputs.signal ?? "N",
+    "tier",
+    inputs.tier && targetCandlesEnabled(inputs.tier) ? inputs.tier : "off",
   ].join("|");
 }
 
@@ -588,6 +628,7 @@ export class TargetProjectionEngine {
       targetPrice: inputs.targetPrice,
       atr: inputs.atr,
       signal: inputs.signal,
+      tier: inputs.tier,
     });
     if (key === this.key) {
       return {
@@ -607,15 +648,22 @@ export class TargetProjectionEngine {
         : this.anchorLiveClose > 0
           ? this.anchorLiveClose
           : 0;
-    this.candles = buildTargetCandles({
-      liveTipBucketMs: tipSec * 1000,
-      liveClose: anchor,
-      targetPrice: inputs.targetPrice,
-      atr: inputs.atr,
-      signal: inputs.signal,
-      expirationSeconds: expSec,
-      timeframeSeconds: tfSec,
-    });
+    // PART 6 — T4/T5 tiers never draw the trajectory: overlay is empty.
+    const tierEnabled = inputs.tier
+      ? targetCandlesEnabled(inputs.tier)
+      : true;
+    this.candles = tierEnabled
+      ? buildTargetCandles({
+          liveTipBucketMs: tipSec * 1000,
+          liveClose: anchor,
+          targetPrice: inputs.targetPrice,
+          atr: inputs.atr,
+          signal: inputs.signal,
+          tier: inputs.tier,
+          expirationSeconds: expSec,
+          timeframeSeconds: tfSec,
+        })
+      : [];
     this.key = key;
     this.anchorLiveClose = anchor;
     return {
@@ -1612,7 +1660,11 @@ export class RealtimeCandleAggregator {
     this.onCandleClose = options.onCandleClose;
     this.onRawBar = options.onRawBar;
     this.onProjection = options.onProjection;
-    this.zeroFabrication = options.zeroFabrication === true;
+    // ZERO-FABRICATION DEFAULTS TO TRUE (field initializer + header contract):
+    // a candle may only open/close from a genuine broker print's own bucket;
+    // the wall clock never fabrics or finalises a bar. Only an EXPLICIT
+    // `false` opts back into legacy synthetic continuity.
+    this.zeroFabrication = options.zeroFabrication !== false;
 
     // Real ticks always morph the live candle in place (high/low/close/volume).
     // Wall-clock rollover only closes finished buckets + opens flat continuity
@@ -1855,6 +1907,27 @@ export class RealtimeCandleAggregator {
       // high-frequency WebSocket bursts.
       if (currentBucket === state.lastSyncBucket) continue;
 
+      // ── SAMENESS/EXACTNESS GUARD: if the wall clock is requested with an
+      // explicit `nowMs` that did not advance the bucket, this symbol is already
+      // authoritative up to that bucket and must NOT be re-closed/re-opened by
+      // a naive duplicate pass. Without this, a boundary-close + re-open on a
+      // single wall-clock walk would emit a second flat candle for the same
+      // bucket — the exact drift the fix removes.
+      //
+      // ZERO-FABRICATION (TICK-ONLY) MODE: a candle may ONLY open and ONLY
+      // close from a genuine broker print's own bucket boundary — see
+      // `ingest()`'s rollover on `bucketForTimestamp(tick.timestamp)`. The
+      // client wall clock NEVER decides "has this candle closed": it never
+      // closes the forming bar, never spins up intermediate flat candles, and
+      // never opens a live bucket ahead of the tape. A silent bucket stays
+      // silent; the last in-bucket print is always folded before the rollover
+      // (no split-tail loss). We only advance `lastSyncBucket` so the O(1) skip
+      // stays exact for future calls in this bucket.
+      if (this.zeroFabrication) {
+        state.lastSyncBucket = currentBucket;
+        continue;
+      }
+
       // ── Case 1: Active live candle exists, but wall-clock moved to a newer bucket ──
       if (state.live && state.live.timestamp < currentBucket) {
         const finished = { ...state.live };
@@ -1949,9 +2022,6 @@ export class RealtimeCandleAggregator {
       // Continue the strict lifecycle: after that rollover (or from a fresh
       // registration with a known price) the exact next sequential candle
       // opens immediately on the boundary.
-      if (this.zeroFabrication && !state.live) {
-        this.openWallClockCandle(state, symbol, currentBucket);
-      }
       // ── Case 2 (continuity): No live candle + price data → synthetic open.
       if (
         !this.zeroFabrication &&
@@ -2054,43 +2124,6 @@ export class RealtimeCandleAggregator {
     } finally {
       this.suppressCloseCallbacks = false;
     }
-  }
-
-  private openWallClockCandle(
-    state: SymbolState,
-    symbol: string,
-    currentBucket: number,
-  ): void {
-    const lastClosed =
-      state.closed.length > 0
-        ? state.closed[state.closed.length - 1]
-        : null;
-    const price =
-      state.lastPrice > 0
-        ? state.lastPrice
-        : lastClosed && lastClosed.close > 0
-          ? lastClosed.close
-          : 0;
-    if (price <= 0) return;
-
-    state.lastPrice = price;
-    state.live = {
-      timestamp: currentBucket,
-      open: price,
-      high: price,
-      low: price,
-      close: price,
-      volume: 0,
-    };
-    state.isLiveSynthetic = true;
-    state.phase = "SYNTHETIC";
-    state.projectionCache = null;
-    state.lookaheadCache = null;
-    this.emitCandleUpdate(
-      this.haLive(state) ?? { ...state.live },
-      symbol,
-      this.timeframe,
-    );
   }
 
   public getTimeframe(): Timeframe {

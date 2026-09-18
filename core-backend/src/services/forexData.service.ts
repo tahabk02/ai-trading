@@ -154,6 +154,13 @@ class ForexDataService {
   /** Persistent 1-minute candle buffer keyed by SYMBOL|TIMEFRAME. */
   private candleBuffer: Map<string, ForexCandle[]> = new Map();
 
+  /**
+   * Session-lifetime count of REAL candles written into the buffers — PO M20
+   * bars ingested verbatim plus 1m/1s bucket rollovers opened from live ticks.
+   * Only genuine candles increment it; it backs /health/feed `candles_emitted`.
+   */
+  private candleEmissionCount = 0;
+
   /** Per-symbol last-known spot price (for cross-method access). */
   private lastSpotCache: Map<string, { price: number; ts: number }> = new Map();
 
@@ -1061,6 +1068,7 @@ class ForexDataService {
         close: price,
         volume: 1,
       });
+      this.candleEmissionCount += 1;
 
       // Trim old bars (keep last 500 per timeframe).
       if (bars.length > 500) {
@@ -1118,8 +1126,14 @@ class ForexDataService {
     // Mirror into 1s for the tick-quant heartbeat (each M20 close is a 1s
     // sample of the live PO tape).
     this.mergePoCandleIntoBuffer(norm, "1s", candle);
+    this.candleEmissionCount += 1;
 
     return candle;
+  }
+
+  /** Session-lifetime count of REAL candles emitted into the buffers. */
+  public getCandleEmissionCount(): number {
+    return this.candleEmissionCount;
   }
 
   /**

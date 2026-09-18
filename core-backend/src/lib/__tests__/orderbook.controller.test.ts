@@ -92,12 +92,12 @@ describe("GET /api/v1/orderbook (MASTER MISSION part 1)", () => {
 
   it("test_orderbook_returns_504_json_on_upstream_timeout", async () => {
     vi.useFakeTimers();
-    // Upstream never settles → the controller's 3s hard cap must answer 504.
+    // Upstream never settles → the controller's 5s hard cap must answer 504.
     handlers.getLiveSpot.mockReturnValue(new Promise(() => {}));
     handlers.getHistoricalCandles.mockReturnValue(new Promise(() => {}));
     const target = capture();
     getOrderBook(reqWith({ symbol: "EUR/USD" }), target.res);
-    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(5_000);
     await target.done;
     expect(target.calls.length).toBe(1);
     const { code, body } = target.calls[0];

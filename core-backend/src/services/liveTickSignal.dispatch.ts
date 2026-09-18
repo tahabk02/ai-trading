@@ -4,7 +4,7 @@
  * Coalesces the live tick tape into a ~1s/symbol POST to the AI Engine's
  * high-frequency `/tick-signal` scorer so the strict 10-book multiplicative
  * confluence runs on the ACTUAL live tape (trailing real prices + real bid/ask
- * arms). This is the ONLY way confidence can organically cross the 96.5%
+ * arms). This is the ONLY way confidence can organically cross the 60%
  * thermal gate on a strong momentum run instead of flatlining at the
  * candle-close HOLD.
  *
@@ -17,7 +17,7 @@
  *   • Verdicts are broadcast on the dedicated `live_quant_signal` room event and
  *     only when they MEANINGFULLY change (direction / confidence step / gate
  *     crossing) — no 1Hz feed spam, no repeated identical frames.
- *   • A DEFINITIVE (>=96.5%) verdict also fires the global `high_confidence_signal`
+ *   • A DEFINITIVE (>=60%) verdict also fires the global `high_confidence_signal`
  *     priority toast.
  */
 
@@ -46,9 +46,9 @@ const FORWARD_WINDOW_TICKS = 60;
 /** Confidence step (0-100 scale) that warrants a fresh live-quant broadcast. */
 const BROADCAST_CONFIDENCE_STEP = 2.0;
 /** THE PLATFORM HIGH-CONFIDENCE ALERT THRESHOLD — mirrors the AI Engine's
- *  strict DEFINITIVE 96.5% thermal gate (no signal fires as a priority alert
- *  unless all ten books organically converge). */
-const HIGH_CONFIDENCE_THRESHOLD = 96.5;
+ *  DEFINITIVE 98% thermal gate (no signal fires as a priority alert
+ *  unless all ten books organically converge past 0.98). */
+const HIGH_CONFIDENCE_THRESHOLD = 98.0;
 
 type TickSignalFailureKind =
   | "unreachable"
@@ -292,7 +292,7 @@ class LiveTickSignalDispatcher {
     if (prev) {
       const stepped = Math.abs(confidence - prev.confidence);
       const crossedGate =
-        (prev.confidence < 96.5) !== (confidence < 96.5);
+        (prev.confidence < 60.0) !== (confidence < 60.0);
       if (
         prev.direction === direction &&
         prev.waiting === waiting &&

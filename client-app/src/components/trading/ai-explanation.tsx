@@ -20,6 +20,7 @@ import {
 import { cn } from "@/utils/cn";
 import { getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
+import { TierBadge } from "@/components/shared/tier-badge";
 import {
   sanitizeConfidence,
   formatNumber,
@@ -282,6 +283,12 @@ export const AIExplanation: React.FC = () => {
                 ? signalView.badgeText
                 : "—"}
         </span>
+        {/* ── PART 6: HONEST TIER BADGE (engine-dispatched) ── */}
+        <TierBadge
+          tier={predictionData.tier}
+          confidence={confidenceNum}
+          size="sm"
+        />
       </div>
 
       {/* ── Signal + Confidence Bar ── */}

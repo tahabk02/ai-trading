@@ -27,7 +27,7 @@ integration with the quant_matrix (v7 → v9):
   9. COMPOSITOR + TWO-FACTOR CONFLUENCE CONVERGENCE GATE (v10)
      - direction_sign = 0 → book_confirm = 0 AND gate = NEUTRAL score 0.
      - direction_sign ≠ 0 with aligned instruments → confluence score > 0.
-     - full active-book unanimity at real magnitude → DEFINITIVE >= 96.5%;
+     - full active-book unanimity at real magnitude → DEFINITIVE >= 98%;
        unanimous books with a faint-but-aligned confirmation (0.3 strength)
        still clear (unanimous vote is unanimous vote);
        a TRUE dissenting book (7/8) is an honest sub-thermal near-miss;
@@ -225,7 +225,7 @@ def main():
         failures.append(f"BUY confluence gate={bc_buy.confluence['gate']}, expected INSUFFICIENT/DEFINITIVE")
 
     # The two-factor confluence kernel (v10): full active-book unanimity at
-    # real magnitude → DEFINITIVE >= 96.5%; an ALIGNED-but-faint book (0.3
+    # real magnitude → DEFINITIVE >= 98%; an ALIGNED-but-faint book (0.3
     # strength) still counts as a confirming vote, so unanimity holds at ~99%
     # (unanimous vote = unanimous vote, regardless of magnitude); a true
     # DISSENTING book (7/8 unanimous) honestly lands just sub-thermal (the
@@ -260,7 +260,7 @@ def main():
     if not (cf["score"] >= DEFINITIVE_CONFIDENCE_MIN and cf["gate"] == "DEFINITIVE"):
         failures.append(f"Faint-but-unanimous got {cf['score']}/{cf['gate']}, expected DEFINITIVE (unanimous active books)")
     if not (cd["score"] < DEFINITIVE_CONFIDENCE_MIN and cd["gate"] == "INSUFFICIENT"):
-        failures.append(f"7/8 dissent got {cd['score']}/{cd['gate']}, expected INSUFFICIENT (7/8 is not 96.5% consistency)")
+        failures.append(f"7/8 dissent got {cd['score']}/{cd['gate']}, expected INSUFFICIENT (7/8 is not 98% consistency)")
     if not (cj["score"] < 70.0 and cj["gate"] == "INSUFFICIENT"):
         failures.append(f"Bare-majority got {cj['score']}/{cj['gate']}, expected honest sub-thermal (<70)")
     if not (cm["gate"] == "INSUFFICIENT" and "MICROSTRUCTURE_CLUSTER_MISSING" in cm["blockers"]):
@@ -367,7 +367,7 @@ def main():
             "ALL BOOK INSTRUMENT TESTS PASSED  (Bollinger squeeze/B%B, Turtle "
             "Donchian closed-bar breakout, MACD/RSI/EMA stack, volume-price "
             "confirmation, Nison candles, Aldridge queue, Aronson evidence, ATR "
-            "regime, strict multiplicative 96.5% confluence gate, market-waiting "
+            "regime, strict multiplicative 98% confluence gate, market-waiting "
             "integration)"
         )
 

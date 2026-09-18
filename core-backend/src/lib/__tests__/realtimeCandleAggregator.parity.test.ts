@@ -9,7 +9,10 @@ import { realtimeCandleAggregatorService } from "../../services/realtimeCandleAg
  */
 
 const OPEN_TS = 1_000_000_000; // broker-clock anchor used across all scenarios
-const TRACKED_TF = "20s"; // sub-minute PO-parity frame, intra PARITY_TRACK_MAX_MS
+// S10 (10s, intra PARITY_TRACK_MAX_MS). The stale-replay phase ticks sit at
+// OPEN_TS − 5s … − 7s, which floors into the PREVIOUS 10s bucket — i.e. a
+// late bucket older than the open — so they are dropped without writing.
+const TRACKED_TF = "S10";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -84,8 +87,8 @@ describe("candle parity — flat-line breach detection", () => {
 
     // Stale-replay phase: one ancient tick per sweep. Each is far older than
     // REORDER_MS on the broker clock, so it is dropped WITHOUT writing a bucket,
-    // reproducing the raw-tick-without-bucket-increment failure mode. The 20s
-    // bucket stays open the whole window (it would not close for 22s), so it
+    // reproducing the raw-tick-without-bucket-increment failure mode. The S10
+    // bucket stays open the whole window (it would not close for 12s), so it
     // never masks the breach with a boundary write.
     for (let i = 0; i < 3; i += 1) {
       realtimeCandleAggregatorService.addTick(

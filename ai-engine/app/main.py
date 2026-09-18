@@ -37,22 +37,36 @@ logger = structlog.get_logger(__name__)
 publisher = RedisPublisher()
 signal_gen = SignalGenerator(confidence_threshold=settings.CONFIDENCE_THRESHOLD)
 
-# ── STRICT 96.5% HARD GATE — boot-time invariant ──
-# The configured dispatch floor must never drift below the canonical
-# DEFINITIVE_CONFIDENCE_MIN (96.5). A misconfigured threshold is a hard
-# startup failure, not a silent downgrade.
+# AssetHistory 60s upsert job singleton (created in lifespan).
+_asset_history_job = None
+
+# ── MULTI-TIER GATE — boot-time invariant ──
+# The configured dispatch floor must never drift below the weakest EXECUTABLE
+# tier (T4-LOW = 70%) nor beyond 100 — and the tier ladder itself must be
+# canonical and strictly monotonic (enforced by signal_gatekeeper import).
+# A misconfigured threshold is a hard startup failure, not a silent downgrade.
 from .services.signal_gatekeeper import (
-    DEFINITIVE_CONFIDENCE_MIN as GATE_FLOOR_PCT,
-    HARD_GATE,
+    TIER_THRESHOLDS,
+    MIN_EXECUTABLE_TIER,
+    TIER_ORDER,
 )
 _configured_threshold = float(settings.CONFIDENCE_THRESHOLD)
 if _configured_threshold <= 1:
     _configured_threshold *= 100.0
-if _configured_threshold < GATE_FLOOR_PCT or abs(HARD_GATE - 0.965) > 1e-9:
+_min_exec_pct = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER] * 100.0, 2)
+if (
+    _configured_threshold < _min_exec_pct
+    or _configured_threshold > 100.0
+    or TIER_ORDER[0] != "T1"
+    or not all(
+        TIER_THRESHOLDS[TIER_ORDER[i - 1]] > TIER_THRESHOLDS[TIER_ORDER[i]]
+        for i in range(1, len(TIER_ORDER))
+    )
+):
     raise RuntimeError(
-        "HARD GATE MISCONFIGURED — CONFIDENCE_THRESHOLD must be >= 96.5% "
-        f"(got {_configured_threshold:.2f}%) and HARD_GATE must equal 0.965 "
-        f"(got {HARD_GATE})."
+        "MULTI-TIER GATE MISCONFIGURED — CONFIDENCE_THRESHOLD must be in "
+        f"[{_min_exec_pct:.2f}, 100] (got {_configured_threshold:.2f}%) and the "
+        f"tier ladder must be strictly monotonic (got {TIER_ORDER})."
     )
 
 # ── Model Cache Warmup Symbols ──
@@ -254,8 +268,18 @@ async def lifespan(app: FastAPI):
     set_warmup_running(True)
     warmup_task = asyncio.create_task(_warmup_launcher())
     warmup_task.add_done_callback(_warmup_done)
+    # ── AssetHistory 60s upsert job (Alpha.5 Pro, Part 6.3) ──
+    # Reconciles REAL ai-engine-observed 1-minute bars into the core-backend
+    # store every 60s. MyPy-safe: the module-level singleton is created here.
+    from .data.collector import AssetHistoryUpsertJob, MarketDataCollector
+    global _asset_history_job
+    _asset_history_job = AssetHistoryUpsertJob(MarketDataCollector())
+    _asset_history_job.start()
+    logger.info("AssetHistory 60s upsert job started")
     logger.info("AI Engine startup complete (model cache warmup launched in background)")
     yield
+    if _asset_history_job is not None:
+        await _asset_history_job.stop()
     warmup_task.cancel()
     set_warmup_running(False)
     await publisher.close()

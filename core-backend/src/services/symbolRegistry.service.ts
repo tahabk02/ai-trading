@@ -26,7 +26,7 @@
 // ── Types ──
 
 /** Strict asset classification — mirrors the pocket-bridge asset_type_for_symbol. */
-export type AssetSubType = "forex" | "otc" | "crypto";
+export type AssetSubType = "forex" | "otc" | "crypto" | "commodity";
 
 export interface SymbolEntry {
   /** Trading pair as recognized by the backend (e.g. "AUD/USD") */
@@ -34,7 +34,7 @@ export interface SymbolEntry {
   /** Human-readable name */
   name: string;
   /** Legacy broker instrument type (back-compat): "otc" or "crypto" */
-  type: "otc" | "crypto";
+  type: "otc" | "crypto" | "commodity";
   /**
    * STRICT ASSET CLASSIFICATION — "forex" (standard wholesale forex),
    * "otc" (Pocket Option OTC instrument, distinct venue/pricing model),
@@ -455,17 +455,61 @@ const OTC_SET = new Set(OTC_WHITELIST.map((e) => e.symbol));
 // ── Service ──
 
 export class SymbolRegistryService {
+  private entries: SymbolEntry[] = [...OTC_WHITELIST];
+
+  /** Replace the fallback registry with the broker's active asset universe. */
+  replaceFromBridgeAssets(assets: unknown[]): void {
+    const next: SymbolEntry[] = [];
+    for (const raw of assets) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      const symbol = String(item.symbol || "")
+        .trim()
+        .toUpperCase();
+      if (!symbol || next.some((entry) => entry.symbol === symbol)) continue;
+      const subtype = String(
+        item.assetSubType || item.type || "forex",
+      ) as AssetSubType;
+      const assetSubType: AssetSubType = [
+        "forex",
+        "otc",
+        "crypto",
+        "commodity",
+      ].includes(subtype)
+        ? subtype
+        : "forex";
+      next.push({
+        symbol,
+        name: String(item.name || symbol),
+        label: String(item.label || symbol),
+        type:
+          assetSubType === "crypto"
+            ? "crypto"
+            : assetSubType === "commodity"
+              ? "commodity"
+              : "otc",
+        assetSubType,
+        exchange: String(item.exchange || "POCKET_OPTION"),
+        currency: String(item.currency || symbol.split("/").at(-1) || "USD"),
+        payout: Number.isFinite(Number(item.payout)) ? Number(item.payout) : 92,
+        digits: Number.isFinite(Number(item.digits)) ? Number(item.digits) : 5,
+      });
+    }
+    if (next.length > 0)
+      this.entries = next.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }
+
   /**
    * Get ALL whitelisted symbols.
    * The `type` filter is accepted for API compatibility; "otc" returns the
    * 32 OTC forex pairs, "crypto" returns BTC/ETH. Any other type → [].
    */
   async getAll(
-    type?: "stock" | "crypto" | "etf" | "otc",
+    type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
   ): Promise<SymbolEntry[]> {
-    if (!type) return [...OTC_WHITELIST];
-    if (type === "otc" || type === "crypto") {
-      return OTC_WHITELIST.filter((e) => e.type === type);
+    if (!type) return [...this.entries];
+    if (type === "otc" || type === "crypto" || type === "commodity") {
+      return this.entries.filter((e) => e.type === type);
     }
     return [];
   }
@@ -484,10 +528,16 @@ export class SymbolRegistryService {
       .toUpperCase()
       .replace(/[\s\-_.]+/g, "/");
     const compact = norm.replace(/\//g, "");
-    if (compact === "BTCUSD" || compact === "ETHUSD" || compact === "BTCUSDT" || compact === "ETHUSDT") {
+    if (
+      compact === "BTCUSD" ||
+      compact === "ETHUSD" ||
+      compact === "BTCUSDT" ||
+      compact === "ETHUSDT"
+    ) {
       return "crypto";
     }
-    if (OTC_SET.has(norm)) return "otc";
+    const entry = this.entries.find((candidate) => candidate.symbol === norm);
+    if (entry) return entry.assetSubType;
     if (norm.includes("/")) return "forex";
     return "otc";
   }
@@ -499,13 +549,13 @@ export class SymbolRegistryService {
    */
   async search(
     query: string,
-    _type?: "stock" | "crypto" | "etf" | "otc",
+    _type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
     limit: number = 40,
   ): Promise<SymbolEntry[]> {
     const q = (query || "").trim().toUpperCase();
-    if (!q) return OTC_WHITELIST.slice(0, limit);
+    if (!q) return this.entries.slice(0, limit);
 
-    const results = OTC_WHITELIST.filter((entry) => {
+    const results = this.entries.filter((entry) => {
       const symMatch = entry.symbol.toUpperCase().includes(q);
       const nameMatch = entry.name.toUpperCase().includes(q);
       const labelMatch = entry.label.toUpperCase().includes(q);
@@ -530,7 +580,7 @@ export class SymbolRegistryService {
    */
   async findBySymbol(symbol: string): Promise<SymbolEntry | undefined> {
     const sym = (symbol || "").trim().toUpperCase();
-    return OTC_WHITELIST.find((s) => s.symbol === sym);
+    return this.entries.find((s) => s.symbol === sym);
   }
 
   /**
@@ -539,7 +589,7 @@ export class SymbolRegistryService {
    */
   async isValidSymbol(symbol: string): Promise<boolean> {
     const sym = (symbol || "").trim().toUpperCase();
-    return OTC_SET.has(sym);
+    return this.entries.some((entry) => entry.symbol === sym);
   }
 
   /**
@@ -547,7 +597,7 @@ export class SymbolRegistryService {
    */
   isValidSymbolSync(symbol: string): boolean {
     const sym = (symbol || "").trim().toUpperCase();
-    return OTC_SET.has(sym);
+    return this.entries.some((entry) => entry.symbol === sym);
   }
 
   /**
@@ -580,13 +630,14 @@ export class SymbolRegistryService {
     s = s.replace(/\/{2,}/g, "/"); // collapse duplicates
     s = s.replace(/^\//, "").replace(/\/$/, "");
 
-    if (OTC_SET.has(s)) return s;
+    if (this.entries.some((entry) => entry.symbol === s)) return s;
 
     // Compact 6-char form: "EURUSD" → "EUR/USD"
     const compact = s.replace(/\//g, "");
     if (compact.length === 6 && /^[A-Z]{6}$/.test(compact)) {
       const candidate = `${compact.slice(0, 3)}/${compact.slice(3)}`;
-      if (OTC_SET.has(candidate)) return candidate;
+      if (this.entries.some((entry) => entry.symbol === candidate))
+        return candidate;
     }
 
     return null;
@@ -598,7 +649,7 @@ export class SymbolRegistryService {
    */
   updatePayout(symbol: string, payout: number): void {
     const norm = (symbol || "").trim().toUpperCase();
-    const entry = OTC_WHITELIST.find((s) => s.symbol === norm);
+    const entry = this.entries.find((s) => s.symbol === norm);
     if (entry && Number.isFinite(payout)) {
       entry.payout = Math.max(80, Math.min(97, Math.round(payout)));
     }
@@ -608,7 +659,7 @@ export class SymbolRegistryService {
    * Get the decimal precision for a pair (for price formatting).
    */
   getDigits(symbol: string): number {
-    const entry = OTC_WHITELIST.find(
+    const entry = this.entries.find(
       (s) => s.symbol === (symbol || "").trim().toUpperCase(),
     );
     return entry?.digits ?? 5;
@@ -619,7 +670,7 @@ export class SymbolRegistryService {
    * Kept for API compatibility.
    */
   async refreshCache(): Promise<SymbolEntry[]> {
-    return [...OTC_WHITELIST];
+    return [...this.entries];
   }
 }
 

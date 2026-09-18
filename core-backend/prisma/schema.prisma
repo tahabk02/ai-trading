@@ -4,8 +4,8 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // ── Live trading signals streamed via WebSocket ──
@@ -20,7 +20,39 @@ model Signal {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
+  outcomes  SignalOutcome[]
+
   @@index([symbol])
+  @@index([createdAt])
+}
+
+// ── Real closed-trade outcomes of dispatched signals (PART 5 accuracy) ──
+// One row per genuine settled signal. Ingestion is the single accuracy path:
+// the live execution layer posts WIN/LOSS outcomes here, and the AI Engine's
+// rolling accuracy tracker consumes them. ZERO fabrication — a row only exists
+// when a real signal was filled and its outcome actually realized.
+model SignalOutcome {
+  id         String    @id @default(uuid())
+  signalId   String?
+  signal     Signal?   @relation(fields: [signalId], references: [id], onDelete: SetNull)
+  symbol     String
+  direction  String?   // BUY, SELL (the signal-time snapshot)
+  confidence Float?    // signal-time confidence (0-100)
+  tier       String    @default("T5") // T1 PREMIUM … T5 WEAK (signal-time tier)
+  outcome    String    // WIN | LOSS — REAL realized outcome
+  quality    Float?    // five-factor ensemble quality at signal time (0..1)
+  factors    String?   // JSON snapshot of the signal-time factor ensemble
+  entry      Float?    // real entry price
+  exitPrice  Float?    // real exit price
+  pnl        Float?    // realized signed P&L when reported
+  timeframe  String?   // the signal's timeframe where known
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([symbol])
+  @@index([outcome])
+  @@index([tier])
+  @@index([signalId])
   @@index([createdAt])
 }
 
@@ -107,4 +139,47 @@ model RiskState {
   createdAt         DateTime  @default(now())
 
   @@index([userId, dayKey])
+}
+
+// ── 30-MINUTE HISTORICAL DATA LAYER (Alpha.5 Pro, Part 3) ──
+// Minute-bucketed OHLCV rollups + raw ticks persisted from the REAL observed
+// live OTC tape. The background collector (historyCollector.service.ts) runs
+// every 60s, buckets the authentic realtimeTickBuffer window into 1m bars and
+// upserts them here — so the math-target / 98% precision gate always has a
+// genuine 30-minute window per asset. ZERO fabricated bars: an entry only
+// exists when real ticks were observed.
+
+// One minute-bucketed OHLCV bar per (symbol, timeframe, bucket_start_ms).
+model AssetHistory {
+  id            String   @id @default(uuid())
+  symbol        String
+  timeframe     String   @default("1m")
+  bucketStartMs BigInt   // epoch ms of the minute-bucket open (floor(ts/60000)*60000)
+  open          Float
+  high          Float
+  low           Float
+  close         Float
+  volume        Int?     // nullable: only real feed volume, else NULL (honest)
+  tickCount     Int      @default(0) // REAL observed tick count inside the bucket
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([symbol, timeframe, bucketStartMs])
+  @@index([symbol, timeframe, bucketStartMs])
+  @@index([createdAt])
+}
+
+// Raw real-tick persistence for the 30-minute window (one row per genuine print).
+model TickHistory {
+  id        String   @id @default(uuid())
+  symbol    String
+  tsMs      BigInt   // epoch ms of the REAL tick
+  price     Float
+  volume    Int?     // nullable: only real feed volume, else NULL
+  side      String?  // "BUY" | "SELL" when the feed reports a real side
+  createdAt DateTime @default(now())
+
+  @@unique([symbol, tsMs])
+  @@index([symbol, tsMs])
+  @@index([createdAt])
 }

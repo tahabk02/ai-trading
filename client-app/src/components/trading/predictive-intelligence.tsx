@@ -12,7 +12,8 @@ import {
 } from "@/utils/format";
 import apiClient, { type PredictionResponse } from "@/services/api";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
-import { searchSymbolUniverse } from "@/constants/symbols";
+import { TierBadge } from "@/components/shared/tier-badge";
+import { getAssetSubType, searchSymbolUniverse } from "@/constants/symbols";
 
 export interface PredictiveIntelligenceProps {
   symbol?: string;
@@ -215,21 +216,39 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                   <span
                     className={
                       "px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider " +
-                      (predictionData.waiting_reason === "CONFLUENCE_BELOW_THERMAL"
+                      (predictionData.waiting_reason ===
+                      "CONFLUENCE_BELOW_THERMAL"
                         ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                        : predictionData.waiting_reason === "AI_ENGINE_UNAVAILABLE"
+                        : predictionData.waiting_reason ===
+                            "AI_ENGINE_UNAVAILABLE"
                           ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
                           : "bg-slate-800 text-slate-400 border border-slate-600")
                     }
-                    title={predictionData.waiting_detail ?? predictionData.waiting_reason}
+                    title={
+                      predictionData.waiting_detail ??
+                      predictionData.waiting_reason
+                    }
                   >
-                    {predictionData.waiting_reason === "CONFLUENCE_BELOW_THERMAL"
+                    {predictionData.waiting_reason ===
+                    "CONFLUENCE_BELOW_THERMAL"
                       ? "MARKET WAITING"
-                      : predictionData.waiting_reason === "AI_ENGINE_UNAVAILABLE"
+                      : predictionData.waiting_reason ===
+                          "AI_ENGINE_UNAVAILABLE"
                         ? "ENGINE UNAVAILABLE"
                         : "WAITING"}
                   </span>
                 )}
+
+              {/* ── PART 6: HONEST TIER BADGE (engine-dispatched) ── */}
+              <TierBadge
+                tier={predictionData.tier}
+                confidence={
+                  displayConfidence != null
+                    ? Number(displayConfidence)
+                    : null
+                }
+                size="sm"
+              />
 
               <div className="flex items-center gap-4 font-mono text-xs">
                 <span className="text-slate-400 font-bold">
@@ -275,9 +294,7 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                     <span
                       className={
                         "text-xl font-bold font-mono " +
-                        (thermallyGated
-                          ? "text-amber-400"
-                          : "text-white")
+                        (thermallyGated ? "text-amber-400" : "text-white")
                       }
                     >
                       {displayConfidence}%
@@ -285,9 +302,7 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                     <span
                       className={
                         "text-[9px] font-mono tracking-wider uppercase font-bold " +
-                        (thermallyGated
-                          ? "text-amber-400"
-                          : "text-slate-400")
+                        (thermallyGated ? "text-amber-400" : "text-slate-400")
                       }
                     >
                       {thermallyGated ? "MARKET WAITING" : t("confidence")}
@@ -388,7 +403,7 @@ function MetricCard({ label, value }: { label: string; value: string }) {
 function SymbolSearchInput() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<
-    Array<{ symbol: string; name: string; type: string }>
+    Array<{ symbol: string; name: string; type: string; assetSubType?: string }>
   >([]);
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -402,29 +417,28 @@ function SymbolSearchInput() {
   }, []);
 
   const doSearch = useCallback(async (q: string) => {
-    const whitelist = searchSymbolUniverse(q, 12);
     setLoading(true);
     try {
-      const data = await apiClient.getSymbols(q || undefined, undefined, 15);
-      const merged = new Map<string, { symbol: string; name: string; type: string }>();
-      for (const w of whitelist) merged.set(w.symbol.toUpperCase(), w);
-      for (const r of data.symbols) {
-        if (!merged.has(r.symbol.toUpperCase())) {
-          merged.set(r.symbol.toUpperCase(), {
-            symbol: r.symbol,
-            name: r.name ?? r.symbol,
-            type: r.type,
-          });
-        }
-      }
-      const list = Array.from(merged.values()).slice(0, 15);
+      const data = await apiClient.getSymbols(q || undefined, undefined, 100);
+      const list = data.symbols.map((r) => ({
+        symbol: r.symbol,
+        name: r.name ?? r.symbol,
+        type: r.type,
+        assetSubType: r.assetSubType,
+      }));
       setResults(list);
       setIsOpen(list.length > 0 && isFocusedRef.current);
     } catch {
       // Backend /symbols unreachable / timing out / 400-504 — the strict
       // whitelist keeps search fully alive client-side, no fabricated pairs.
-      setResults(whitelist);
-      setIsOpen(whitelist.length > 0 && isFocusedRef.current);
+      const fallback = searchSymbolUniverse(q, 100).map((entry) => ({
+        symbol: entry.symbol,
+        name: entry.name,
+        type: entry.type,
+        assetSubType: getAssetSubType(entry.symbol),
+      }));
+      setResults(fallback);
+      setIsOpen(fallback.length > 0 && isFocusedRef.current);
     } finally {
       setLoading(false);
     }
@@ -485,20 +499,44 @@ function SymbolSearchInput() {
       )}
       {isOpen && results.length > 0 && (
         <div className="absolute top-full right-0 mt-1 w-64 bg-obsidian-950 border border-slate-700 rounded-xl shadow-2xl z-50 max-h-60 overflow-y-auto">
-          {results.map((r) => (
-            <button
-              key={r.symbol}
-              type="button"
-              onMouseDown={() => handleSelect(r.symbol)}
-              className="w-full text-left px-3 py-2 hover:bg-slate-800 text-white text-xs font-mono flex items-center justify-between gap-2 border-b border-slate-800 last:border-0"
-            >
-              <span className="font-bold text-emerald-400">{r.symbol}</span>
-              <span className="text-slate-500 truncate text-[10px]">
-                {r.name}
-              </span>
-              <AssetClassBadge symbol={r.symbol} />
-            </button>
-          ))}
+          {(["forex", "crypto", "commodity", "otc"] as const).map(
+            (category) => {
+              const grouped = results.filter(
+                (r) =>
+                  (r.assetSubType || getAssetSubType(r.symbol)) === category,
+              );
+              if (grouped.length === 0) return null;
+              return (
+                <React.Fragment key={category}>
+                  <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-slate-500 bg-slate-900">
+                    {category === "forex"
+                      ? "Currencies"
+                      : category === "commodity"
+                        ? "Commodities"
+                        : category === "crypto"
+                          ? "Crypto"
+                          : "OTC"}
+                  </div>
+                  {grouped.map((r) => (
+                    <button
+                      key={r.symbol}
+                      type="button"
+                      onMouseDown={() => handleSelect(r.symbol)}
+                      className="w-full text-left px-3 py-2 hover:bg-slate-800 text-white text-xs font-mono flex items-center justify-between gap-2 border-b border-slate-800 last:border-0"
+                    >
+                      <span className="font-bold text-emerald-400">
+                        {r.symbol}
+                      </span>
+                      <span className="text-slate-500 truncate text-[10px]">
+                        {r.name}
+                      </span>
+                      <AssetClassBadge symbol={r.symbol} />
+                    </button>
+                  ))}
+                </React.Fragment>
+              );
+            },
+          )}
         </div>
       )}
     </div>
@@ -506,4 +544,3 @@ function SymbolSearchInput() {
 }
 
 export default PredictiveIntelligence;
-

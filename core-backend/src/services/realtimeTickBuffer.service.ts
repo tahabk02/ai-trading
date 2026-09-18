@@ -30,7 +30,7 @@ import { logger } from "../utils/logger";
 
 // 10-BOOK WINDOW PRESERVATION — the ring must comfortably hold the live-quant
 // scorer's full window (≥2 min of a 1Hz tape) so a strong momentum run never
-// prunes the very bars that let the multiplicative confluence cross 96.5%.
+// prunes the very bars that let the multiplicative confluence cross 60%.
 // Deep ring = no dropped queue payloads at live cadence.
 const MAX_TICKS_PER_SYMBOL = 2000;
 
@@ -62,6 +62,20 @@ interface TickEntry {
   tsMs: number;
   bid?: number;
   ask?: number;
+}
+
+/** Single-symbol live quote snapshot for the market terminal grid. Every field
+ *  is derived from the REAL tape — a null spread means no genuine quoted arms
+ *  have been observed yet (the grid renders that honestly, never invents one). */
+export interface SymbolQuoteSnapshot {
+  symbol: string;
+  price: number | null;
+  bid: number | null;
+  ask: number | null;
+  spread: number | null;
+  tickCount: number;
+  lastTickAt: string | null;
+  ageMs: number | null;
 }
 
 /**
@@ -134,6 +148,10 @@ class RealtimeTickBufferService {
    * live-quant forwarder always sees a live book when one has been observed.
    */
   private lastKnownArms: Map<string, { bid?: number; ask?: number }> = new Map();
+  /** Cumulative per-symbol real tick counter — a session-lifetime print count
+   *  (the 2000-tick ring saturates, but the COUNT keeps growing so the
+   *  market terminal's "Tick count" badge is a live activity meter). */
+  private tickCounts: Map<string, number> = new Map();
 
   private constructor() {}
 
@@ -167,6 +185,7 @@ class RealtimeTickBufferService {
     });
     this.ticks.set(norm, ring);
     this.lastTickAt.set(norm, new Date(now).toISOString());
+    this.tickCounts.set(norm, (this.tickCounts.get(norm) ?? 0) + 1);
 
     // ── LAST-KNOWN-ARMS CACHE (never drop a genuine book payload) ──
     // Only genuine quoted arms are retained (ask > bid, both finite positive).
@@ -292,12 +311,71 @@ class RealtimeTickBufferService {
     return entry != null ? Math.max(0, Date.now() - entry.tsMs) : null;
   }
 
+  /** Session-lifetime cumulative REAL tick count for a symbol (not ring-capped). */
+  public getTickCount(symbol: string): number {
+    return this.tickCounts.get((symbol || "").trim().toUpperCase()) ?? 0;
+  }
+
+  /**
+   * Live quote snapshot for ONE symbol — the exact payload the market-terminal
+   * grid renders per card (price / spread / tick count / freshness). Returns
+   * undefined only for symbols with no genuine ticks at all (honest empty).
+   */
+  public getSymbolQuote(symbol: string): SymbolQuoteSnapshot | undefined {
+    const norm = (symbol || "").trim().toUpperCase();
+    const ring = this.ticks.get(norm);
+    const last = ring?.latest();
+    if (!last) return undefined;
+    const spread = this.getLatestSpread(norm);
+    const bid = Number.isFinite(spread.bid) ? (spread.bid as number) : null;
+    const ask = Number.isFinite(spread.ask) ? (spread.ask as number) : null;
+    return {
+      symbol: norm,
+      price: Number.isFinite(last.price) && last.price > 0 ? last.price : null,
+      bid: bid != null && bid > 0 ? bid : null,
+      ask: ask != null && ask > 0 ? ask : null,
+      spread: bid != null && ask != null && ask > bid ? ask - bid : null,
+      tickCount: this.tickCounts.get(norm) ?? 0,
+      lastTickAt: this.lastTickAt.get(norm) ?? null,
+      ageMs: this.getLatestAgeMs(norm),
+    };
+  }
+
+  /**
+   * Live quote snapshots for a batch of symbols (the 34-pair market grid).
+   * O(1) per symbol; symbols with no genuine ticks yet are SKIPPED so the
+   * grid only ever paints real data (a quiet pair stays absent until its
+   * first genuine print).
+   */
+  public getQuotesSnapshot(symbols: string[]): SymbolQuoteSnapshot[] {
+    const out: SymbolQuoteSnapshot[] = [];
+    for (const symbol of symbols) {
+      const quote = this.getSymbolQuote(symbol);
+      if (quote) out.push(quote);
+    }
+    return out;
+  }
+
+  /**
+   * All symbols that have at least one GENUINE observed tick in the ring.
+   * Backs the history collector so it only persists assets the real tape
+   * actually printed — never pre-seeded symbols with zero data.
+   */
+  public getTrackedSymbols(): string[] {
+    const out: string[] = [];
+    for (const [symbol, ring] of this.ticks) {
+      if (ring.length > 0) out.push(symbol);
+    }
+    return out;
+  }
+
   /** Drop the buffer for one symbol (symbol switch hygiene). */
   public clearSymbol(symbol: string): void {
     const norm = (symbol || "").trim().toUpperCase();
     this.ticks.delete(norm);
     this.lastTickAt.delete(norm);
     this.lastKnownArms.delete(norm);
+    this.tickCounts.delete(norm);
   }
 
   // ════════════════════════════════════════════════════════════════════

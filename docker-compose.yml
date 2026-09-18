@@ -1,5 +1,3 @@
-version: "3.8"
-
 networks:
   radar_network:
     driver: bridge
@@ -14,6 +12,10 @@ services:
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
       POSTGRES_DB: trading_radar
+    ports:
+      # Host port 5432 is already owned by the native Windows PostgreSQL 17
+      # service — publish on 5433 to guarantee connections reach radar_db.
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -23,6 +25,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
 
   redis:
     image: redis:7-alpine
@@ -38,6 +41,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: always
 
   # --- INTELLIGENCE LAYER ---
   ai-engine:
@@ -50,7 +54,7 @@ services:
     environment:
       REDIS_HOST: redis
       LOG_FORMAT: JSON
-      CONFIDENCE_THRESHOLD: 0.80
+      CONFIDENCE_THRESHOLD: 0.98
       ENVIRONMENT: production
       TZ: UTC
     depends_on:
@@ -69,6 +73,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-password}@postgres:5432/trading_radar?schema=public
       REDIS_HOST: redis
+      REDIS_URL: redis://radar_bus:6379
       PORT: 4000
       JWT_SECRET: ${JWT_SECRET:-ultra-secure-secret-key}
       POCKET_BRIDGE_HOST: pocket-bridge

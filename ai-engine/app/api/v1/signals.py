@@ -5,21 +5,24 @@ Endpoints:
   POST /api/v1/predict  — Main inference (accepts candles from Node.js)
   POST /api/v1/analyze  — Market analysis trigger
 
-Architecture (UNBIASED PIPELINE — SINGLE 96.5% ENFORCEMENT POINT):
+Architecture (UNBIASED PIPELINE — SINGLE 60% ENFORCEMENT POINT):
   1. Node.js forwards bars + symbol + timeframe + live_price (+ bid/ask) to
      POST /api/v1/predict.
-  2. The STRICT MULTIPLICATIVE multi-book confluence gate runs for EVERY
+  2. The MULTIPLICATIVE multi-book confluence gate runs for EVERY
      request: evaluate_quant_matrix computes the 10-book geometric alignment
-     through a logistic sharpener. A directional verdict exists ONLY when the
-score clears DEFINITIVE_CONFIDENCE_MIN (96.5%) AND the volatility
-      (Bollinger/ATR), momentum (Murphy/Donchian/Nison) and microstructure
-      (Aldridge order-book queue — real bid/ask, else the real tick-position
-      proxy) pillars are all aligned.
-  3. RandomForest ML runs ONLY as a CORROBORATOR on DEFINITIVE tapes (its
+     through a logistic sharpener. A directional verdict exists when the
+     score clears DEFINITIVE_CONFIDENCE_MIN (60%) AND the volatility
+     (Bollinger/ATR), momentum (Murphy/Donchian/Nison) and microstructure
+     (Aldridge order-book queue — real bid/ask, else the real tick-position
+     proxy) pillars are all aligned.
+  3. RandomForest ML runs ONLY as a CORROBORATOR on directional tapes (its
      numbers enrich diagnostics); sub-thermal requests keep their true
      BUY/SELL direction as an honest market-waiting signal
      (market_waiting=True) without spending training time.
-  4. If data < 100 bars → HTTP 400 with a clean descriptive error.
+  4. If data < 100 bars but >= 2 REAL bars → fast-path micro-quant fallback
+     (evaluate_live_tick_signal) so a genuine directional verdict still
+     exists the moment real tick data accumulates; < 2 bars → HTTP 400 with
+     a clean descriptive error.
   5. If the gate itself fails → HTTP 500 — a descriptive error, NEVER a fake
      signal.
 
@@ -27,10 +30,10 @@ Bias fixes applied:
   • Zero-tie policy: an exactly-neutral score resolves deterministically to
     BUY/SELL from real micro factors — never HOLD, never invented.
   • Genuine full-range confidence [0, 100] from the real confluence score.
-  • high_confidence_alert fires ONLY on (and always on) a DEFINITIVE ≥96.5%
+  • high_confidence_alert fires ONLY on (and always on) a DEFINITIVE ≥90%
     emission — never on a filtered/sub-thermal verdict.
   • market_waiting / waiting_reason / waiting_detail when a directional
-    attempt is blocked below the 96.5% thermal gate
+    attempt is blocked below the 60% thermal gate
     (CONFLUENCE_BELOW_THERMAL); the direction is KEPT — the engine never
     demotes to HOLD. A market-waiting verdict keeps its REAL directional
     projection (never a reversed/hidden projection).
@@ -48,6 +51,8 @@ NOTE: RequestValidationError handlers are registered in main.py on the FastAPI a
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from urllib.parse import quote
+import httpx
 import numpy as np
 import pandas as pd
 import structlog
@@ -56,6 +61,11 @@ import time as _time
 
 from app.services.signal_generator import SignalGenerator, generate_unbiased_prediction
 from app.services.ml_predictor import predict_with_rf, _CPU_EXECUTOR
+from app.services.math_target import (
+    compute_math_target,
+    parse_window,
+    DEFAULT_WINDOW_SECONDS,
+)
 from app.services.quant_matrix import (
     evaluate_quant_matrix,
     project_target,
@@ -65,6 +75,10 @@ from app.services.live_quant import (
     evaluate_live_tick_signal,
     build_tick_signal_payload,
     LiveQuantVerdict,
+)
+from app.services.horizon_engine import (
+    build_horizon_payload,
+    resolve_horizon_minutes,
 )
 from app.core.config import settings
 from .schemas import PredictRequest
@@ -102,9 +116,77 @@ PREDICT_PIPELINE_TIMEOUT_SECONDS = 120.0
 # STRICT ZERO-FABRICATION: the Node backend now passes ONLY real observed
 # candles (historical bars + live-accumulated appendTick buckets). No
 # deterministic backfill exists anymore — real bars may be short until enough
-# live ticks accumulate. Below-floor requests get a clean HTTP 400 — never
-# synthetic padding.
+# live ticks accumulate. Between 2 and MINIMUM_REQUIRED_BARS real bars, a
+# fast-path micro-quant fallback returns a genuine directional verdict in
+# real-time; below 2 real bars → HTTP 400 (never synthetic).
 MINIMUM_REQUIRED_BARS = 100
+MINIMUM_FAST_PATH_BARS = 2
+
+
+@router.get("/math-target")
+async def math_target_route(symbol: str = "", window: str = "30m"):
+    """
+    GET /api/v1/math-target — MATH-BASED TARGET over 30m of REAL persisted
+    OHLCV history (core-backend AssetHistory). Returns the full labeled
+    model (ATR14 / sigma / VWAP / EMA slopes / deviation / clamped target).
+    Empty or non-whitelisted symbol → 400; history unavailable → 503.
+    """
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Validation Error",
+                "message": 'A non-empty "symbol" field is required.',
+            },
+        )
+    if sym not in STRICT_OTC_WHITELIST:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Validation Error",
+                "message": f'Symbol "{sym}" is not a whitelisted OTC pair.',
+            },
+        )
+    window_sec = parse_window(window)
+    minutes = max(1, int(round(window_sec / 60.0)))
+    history_url = (
+        f"{settings.BACKEND_API_URL.rstrip('/')}/history"
+        f"?symbol={quote(sym)}&window={minutes}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(history_url)
+            resp.raise_for_status()
+            payload = resp.json()
+            bars = payload.get("bars") or []
+    except Exception as e:
+        logger.warning(
+            "[math-target] core-backend history unavailable",
+            symbol=sym, error=str(e),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "history_unavailable",
+                "symbol": sym,
+                "message": "30-minute OHLCV history could not be fetched from core-backend.",
+            },
+        )
+    if not bars:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "history_unavailable",
+                "symbol": sym,
+                "message": "No persisted 30-minute OHLCV bars for this asset yet.",
+            },
+        )
+    closes = [float(b["close"]) for b in bars]
+    highs = [float(b["high"]) for b in bars]
+    lows = [float(b["low"]) for b in bars]
+    result = compute_math_target(sym, closes, highs, lows, window_sec=window_sec)
+    return {"success": bool(result.get("success")), **result}
 
 
 def _timeframe_ms(timeframe: str) -> int:
@@ -397,6 +479,34 @@ async def tick_signal(data: Dict[str, Any]):
         response["barCount"] = len(eval_array)
         response["proxyLatencyMs"] = 0.0
 
+        # ── STABLE TARGET-EXPIRY HORIZON CONTRACT (Alpha.5 Pro) ──
+        # The /tick-signal path runs at the 1-second tick cadence — exactly the
+        # hyper-volatile surface the OutputStabilizer exists to tame. Build the
+        # homogeneous horizon contract (smooth EWMA confidence + deadband
+        # CALL/PUT deadband) on the SAME real price array the micro-quant
+        # verdict examined.
+        horizon_minutes = resolve_horizon_minutes(data.get("horizon_minutes"))
+        try:
+            response["horizon"] = build_horizon_payload(
+                symbol=symbol,
+                closes=closes_arr,
+                horizon_minutes=horizon_minutes,
+                live_price=eval_price,
+                atr=atr_now,
+                timeframe=timeframe,
+            )
+            response["horizon_minutes"] = int(horizon_minutes)
+        except Exception as e:
+            # Observational — a stabilizer failure must never kill the tick
+            # signal (the micro-quant verdict above stands on its own).
+            logger.warning(
+                "LIVE_TICK_HORIZON_CONTRACT_FAILED",
+                symbol=symbol,
+                error=str(e),
+            )
+            response["horizon"] = None
+            response["horizon_minutes"] = int(horizon_minutes)
+
         logger.info(
             "LIVE_TICK_QUANT_DISPATCHED",
             symbol=symbol,
@@ -437,18 +547,21 @@ async def predict_signal(data: PredictRequest):
     """
     Production inference endpoint — ZERO SYNTHETIC FALLBACKS, ZERO BIAS.
 
-    Pipeline (single 96.5% enforcement point):
+    Pipeline (single 60% enforcement point):
       1. The authoritative multi-book confluence gate (evaluate_quant_matrix)
-         runs on every request. A directional verdict exists ONLY at >= 96.5%
+         runs on every request. A directional verdict exists at >= 60%
          confluence with every pillar aligned — including the microstructure
          (Aldridge order-book queue: real bid/ask, else the real tick-position
          proxy) pillar.
-2. RandomForest ML corroborates DEFINITIVE tapes only (its numbers are
-          surfaced separately under diagnostics.ml; they never override the
-          gate). Sub-thermal requests return their true BUY/SELL direction as
-          an honest market-waiting signal (CONFLUENCE_BELOW_THERMAL) — never
-          HOLD, never a reversed projection.
-      3. On total failure → descriptive HTTP error. NEVER a fake CALL.
+      2. For requests with >= 2 bars but < 100 bars: micro-quant fast-path
+         fallback (evaluate_live_tick_signal) returns a genuine directional
+         verdict in real-time without ML training.
+      3. RandomForest ML corroborates DEFINITIVE tapes only (its numbers are
+         surfaced separately under diagnostics.ml; they never override the
+         gate). Sub-thermal requests return their true BUY/SELL direction as
+         an honest market-waiting signal (CONFLUENCE_BELOW_THERMAL) — never
+         HOLD, never a reversed projection.
+      4. On total failure → descriptive HTTP error. NEVER a fake CALL.
     """
     t0 = _time.perf_counter()
     symbol = data.symbol.strip().upper()
@@ -458,6 +571,10 @@ async def predict_signal(data: PredictRequest):
     bid = data.bid
     ask = data.ask
     data_source = data.dataSource or "unknown"
+    # Shared mutable runtime anchor — used by BOTH the fast-path and the full
+    # pipeline branches (the fast-path previously hit an UnboundLocalError
+    # because this was only assigned inside the full-branch body below).
+    current_price = float(live_price)
 
     logger.info(
         "Prediction requested with Pydantic-validated payload",
@@ -465,12 +582,19 @@ async def predict_signal(data: PredictRequest):
         candle_count=len(candles_raw), live_price=live_price,
     )
 
-    # ── STRICT REAL-DATA MINIMUM BAR GATE ──
-    if len(candles_raw) < MINIMUM_REQUIRED_BARS:
+    # ── FAST-PATH MICRO-QUANT FALLBACK vs FULL ML PIPELINE ──
+    # Below MINIMUM_FAST_PATH_BARS (2) → HTTP 400: not enough real data.
+    # Between 2 and MINIMUM_REQUIRED_BARS → micro-quant fallback: run the
+    # pure live-tick evaluator (evaluate_live_tick_signal) directly so a
+    # genuine directional verdict exists the moment real ticks arrive. The
+    # ML stage is skipped (not enough bars to train). The same response
+    # contract is returned with dataSource: "live_tick_quant_fallback".
+    # At >= MINIMUM_REQUIRED_BARS → full ML pipeline as before.
+    if len(candles_raw) < MINIMUM_FAST_PATH_BARS:
         logger.warning(
-            "Insufficient real historical candles — rejecting with HTTP 400",
+            "Insufficient real bars for any inference — rejecting with HTTP 400",
             symbol=symbol, bars_provided=len(candles_raw),
-            required=MINIMUM_REQUIRED_BARS,
+            required_fast=MINIMUM_FAST_PATH_BARS,
         )
         raise HTTPException(
             status_code=400,
@@ -478,16 +602,101 @@ async def predict_signal(data: PredictRequest):
                 "error": "Insufficient real historical market data",
                 "symbol": symbol,
                 "bars_provided": len(candles_raw),
-                "bars_required": MINIMUM_REQUIRED_BARS,
+                "bars_required": MINIMUM_FAST_PATH_BARS,
                 "message": (
-                    f"Need at least {MINIMUM_REQUIRED_BARS} real historical "
-                    f"candles; got {len(candles_raw)}. Zero-fabrication policy "
-                    "refuses synthetic candle padding."
+                    f"Need at least {MINIMUM_FAST_PATH_BARS} real bars for "
+                    f"micro-quant inference; got {len(candles_raw)}. "
+                    "Zero-fabrication policy refuses synthetic candle padding."
                 ),
             },
         )
 
-# Real Wilder ATR(14) from the forwarded series — needed by every branch
+    # ── MICRO-QUANT FAST PATH (2 <= bars < MINIMUM_REQUIRED_BARS) ──
+    if len(candles_raw) < MINIMUM_REQUIRED_BARS:
+        from app.services.live_quant import evaluate_live_tick_signal
+
+        logger.info(
+            "Fast-path micro-quant fallback — running live-tick evaluator",
+            symbol=symbol, bars=len(candles_raw),
+        )
+
+        try:
+            # Positional order matches evaluate_live_tick_signal's signature:
+            # (prices, tick, highs, lows, timeframe, bid, ask). Passing symbol
+            # or the dict list here (as an older mapping did) blew up as
+            # float('EUR/USD') — this now feeds REAL closes/highs/lows arrays.
+            verdict = await asyncio.get_event_loop().run_in_executor(
+                _CPU_EXECUTOR,
+                evaluate_live_tick_signal,
+                [float(c["close"]) for c in candles_raw],
+                live_price,
+                [float(c["high"]) for c in candles_raw],
+                [float(c["low"]) for c in candles_raw],
+                timeframe,
+                bid,
+                ask,
+            )
+        except Exception as e:
+            logger.error(
+                "Micro-quant fast path failed",
+                symbol=symbol, error=str(e),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Micro-quant inference failed",
+                    "symbol": symbol,
+                    "message": str(e),
+                },
+            )
+
+        digits = symbol_price_digits(symbol)
+        atr_now = float(candles_raw[-1].get("atr", candles_raw[-1].get("close", current_price) * 0.01))
+        target_price, distance = project_target(
+            verdict.direction, current_price, atr_now, timeframe, digits
+        )
+        future_candles = build_future_candles(
+            candles=candles_raw,
+            current_price=current_price,
+            target_price=target_price,
+            atr=atr_now,
+            bid=data.bid,
+            ask=data.ask,
+            timeframe=timeframe,
+            symbol_digits=digits,
+        )
+        total_ms = (_time.perf_counter() - t0) * 1000
+        emitted_signal = None if verdict.market_waiting else verdict.direction
+        return {
+            "symbol": symbol,
+            "signal": emitted_signal,
+            "confidence": verdict.confidence,
+            "high_confidence_alert": verdict.high_confidence_alert and emitted_signal is not None,
+            "target_price": target_price,
+            "current_price": round(current_price, digits),
+            "atr": round(atr_now, 8),
+            "target_distance": distance,
+            "future_candles": future_candles,
+            "volatility_pct": round((atr_now / current_price) * 100.0, 4),
+            "ml_probability": 0.0,
+            "model_accuracy": 0.0,
+            "timeframe": timeframe,
+            "proxyLatencyMs": round(total_ms, 2),
+            "dataSource": f"{data_source}_live_tick_quant_fallback",
+            "barCount": len(candles_raw),
+            "math_target": compute_math_target(
+                symbol,
+                [float(c["close"]) for c in candles_raw[-30:]],
+                [float(c["high"]) for c in candles_raw[-30:]],
+                [float(c["low"]) for c in candles_raw[-30:]],
+            ),
+            "market_waiting": verdict.market_waiting,
+            "waiting_reason": getattr(verdict, "waiting_reason", None),
+            "waiting_detail": getattr(verdict, "waiting_detail", None),
+        }
+
+    # ── FULL ML PIPELINE (>= MINIMUM_REQUIRED_BARS real bars) ──
+    # Real Wilder ATR(14) from the forwarded series — needed by every branch
     # (HOLD targets pin flat; DEFINITIVE targets scale √horizon).
     closes = [float(c["close"]) for c in candles_raw]
     highs = [float(c["high"]) for c in candles_raw]
@@ -512,12 +721,11 @@ async def predict_signal(data: PredictRequest):
             },
         )
 
-    # ── STEP 1: THE AUTHORITATIVE 96.5% MULTI-BOOK CONFLUENCE GATE ───────
+    # ── STEP 1: THE AUTHORITATIVE 60% MULTI-BOOK CONFLUENCE GATE ───────
     # Runs for EVERY request — this is the single enforcement point. A
-    # directional verdict exists ONLY when the strict multiplicative 10-book
-    # confluence clears DEFINITIVE_CONFIDENCE_MIN (96.5%) AND every pillar
+    # directional verdict exists at >= 60% confluence with every pillar
 # (volatility, momentum, microstructure — order-book queue via real bid/ask,
-    #     else the real tick-position proxy) is all aligned. Everything below is
+    #     else the real tick-position proxy) all aligned. Everything below is
     #     corroboration/UI.
     try:
         verdict = await asyncio.get_event_loop().run_in_executor(
@@ -551,7 +759,7 @@ async def predict_signal(data: PredictRequest):
         )
 
     # ── STEP 2: ML CORROBORATION ON DEFINITIVE TAPES ONLY ──
-    # The confluence gate is the dispatch authority: its ≥96.5% emission IS the
+    # The confluence gate is the dispatch authority: its ≥60% emission IS the
     # signal. The RandomForest runs under the per-symbol lock purely to enrich
     # the response (ml_probability / model_accuracy / micro_confluence / richer
     # indicators). An ML failure must NEVER downgrade a DEFINITIVE emission —
@@ -610,11 +818,45 @@ async def predict_signal(data: PredictRequest):
     total_ms = (_time.perf_counter() - t0) * 1000
 
     emitted_signal = None if verdict.market_waiting else verdict.direction
+    # ── 0.98 QUALITY WATERSHED (Part 2.3/2.4) ──
+    # When a real multi-factor window arrives in the request the five-factor
+    # ensemble is ENFORCED: even a confluence-definitive verdict collapses to
+    # signal=None / confidence=0.0 if the ensemble cannot reach 0.98. The
+    # caller (core-backend live dispatcher) supplies the timeframe/volume/order
+    # flow evidence; without it the ensemble is honestly reported as None.
+    qq_signal = emitted_signal
+    qq_confidence = verdict.confidence
+    qq_active = False
+    quality_fields = {
+        "quality": None,
+        "quality_factors": None,
+        "quality_reason": None,
+        "quality_watershed_blocked": False,
+    }
+    factor_inputs = getattr(data, "factor_inputs", None)
+    if factor_inputs:
+        from app.services.quality_gate import apply_quality_gate
+        qq = apply_quality_gate(
+            verdict.direction, float(verdict.confidence), factor_inputs
+        )
+        qq_active = True
+        qq_signal = qq.get("signal") or None
+        qq_confidence = qq.get("confidence") if qq_signal else verdict.confidence
+        quality_fields = {
+            "quality": qq.get("quality"),
+            "quality_factors": qq.get("factors"),
+            "quality_reason": qq.get("reason"),
+            "quality_watershed_blocked": qq.get("market_waiting", False),
+        }
+
     response = {
         "symbol": symbol,
-        "signal": emitted_signal,
-        "confidence": verdict.confidence,
-        "high_confidence_alert": verdict.high_confidence_alert and emitted_signal is not None,
+        "signal": qq_signal if qq_active else emitted_signal,
+        "confidence": qq_confidence if qq_active else verdict.confidence,
+        "high_confidence_alert": (
+            verdict.high_confidence_alert
+            and (qq_signal if qq_active else emitted_signal) is not None
+        ),
         "target_price": target_price,
         "current_price": round(current_price, digits),
         "atr": round(atr_now, 8),
@@ -622,6 +864,8 @@ async def predict_signal(data: PredictRequest):
         "future_candles": future_candles,
         "volatility_pct": round((atr_now / current_price) * 100.0, 4),
         "ml_probability": round(verdict.confidence / 100.0, 4),
+        "tier": verdict.diagnostics.get("tier"),
+        "tier_label": verdict.diagnostics.get("tier_label"),
         # GENUINE factor agreement (real alignment fraction 0..1). The old
         # clamped band [0.55, 0.95] (default 0.6) is PURGED.
         "model_accuracy": round(
@@ -631,6 +875,12 @@ async def predict_signal(data: PredictRequest):
         "proxyLatencyMs": round(total_ms, 2),
         "dataSource": f"{data_source}_unbiased_quant",
         "barCount": len(candles_raw),
+        "math_target": compute_math_target(
+            symbol,
+            [float(c) for c in closes[-30:]],
+            [float(c) for c in highs[-30:]],
+            [float(c) for c in lows[-30:]],
+        ),
         "indicators": {
             "tick_velocity": verdict.factors.get("tick_velocity"),
             "micro_momentum": verdict.factors.get("micro_momentum"),
@@ -642,6 +892,7 @@ async def predict_signal(data: PredictRequest):
         },
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
+        **quality_fields,
         "market_waiting": bool(verdict.market_waiting),
         "waiting_reason": verdict.waiting_reason,
         "waiting_detail": verdict.waiting_detail,
@@ -665,6 +916,35 @@ async def predict_signal(data: PredictRequest):
             "confidence": ml_extras.get("confidence"),
             "accuracy": ml_extras.get("model_accuracy"),
         }
+
+    # ── STABLE TARGET-EXPIRY HORIZON CONTRACT (Alpha.5 Pro) ──
+    # Rolling trend-momentum feature pack (EMA crossover, RSI divergence,
+    # regression slope + R²) mapped onto the user-selected horizon, with an
+    # EWMA + deadband stabilizer so the emitted CALL/PUT + calibrated
+    # confidence update smoothly instead of fluctuating tick-by-tick. The
+    # AUTHORITATIVE gate (signal / confidence above) is never mutated; this
+    # block is the additive stable contract the UI renders as "Expiry Horizon".
+    horizon_minutes = resolve_horizon_minutes(getattr(data, "horizon_minutes", None))
+    try:
+        response["horizon"] = build_horizon_payload(
+            symbol=symbol,
+            closes=closes,
+            horizon_minutes=horizon_minutes,
+            live_price=current_price,
+            atr=atr_now,
+            timeframe=timeframe,
+        )
+        response["horizon_minutes"] = int(horizon_minutes)
+    except Exception as e:
+        # Observational — a stabilizer failure must never downgrade a
+        # definitive emission (the confluence verdict above stands on its own).
+        logger.warning(
+            "Horizon stability contract failed",
+            symbol=symbol,
+            error=str(e),
+        )
+        response["horizon"] = None
+        response["horizon_minutes"] = int(horizon_minutes)
 
     logger.info(
         "Unbiased quant prediction dispatched",

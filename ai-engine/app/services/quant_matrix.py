@@ -1,10 +1,9 @@
 """
 quant_matrix.py — PURE REAL-TIME MICRO-MOMENTUM & HORIZON ENGINE
 
-v11-strict — STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (SOLE DISPATCH):
-      12-FACTOR CONFLUENCE + REAL RSI/MACD/SPREAD + STRICT MULTIPLICATIVE
-      10-BOOK CONFLUENCE GATE (>= 96.5% STRICT, FLAT) + PREDICTIVE
-      TICK LEAD:
+60% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (SOLE DISPATCH):
+      12-FACTOR CONFLUENCE + REAL RSI/MACD/SPREAD + MULTIPLICATIVE
+      10-BOOK CONFLUENCE GATE (>= 60% FLAT) + PREDICTIVE TICK LEAD:
 
   1. ZERO-TIE POLICY: the engine ALWAYS resolves a directional BUY/SELL
      verdict; an exactly-zero confluence score is tied deterministically
@@ -13,25 +12,25 @@ v11-strict — STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (SOLE DISP
      histogram and order-book spread quality computed from the SAME forwarded
      closes/arms join the micro-momentum factors as real momentum +
      volatility confluence in the arbitration.
-  3. STRICT 96.5% MULTI-BOOK CONFLUENCE GATE (v11-strict): a CALL/PUT is
-     dispatched ONLY when the strict MULTIPLICATIVE convergence of the ten
+  3. 60% MULTI-BOOK CONFLUENCE GATE: a CALL/PUT is
+     dispatched when the MULTIPLICATIVE convergence of the ten
      trading books (geometric-mean alignment through a logistic sharpener)
-     clears the REQ STRICT 96.5% thermal bar (FLAT — never relaxed by market
+     clears the REQ 60% thermal bar (FLAT — never relaxed by market
      stress) AND the volatility (Bollinger/ATR), momentum (Murphy MACD/RSI/EMA,
      Turtle Donchian, Nison structure) and microstructure (Aldridge queue,
      volume-price, Aronson evidence) pillars are all present and aligned
      (logical AND). USER REQUIREMENT: NO signal dispatches strictly below
-     96.5% — in ANY market regime. The multi-variable market-stress blend
+     60% — in ANY market regime. The multi-variable market-stress blend
      (real ATR expansion, accelerating tick velocity, multi-factor momentum
      coherence, order-book absorption) is computed and surfaced as
      diagnostics only and NEVER lowers the bar. A sub-thermal directional
      attempt KEEPS its true BUY/SELL direction with the real confluence
      number, the applied threshold and the failing pillar surfaced — never
      padded, never demoted to HOLD. No secondary pathway. No override. The
-     strict 96.5% thermal gate is the SOLE mechanism.
+     60% thermal gate is the SOLE mechanism.
   4. GENUINE CONTINUOUS UNCLIPPED CONFIDENCE [0, 100+]: a fully-aligned
-     multi-book convergence organically scales into the high-90s definitive
-     band and reports the raw unclipped confluence (it may exceed 96.5%).
+     multi-book convergence organically scales past the 60% bar and reports
+     the raw unclipped confluence (it may exceed 60%).
      Weak/mixed tape honestly reports its real sub-thermal confluence strength
      as market-waiting — but ALWAYS with a directional verdict.
   5. ZERO DEMO/SIMULATION NOISE IN TARGETS: candle-close expiration targets
@@ -64,6 +63,12 @@ from .book_instruments import (
     evaluate_book_confluence,
     DEFINITIVE_CONFIDENCE_MIN,
 )
+from .signal_gatekeeper import (
+    TIER_THRESHOLDS,
+    TIER_LABELS,
+    is_dispatchable_tier,
+    resolve_tier,
+)
 
 EPS = 1e-12
 
@@ -71,26 +76,30 @@ EPS = 1e-12
 # For dispatched BUY/SELL, confidence is true directional agreement scaled by
 # real magnitude, mapped continuously with NO hardcoded floor and NO ceiling —
 # the raw unclipped confluence strength is reported exactly as computed (it may
-# exceed 96.5%). A strongly aligned high-magnitude setup organically yields
-# high realistic confidence >96.5%.
+# exceed 60.0%). A strongly aligned high-magnitude setup organically yields
+# high realistic confidence >60%.
 #
-HIGH_CONFIDENCE_ALERT_THRESHOLD = 96.5
+HIGH_CONFIDENCE_ALERT_THRESHOLD = 90.0
 
-# ── STRICT MULTI-VARIABLE MARKET-STRESS THERMAL GATE (v11-strict) ──
-# USER REQUIREMENT: NO signal is dispatched unless confidence STRICTLY meets
-# or exceeds 96.5% — under every market regime, calm OR stressed. The thermal
-# bar is therefore FLAT at DEFINITIVE_CONFIDENCE_MIN: the multi-variable
+# ── MULTI-TIER THERMAL GATE ──
+# USER REQUIREMENT: replace the single 98% hard gate with an honest multi-tier
+# signal system. A directional verdict is dispatched when its genuine 10-book
+# confluence score clears the weakest EXECUTABLE tier — T4-LOW (70%) — under
+# every market regime, calm OR stressed. The thermal bar is therefore FLAT at
+# THERMAL_GATE_FLOOR == TIER_THRESHOLDS["T4"] (70%): the multi-variable
 # market-stress signal (real ATR expansion, accelerating tick velocity,
 # multi-factor coherence, book absorption) is still COMPUTED and surfaced in
-# diagnostics, but it can NEVER lower the dispatch bar below 96.5%. Genuine
-# high-probability setups (all ten books organically/constitutively converged,
-# G ≈ 0.97 → score ≈ 98-99%) cross this strict bar honestly; any attempt below
-# it KEEPS its true BUY/SELL direction and is flagged market-waiting
+# diagnostics, but it can NEVER lower the dispatch bar below 70%. Tiers are
+# resolved from the same continuous confluence score (T1 PREMIUM >= 96.5,
+# T2 HIGH >= 90, T3 MEDIUM >= 80, T4 LOW >= 70 — see signal_gatekeeper), so a
+# medium-strength but genuine setup dispatches honestly at its true tier
+# instead of being held sub-thermal forever. Any attempt below the weakest
+# tier KEEPS its true BUY/SELL direction and is flagged market-waiting
 # (CONFLUENCE_BELOW_THERMAL) that names the gate — the state is never HOLD.
 # Rigorous risk filters (ATR regime, queue, evidence persistence, logical-AND
 # pillars) remain untouched and independent of this gate.
-THERMAL_GATE_FLOOR = DEFINITIVE_CONFIDENCE_MIN  # 96.5 — the hard floor (== ceiling)
-THERMAL_GATE_CEILING = DEFINITIVE_CONFIDENCE_MIN  # 96.5 — the hard ceiling
+THERMAL_GATE_FLOOR = round(TIER_THRESHOLDS["T4"] * 100.0, 2)   # 70 — T4-LOW bar
+THERMAL_GATE_CEILING = round(TIER_THRESHOLDS["T4"] * 100.0, 2)  # flat (== floor)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -382,11 +391,11 @@ def compute_market_stress_threshold(
     order_book_imbalance: Optional[float] = None,
     direction_sign: int = 0,
 ) -> Tuple[float, float, Dict[str, float]]:
-    """STRICT market-stress threshold for the thermal gate (v11-strict).
+    """FLAT market-stress threshold for the thermal gate.
 
-    USER REQUIREMENT: the dispatch bar is FLAT at 96.5% — never below.
+    USER REQUIREMENT: the dispatch bar is FLAT at 98% — never below.
     ``THERMAL_GATE_FLOOR == THERMAL_GATE_CEILING == DEFINITIVE_CONFIDENCE_MIN``,
-    so this function returns exactly 96.5 under every tape. The multi-variable
+    so this function returns exactly 98 under every tape. The multi-variable
     market-stress blend is still computed from the same real factor stack /
     realized ATR and surfaced in ``stress_factors`` as PURE DIAGNOSTICS — it
     is reported alongside the verdict but plays NO role in lowering the bar.
@@ -402,7 +411,7 @@ def compute_market_stress_threshold(
       • taper_agreement   — raw fraction of active factors on-direction
                             (multi-variable agreement breadth).
 
-    Returns ``(96.5, market_stress, stress_factors)`` — the threshold NEVER
+    Returns ``(98.0, market_stress, stress_factors)`` — the threshold NEVER
     drifts below ``DEFINITIVE_CONFIDENCE_MIN``.
     """
     dir_sign = 1.0 if direction_sign > 0 else (-1.0 if direction_sign < 0 else 0.0)
@@ -483,7 +492,7 @@ class QuantVerdict:
     direction: str                       # "BUY" | "SELL" — ALWAYS directional
     direction_score: float               # signed raw confluence sum
     confidence: float                    # genuine unclipped [0, 100+] strength
-    high_confidence_alert: bool          # True when confidence > 96.5%
+    high_confidence_alert: bool          # True when confidence > HIGH_CONFIDENCE_ALERT_THRESHOLD (90%)
     market_waiting: bool = False         # sub-thermal: kept directional, not executed
     waiting_reason: Optional[str] = None       # CONFLUENCE_BELOW_THERMAL
     waiting_detail: Optional[str] = None       # human-debuggable reason detail
@@ -531,7 +540,7 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
               microstructure queue position, Aronson evidence persistence and
               the ATR volatility regime. Folded into the authoritative
               ``confluence`` gate: a geometric-mean alignment across every
-              active book through a logistic sharpener with the hard 96.5%
+              active book through a logistic sharpener with the hard 98%
               thermal threshold.
 
     Direction rules (ZERO-TIE POLICY — ALWAYS DIRECTIONAL):
@@ -542,8 +551,8 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
 
     CONFIDENCE (v9): the emitted confidence of a directional signal IS the
     strict multiplicative 10-book confluence score, UNCLIPPED — it may exceed
-    96.5%. A CALL/PUT is dispatched ONLY when that confluence clears the hard
-    96.5% threshold AND the volatility (Bollinger/ATR), momentum (Murphy
+    98%. A CALL/PUT is dispatched ONLY when that confluence clears the hard
+    98% threshold AND the volatility (Bollinger/ATR), momentum (Murphy
     MACD/RSI/EMA, Donchian, Nison) and microstructure (queue / volume-price /
     evidence) pillars are all present and aligned (logical AND). A sub-thermal
     directional attempt KEEPS its true direction — the real confluence number
@@ -697,11 +706,11 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
 
     direction = "BUY" if sign > 0 else "SELL"
 
-    # ── STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (v11-strict) ──
-    # USER REQUIREMENT: the dispatch bar is FLAT at 96.5% — STRICTLY no signal
+    # ── STRICT 98% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (v11-strict) ──
+    # USER REQUIREMENT: the dispatch bar is FLAT at 98% — STRICTLY no signal
     # dispatches below it, in every market regime. The multi-variable stress
     # blend is computed but serves PURELY as diagnostics (surfaced next to the
-    # verdict for tape transparency) — the bar never drifts below 96.5% and
+    # verdict for tape transparency) — the bar never drifts below 98% and
     # never invents a direction for a sign==0 tape.
     dynamic_threshold, market_stress, stress_factors = compute_market_stress_threshold(
         factors,
@@ -720,7 +729,7 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
     # the engine — a missing feed (e.g. no volume) only deactivates its own
     # instrument; nothing is ever fabricated. `book_confirm` is the legacy
     # linear fold; `book.confluence` is the authoritative v9 STRICT
-    # MULTIPLICATIVE gate that drives the 96.5% dispatch decision below.
+    # MULTIPLICATIVE gate that drives the 98% dispatch decision below.
     book = evaluate_book_confluence(
         closes=closes,
         opens=opens,
@@ -738,17 +747,17 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
     conf_score = float(confluence.get("score", 0.0))
     confluence_gate = str(confluence.get("gate", "INSUFFICIENT"))
 
-    # ── TRUE 96.5% MULTI-BOOK CONFLUENCE CONFIDENCE (v9) ──
+    # ── TRUE 98% MULTI-BOOK CONFLUENCE CONFIDENCE (v9) ──
     # The emitted confidence of a directional signal IS the strict
     # MULTIPLICATIVE convergence of the ten trading books (geometric-mean
-    # alignment through a logistic sharpener with the hard 96.5% thermal
+    # alignment through a logistic sharpener with the hard 98% thermal
     # threshold) — NOT the retired diluted linear average
     # (0.30*commitment + 0.36*magnitude + 0.16*agreement + 0.08*vol_confirm
     # + 0.10*book_confirm), which could only reach ~60-80% on genuinely
     # strong setups and therefore manufactured low-confidence "dispatchable"
     # signals. A CALL/PUT is emitted ONLY when the volatility (Bollinger/ATR),
     # momentum (Murphy MACD/RSI/EMA, Donchian, Nison) and microstructure
-    # (queue / volume-price / evidence) pillars ALL clear the 96.5% gate
+    # (queue / volume-price / evidence) pillars ALL clear the 98% gate
     # (logical AND). Below the thermal threshold the verdict is an honest
     # market-waiting diagnostic (CONFLUENCE_BELOW_THERMAL) that names the
     # failing pillar — never a padded or phased signal.
@@ -778,11 +787,11 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
             np.clip(sign_dir * float(factors.get("volatility", 0.0)), 0.0, 1.0)
         )
 
-    # ── THE STRICT 96.5% THERMAL GATE (exact, requirement-compliant) ──
+    # ── THE STRICT 98% THERMAL GATE (exact, requirement-compliant) ──
     # conf_score = strict multiplicative 10-book convergence; the gate collapses
     # to DEFINITIVE ONLY when every pillar (volatility / momentum /
     # microstructure) is present and aligned AND the score clears the STRICT
-    # 96.5% thermal bar (FLAT — the market-stress blend is diagnostic only and
+    # 98% thermal bar (FLAT — the market-stress blend is diagnostic only and
     # can never lower it) — the canonical dispatch metric. A genuine
     # institutional setup where every active book's evidence e_i ≈ 1.0 yields
     # G ≈ 0.95+ → score ≈ 98%, organically crossing the strict bar. Below the
@@ -791,14 +800,14 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
     definitive = bool(
         direction in ("BUY", "SELL")
         and conf_score >= dynamic_threshold
-        and confluence_gate == "DEFINITIVE"
+        and is_dispatchable_tier(confluence_gate)
     )
     if definitive:
-        # True CALL/PUT — the books have mathematically converged at >=96.5%.
+        # True CALL/PUT — the books have mathematically converged at >=98%.
         # The emitted confidence IS the strict multiplicative book-confluence
         # score. No ceiling, no override, no clipping: the organic UNCLIPPED
         # strength is reported exactly as computed by the geometric-mean
-        # logistic sharpener — it may exceed 96.5% and does so organically.
+        # logistic sharpener — it may exceed 98% and does so organically.
         confidence = round(float(conf_score), 2)
     else:
         # Honest sub-thermal directional verdict: the real confluence number is
@@ -809,9 +818,9 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
         # sub-thermal directional state, but the surface never shows HOLD.
         confidence = round(float(conf_score), 2)
 
-    # ── STRICT 96.5% THERMAL GATE — EXECUTION FILTER (direction NEVER HOLD) ──
+    # ── STRICT 98% THERMAL GATE — EXECUTION FILTER (direction NEVER HOLD) ──
     # A directional verdict is ALWAYS returned (BUY/SELL). When confluence
-    # strictly clears 96.5% the verdict is executable (market_waiting=false)
+    # strictly clears 98% the verdict is executable (market_waiting=false)
     # with the UNCLIPPED real confidence. Sub-thermal attempts keep their true
     # direction and are flagged market_waiting with CONFLUENCE_BELOW_THERMAL so
     # a host never dispatches a low-confidence state — but HOLD is never
@@ -829,8 +838,8 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
             market_stress=market_stress,
         )
 
-    # ── MARKET-WAITING FLAG (strict 96.5% confluence thermal gate, surfaced to UI) ──
-    # Below the strict bar the engine still emits the true BUY/SELL direction,
+    # ── MARKET-WAITING FLAG (60% confluence thermal gate, surfaced to UI) ──
+    # Below the bar the engine still emits the true BUY/SELL direction,
     # but flags the verdict market-waiting so the UI can render "converging"
     # instead of dispatching. The signal state is ALWAYS directional.
     if confidence_gated:
@@ -838,7 +847,7 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
         waiting_reason = "CONFLUENCE_BELOW_THERMAL"
         waiting_detail = (
             f"Direction {gated_direction} held below thermal: 10-book multiplicative "
-            f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% strict 96.5% "
+            f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% "
             f"thermal gate (market_stress={market_stress:.2f}; gate={confluence_gate}; "
             f"blockers: {', '.join(confluence.get('blockers', [])) or 'none'})"
         )
@@ -883,6 +892,8 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
         "confluence_threshold": round(dynamic_threshold, 2),
         "confluence_score": round(conf_score, 2),
         "confluence_gate": confluence_gate,
+        "tier": resolve_tier(conf_score / 100.0),
+        "tier_label": TIER_LABELS.get(resolve_tier(conf_score / 100.0), "WEAK"),
         "confidence_gated": confidence_gated,
         "gated_direction": gated_direction,
         "market_waiting": market_waiting,

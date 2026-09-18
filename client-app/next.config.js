@@ -1,5 +1,20 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  assetPrefix: process.env.NEXT_PUBLIC_ASSET_PREFIX || "",
+
+  // ── Build-Time Client Env Inlining ──
+  // These values are read ONCE at build/config-load time (Node has
+  // `process`) and inlined into client bundles so browser code NEVER touches
+  // the `process` global at runtime. Client components must reference the
+  // static literals `process.env.NEXT_PUBLIC_*` (or import them from
+  // src/lib/env.ts) — optional chaining / dynamic keys are NOT inlined.
+  env: {
+    NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL,
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+    NEXT_PUBLIC_SOCKET_URL: process.env.NEXT_PUBLIC_SOCKET_URL,
+    NEXT_PUBLIC_AI_ENGINE_URL: process.env.NEXT_PUBLIC_AI_ENGINE_URL,
+  },
+
   // ── Rewrites for Local Development Only ──
   // In production, the frontend code (getBaseUrl.ts) detects the server hostname
   // and constructs absolute URLs directly (e.g., http://91.99.71.111:4000/api/v1).

@@ -33,7 +33,7 @@ export const getSymbols = async (req: Request, res: Response) => {
     // Validate type filter — only "otc" is valid.
     // "stock" | "crypto" | "etf" are accepted for API compatibility but
     // the registry returns [] for them (no stocks/crypto exist anymore).
-    const validTypes = ["stock", "crypto", "etf", "otc"] as const;
+    const validTypes = ["stock", "crypto", "etf", "otc", "commodity"] as const;
     const typeFilter = typeParam
       ? (typeParam as (typeof validTypes)[number])
       : undefined;

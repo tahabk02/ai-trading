@@ -2,6 +2,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 from typing import Optional
 
+from app.services.signal_gatekeeper import (
+    TIER_THRESHOLDS,
+    TIER_LABELS,
+    MIN_EXECUTABLE_TIER,
+)
+
+# Multi-tier dispatch floors — single source of truth (signal_gatekeeper).
+# The default CONFIDENCE_THRESHOLD (a percentage, 0-100) is the PREMIUM T1
+# bar (96.5); the validator never lets a configured value drop below the
+# weakest executable tier T4 (70.0), so an env override can only tighten
+# the shipped floor between 70 and 100.
+DEFAULT_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T1"] * 100.0, 2)          # 96.5
+MIN_EXECUTABLE_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T4"] * 100.0, 2)   # 70.0
+
 class Settings(BaseSettings):
     """
     Application settings using Pydantic for validation and environment management.
@@ -17,21 +31,23 @@ class Settings(BaseSettings):
 
     # Trading Configuration
     # ══════════════════════════════════════════════════════════════════
-    # STRICT 96.5% THERMAL FLOOR — ALIGNED WITH quant_matrix.py
+    # MULTI-TIER DISPATCH FLOOR — SINGLE SOURCE OF TRUTH (signal_gatekeeper)
     # ══════════════════════════════════════════════════════════════════
     # Confidence is the engine's real raw-strength percentage (0-100).
-    # This floor mirrors DEFINITIVE_CONFIDENCE_MIN (96.5): the signal ghost
-    # belt-and-suspenders gate coerce every directional BUY/SELL verdict
-    # below 96.5% to an honest market-waiting signal (direction kept,
-    # market_waiting=True, no dispatch) — it is never dispatched. Override via
-    # CONFIDENCE_THRESHOLD env, but any value below 96.5 downgrades the
-    # shipped floor and is therefore clamped to 96.5 at boot.
-    CONFIDENCE_THRESHOLD: float = 96.5
+    # The default floor is the PREMIUM T1 bar (96.5%); a BUY/SELL verdict is
+    # dispatched when it clears the caller's minimum executable tier (T4=70
+    # by default, TIER_LABELS[T4]="LOW"). Tiers: T1 PREMIUM >= 96.5,
+    # T2 HIGH >= 90, T3 MEDIUM >= 80, T4 LOW >= 70, below = T5 WEAK (never
+    # dispatched). Direction is always KEPT: a sub-tier verdict is flagged an
+    # honest market-waiting signal (market_waiting=True, no dispatch). Values
+    # configured below the weakest tier (70) are clamped to 70 at boot; the
+    # floor can never weaken past the minimum-executable bar.
+    CONFIDENCE_THRESHOLD: float = DEFAULT_CONFIDENCE_PCT
 
     @field_validator("CONFIDENCE_THRESHOLD")
     @classmethod
-    def floor_never_below_definitive(cls, v: float) -> float:
-        floor = 96.5
+    def floor_never_below_min_executable(cls, v: float) -> float:
+        floor = MIN_EXECUTABLE_CONFIDENCE_PCT
         if v < floor:
             return float(floor)
         return float(v)

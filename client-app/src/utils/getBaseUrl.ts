@@ -71,7 +71,9 @@ export function getApiBaseUrl(): string {
 }
 
 export function getWsUrl(): string {
-  // If NEXT_PUBLIC_WS_URL is explicitly set in .env at build time, use it directly
+  if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SOCKET_URL) {
+    return process.env.NEXT_PUBLIC_SOCKET_URL;
+  }
   if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_WS_URL) {
     return process.env.NEXT_PUBLIC_WS_URL;
   }
@@ -79,17 +81,24 @@ export function getWsUrl(): string {
   if (isBrowser) {
     const hostname = window.location.hostname;
 
-    // ── PRODUCTION: Detect non-localhost hostnames and construct absolute URL ──
+    // ── VS CODE DEV TUNNEL: derive the backend tunnel from the current one ──
+    // Frontend serves on {id}-3000.{region}.devtunnels.ms → backend on
+    // {id}-4000.{region}.devtunnels.ms. Replace the port suffix in the live
+    // origin so the browser never hardcodes localhost and never touches the
+    // Next.js origin (both cause CORS / 404 on the socket handshake).
+    if (hostname.includes("devtunnels.ms")) {
+      const backendOrigin = window.location.origin.replace("-3000.", "-4000.");
+      // https://{id}-4000.{region}.devtunnels.ms — socket.io-client converts
+      // the http(s) scheme to wss automatically on websocket upgrades.
+      return backendOrigin;
+    }
+
     if (!isLocalHost(hostname)) {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const port = 4000;
       return `${protocol}//${hostname}:${port}`;
     }
-
-    // ── LOCAL DEV & DEV TUNNELS: Use relative path ──
-    // Socket.IO will connect to the Next.js origin on /.
-    // The Next.js rewrite proxy forwards /socket.io/* to the backend.
-    return "/";
+    return "http://localhost:4000";
   }
 
   return "http://localhost:4000";

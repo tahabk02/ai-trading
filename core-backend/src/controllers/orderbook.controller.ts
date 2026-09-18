@@ -54,10 +54,10 @@ export const orderbookHealth = {
   },
 };
 
-/** Per-request upstream cap. The axios client timeout is 5s; the controller
- *  MUST bound the whole fork (spot + candles) at 3s so a dead upstream returns
- *  a JSON 504 instead of letting a proxy respond with a bare 502. */
-const UPSTREAM_TIMEOUT_MS = 3_000;
+/** Per-request upstream cap. The controller MUST bound the whole fork (spot +
+ *  candles) at 5s so a dead upstream returns a JSON 504 instead of letting a
+ *  proxy respond with a bare 502. */
+const UPSTREAM_TIMEOUT_MS = 5_000;
 
 function withTimeout<T>(
   promise: Promise<T>,
@@ -106,6 +106,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
   const { symbol } = req.query as { symbol?: string };
 
   if (!symbol || typeof symbol !== "string" || symbol.trim().length === 0) {
+    logger.info(`[orderbook] symbol= status=400 latency_ms=0`);
     return res.status(400).json({
       error: "Validation Error",
       message: 'A non-empty "symbol" query parameter is required.',
@@ -118,6 +119,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
   // STRICT OTC WHITELIST ENFORCEMENT — reject everything non-whitelisted
   // ════════════════════════════════════════════════════════════════════
   if (!symbolRegistry.isValidSymbolSync(normalizedSymbol)) {
+    logger.info(`[orderbook] symbol=${normalizedSymbol} status=400 latency_ms=0`);
     return res.status(400).json({
       error: "Symbol not permitted",
       symbol: normalizedSymbol,
@@ -132,7 +134,8 @@ export const getOrderBook = async (req: Request, res: Response) => {
 
   try {
     // ── Fetch REAL live spot + REAL historical candles in parallel, bounded
-    //    by a hard 3s cap. On timeout → 504 JSON (never a bare proxy 502).
+    //    by a hard 5s cap (UPSTREAM_TIMEOUT_MS). On timeout → 504 JSON (never a
+    //    bare proxy 504).
     let spotResult: Awaited<ReturnType<typeof forexDataService.getLiveSpot>>;
     let barResult: Awaited<
       ReturnType<typeof forexDataService.getHistoricalCandles>
@@ -151,12 +154,14 @@ export const getOrderBook = async (req: Request, res: Response) => {
         cause instanceof Error ? cause.message : String(cause),
       );
       orderbookHealth.recordError(elapsed, String(cause));
-      return res.status(isTimeout ? 504 : 502).json({
+      const status = isTimeout ? 504 : 502;
+      logger.info(`[orderbook] symbol=${normalizedSymbol} status=${status} latency_ms=${elapsed}`);
+      return res.status(status).json({
         error: isTimeout ? "orderbook_timeout" : "orderbook_upstream",
         symbol: normalizedSymbol,
         retryAfterMs: isTimeout ? 1000 : undefined,
         message: isTimeout
-          ? "Upstream forex rate pipeline exceeded the 3s order-book deadline."
+          ? "Upstream forex rate pipeline exceeded the 5s order-book deadline."
           : "Upstream forex rate pipeline failed.",
         detail: cause instanceof Error ? cause.message : String(cause),
         timestamp: new Date().toISOString(),
@@ -166,6 +171,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
     if (!spotResult.success || spotResult.price == null) {
       const elapsed = Date.now() - t0;
       orderbookHealth.recordError(elapsed, spotResult.error || "no live rate");
+      logger.info(`[orderbook] symbol=${normalizedSymbol} status=502 latency_ms=${elapsed}`);
       return res.status(502).json({
         error: "orderbook_upstream",
         symbol: normalizedSymbol,
@@ -214,6 +220,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
     });
 
     orderbookHealth.recordOk(Date.now() - t0);
+    logger.info(`[orderbook] symbol=${normalizedSymbol} status=200 latency_ms=${Date.now() - t0}`);
 
     return res.json({
       symbol: normalizedSymbol,
@@ -238,6 +245,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
       error: error instanceof Error ? error.message : String(error),
       elapsedMs: elapsed,
     });
+    logger.info(`[orderbook] symbol=${normalizedSymbol} status=502 latency_ms=${elapsed}`);
 
     // NEVER return synthetic data — just propagate the error
     return res.status(502).json({

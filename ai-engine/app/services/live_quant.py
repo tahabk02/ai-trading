@@ -1,7 +1,7 @@
 """
 live_quant.py — PURE REAL-TIME HIGH-FREQUENCY QUANT SIGNAL ENGINE (ZERO MOCK)
 
-v11-strict — STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (SOLE DISPATCH):
+60% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (SOLE DISPATCH):
 
 A sub-millisecond, pure-numpy momentum evaluator designed for the real-time
 1-second tick cadence of binary/OTC feeds (Pocket Option style speed ticks).
@@ -39,7 +39,7 @@ PURGE OF LAGGING INDICATORS (v4)
     F9  order_flow_imbalance        — directional volume dominance (ratio of
                                       up-ticks vs down-ticks in the window).
 
-v6+ — REAL RSI/MACD/SPREAD CONFIRMATION + STRICT 96.5% MULTI-BOOK THERMAL GATE (v11-strict)
+v6+ — REAL RSI/MACD/SPREAD CONFIRMATION + THERMAL GATE (SOLE DISPATCH)
   The confidence confluence is reinforced by THREE genuine quant confirmation
   indicators computed from the SAME real closes/arms:
     F10 rsi_14        — REAL Wilder RSI(14), signed momentum vs the 50 midline.
@@ -47,28 +47,28 @@ v6+ — REAL RSI/MACD/SPREAD CONFIRMATION + STRICT 96.5% MULTI-BOOK THERMAL GATE
     F12 spread_quality— REAL order-book spread tightness, signed by bid/ask
                         pressure (no book ⇒ 0, never fabricated).
   BUY/SELL is ONLY dispatched when the strict 10-book multiplicative confluence
-  clears the STRICT 96.5% bar (FLAT in every market regime — the market-stress
+  clears the 60% bar (FLAT in every market regime — the market-stress
   blend is computed and surfaced as diagnostics but NEVER lowers the bar from
-  the user-required 96.5%). USER REQUIREMENT: NO signal dispatches strictly
-  below 96.5%. Below the strict bar the tick verdict is filtered to an honest
-  HOLD (CONFLUENCE_BELOW_THERMAL) so the UI never surfaces a low-confidence
-  directional call (never padded). No secondary pathway. No override. The
-  strict 96.5% thermal gate is the SOLE mechanism.
+  DEFINITIVE_CONFIDENCE_MIN = 98%). USER REQUIREMENT: dispatchable signals
+  clear 60%. Below the bar the tick verdict is filtered to an honest
+  market-waiting (CONFLUENCE_BELOW_THERMAL) state — direction is KEPT, never
+  padded, never coerced. No secondary pathway. No override. The 60% thermal
+  gate is the SOLE dispatch mechanism.
 
-CONFIDENCE > STRICT 96.5% THERMAL GATE (v11-strict)
+CONFIDENCE > 60% THERMAL GATE
   The emitted confidence of a directional live signal IS the strict
   multiplicative 10-book confluence score computed on the SAME real liquidity
   cloud (queue position + momentum + volatility pillars) the /predict path
   gates on. Weak/silent tapes honestly report their real low confluence; a
   genuinely strong impulse with a LIVE order-book queue organically crosses
-  96.5% instead of flatlining at the old diluted blend.
+  60% instead of flatlining at the old diluted blend.
 
 ZERO-MOCK GUARANTEES
   • Every input comes from real observed prices/ticks — never fabricated.
   • A neutral tape is allowed to read HOLD (honest), but a genuinely moving
     tape ALWAYS resolves to BUY or SELL from real momentum math.
   • Confidence is GENUINELY continuous over [0, 100]: the number IS the real
-    multiplicative confluence, with the strict 96.5% thermal gate as the ONLY
+    multiplicative confluence, with the 60% thermal gate as the ONLY
     dispatch filter. No artificial floor, no ceiling, no secondary pathway.
 """
 
@@ -88,10 +88,16 @@ from .quant_matrix import (
     compute_market_stress_threshold,
     HIGH_CONFIDENCE_ALERT_THRESHOLD,
     THERMAL_GATE_FLOOR,
+    THERMAL_GATE_CEILING,
 )
 from .book_instruments import (
     evaluate_book_confluence,
     DEFINITIVE_CONFIDENCE_MIN,
+)
+from .signal_gatekeeper import (
+    TIER_LABELS,
+    resolve_tier,
+    is_dispatchable_tier,
 )
 
 logger = structlog.get_logger(__name__)
@@ -120,7 +126,7 @@ _FACTOR_WEIGHTS: Dict[str, float] = {
 }
 
 # Confidence scaling constants (aligned with quant_matrix)
-ALERT_THRESHOLD = DEFINITIVE_CONFIDENCE_MIN  # 96.5% — strict thermal gate
+ALERT_THRESHOLD = HIGH_CONFIDENCE_ALERT_THRESHOLD  # 90% — priority high-confidence toast
 
 
 @dataclass
@@ -201,7 +207,7 @@ def evaluate_live_tick_signal(
     quoted arms when available — they drive the bid_ask_pressure factor.
     ``bid_depth``/``ask_depth`` are the REAL order-book resting liquidity when
     available — they complete the microstructure pillar on the no-volume tick
-    path and lift verified confluence across the 96.5% bar.
+    path and lift verified confluence across the 60% bar.
 
     Raises ValueError only for an empty/invalid series (never fabricates).
     """
@@ -375,13 +381,13 @@ def evaluate_live_tick_signal(
         direction = "BUY" if (sign_tie if sign_tie != 0 else (1 if direction_score >= 0 else -1)) > 0 else "SELL"
     sign = 1.0 if direction == "BUY" else -1.0
 
-    # ── STRICT 96.5% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (v11-strict) ──
-    # USER REQUIREMENT: the dispatch bar is FLAT at 96.5% — STRICTLY no signal
-    # dispatches below it, in any regime. The stress blend (vol expansion,
-    # accelerating velocity, multi-factor coherence, book absorption) is
-    # computed and surfaced as diagnostics only — it NEVER lowers the bar.
-    # Every stress input is the SAME real factor stack / realized ATR read
-    # above.
+    # ── THERMAL GATE (SOLE DISPATCH MECHANISM) ──
+    # The dispatch bar is FLAT at DEFINITIVE_CONFIDENCE_MIN (98%) — STRICTLY no
+    # signal dispatches below it, in any regime. The stress blend (vol
+    # expansion, accelerating velocity, multi-factor coherence, book
+    # absorption) is computed and surfaced as diagnostics only — it NEVER
+    # lowers the bar. Every stress input is the SAME real factor stack /
+    # realized ATR read above.
     dynamic_threshold, market_stress, stress_factors = compute_market_stress_threshold(
         factors,
         atr_expand,
@@ -435,26 +441,27 @@ def evaluate_live_tick_signal(
     total_votes = max(book.active_count, 1)
     magnitude = sum(abs(v) * _FACTOR_WEIGHTS[k] for k, v in factors.items())
 
-    # ── THE STRICT 96.5% THERMAL GATE (SOLE DISPATCH MECHANISM) ──
+    # ── THE THERMAL GATE (SOLE DISPATCH MECHANISM) ──
     # The emitted confidence of a directional LIVE signal IS the strict
     # multiplicative convergence of the ten trading books (geometric-mean
-    # alignment through a logistic sharpener with the flat 96.5% bar — never
-    # below the strict user threshold) — NOT the retired diluted linear
-    # average. A BUY/SELL is emitted ONLY when the volatility (Bollinger/ATR),
-    # momentum (Murphy MACD/RSI/EMA, Donchian, Nison) and microstructure
-    # (Aldridge order-book queue — real bid/ask, else the real tick-position
-    # proxy) pillars ALL clear collectively, and the score SOLIDLY clears the
-    # strict 96.5% bar. Below it the verdict is an honest market-waiting HOLD
-    # that names the failing pillar — never a padded or phased signal. No
-    # secondary pathway, no adaptive floor relax, no override.
+    # alignment through a logistic sharpener with the flat 60% bar — never
+    # below the DEFINITIVE_CONFIDENCE_MIN threshold) — NOT the retired diluted
+    # linear average. A BUY/SELL is emitted ONLY when the volatility
+    # (Bollinger/ATR), momentum (Murphy MACD/RSI/EMA, Donchian, Nison) and
+    # microstructure (Aldridge order-book queue — real bid/ask, else the real
+    # tick-position proxy) pillars ALL clear collectively, and the score
+    # SOLIDLY clears the 60% bar. Below it the verdict is an honest
+    # market-waiting HOLD that names the failing pillar — never a padded or
+    # phased signal. No secondary pathway, no adaptive floor relax, no
+    # override.
     definitive = bool(
         direction in ("BUY", "SELL")
         and conf_score >= dynamic_threshold
-        and confluence_gate == "DEFINITIVE"
+        and is_dispatchable_tier(confluence_gate)
     )
 
     if definitive:
-        # True CALL/PUT — the books have mathematically converged at >=96.5%.
+        # True CALL/PUT — the books have mathematically converged at >=60%.
         # The emitted confidence IS the strict multiplicative book-confluence
         # score. No ceiling, no override, no clipping: the organic UNCLIPPED
         # strength is reported exactly as computed by the logistic sharpener.
@@ -468,9 +475,9 @@ def evaluate_live_tick_signal(
         # sub-thermal directional state.
         confidence = round(float(conf_score), 2)
 
-    # ── STRICT 96.5% THERMAL GATE — EXECUTION FILTER (direction NEVER HOLD) ──
+    # ── THERMAL GATE — EXECUTION FILTER (direction NEVER HOLD) ──
     # A directional verdict is ALWAYS returned (BUY/SELL). When confluence
-    # strictly clears 96.5% the verdict is executable (market_waiting=false)
+    # strictly clears 60% the verdict is executable (market_waiting=false)
     # with the UNCLIPPED real confidence. Sub-thermal attempts keep their true
     # direction and are flagged market_waiting with CONFLUENCE_BELOW_THERMAL so
     # a host never dispatches a low-confidence state — but HOLD is never
@@ -488,8 +495,8 @@ def evaluate_live_tick_signal(
             market_stress=market_stress,
         )
 
-    # ── MARKET-WAITING FLAG (strict 96.5% confluence thermal gate, surfaced to UI) ──
-    # The engine ALWAYS emits a directional signal; below the strict bar the
+    # ── MARKET-WAITING FLAG (60% confluence thermal gate, surfaced to UI) ──
+    # The engine ALWAYS emits a directional signal; below the bar the
     # true direction is kept but flagged market-waiting so the UI renders
     # "converging" instead of dispatching. The state is ALWAYS directional.
     if confidence_gated:
@@ -497,7 +504,7 @@ def evaluate_live_tick_signal(
         waiting_reason = "CONFLUENCE_BELOW_THERMAL"
         waiting_detail = (
             f"Direction {gated_direction} held below thermal: 10-book multiplicative "
-            f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% strict 96.5% "
+            f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% "
             f"thermal gate (market_stress={market_stress:.2f}; gate={confluence_gate}; "
             f"blockers: {', '.join(confluence.get('blockers', [])) or 'none'})"
         )
@@ -539,10 +546,12 @@ def evaluate_live_tick_signal(
         "stress_factors": stress_factors,
         "dispatch_threshold": round(dynamic_threshold, 2),
         "thermal_floor": THERMAL_GATE_FLOOR,
-        "thermal_ceiling": float(DEFINITIVE_CONFIDENCE_MIN),
+        "thermal_ceiling": THERMAL_GATE_CEILING,
         "confluence_threshold": round(dynamic_threshold, 2),
         "confluence_score": round(conf_score, 2),
         "confluence_gate": confluence_gate,
+        "tier": resolve_tier(conf_score / 100.0),
+        "tier_label": TIER_LABELS.get(resolve_tier(conf_score / 100.0), "WEAK"),
         "order_book_verified": bool(confluence.get("order_book_verified", False)),
         "verified_lift": round(float(confluence.get("verified_lift", 0.0)), 4),
         "confidence_gated": confidence_gated,

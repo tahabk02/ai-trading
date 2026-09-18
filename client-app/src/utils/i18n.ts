@@ -15,6 +15,8 @@ export const translations: Record<Lang, Record<string, string>> = {
   en: {
     // Navigation
     liveTerminal: "Live Terminal",
+    marketTerminal: "Market Terminal",
+    proTerminal: "Pro Terminal",
     engineActive: "Engine: ACTIVE",
     engineOffline: "Engine: OFFLINE",
     engineConnecting: "Engine: CONNECTING",
@@ -329,6 +331,8 @@ export const translations: Record<Lang, Record<string, string>> = {
   fr: {
     // Navigation
     liveTerminal: "Terminal en direct",
+    marketTerminal: "Terminal marché",
+    proTerminal: "Terminal Pro",
     engineActive: "Moteur : ACTIF",
     engineOffline: "Moteur : HORS LIGNE",
     engineConnecting: "Moteur : CONNEXION",
@@ -652,6 +656,8 @@ export const translations: Record<Lang, Record<string, string>> = {
   ar: {
     // Navigation
     liveTerminal: "المحطة الحية",
+    marketTerminal: "محطة السوق",
+    proTerminal: "محطة احترافية",
     engineActive: "المحرك: نشط",
     engineOffline: "المحرك: غير متصل",
     engineConnecting: "المحرك: يتصل",
@@ -964,6 +970,8 @@ export const translations: Record<Lang, Record<string, string>> = {
   es: {
     // Navigation
     liveTerminal: "Terminal en vivo",
+    marketTerminal: "Terminal de mercado",
+    proTerminal: "Terminal Pro",
     engineActive: "Motor: ACTIVO",
     engineOffline: "Motor: DESCONECTADO",
     engineConnecting: "Motor: CONECTANDO",

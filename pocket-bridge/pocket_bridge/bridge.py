@@ -28,6 +28,7 @@ from .config import (
     asset_candidates,
     asset_for_symbol,
     asset_type_for_symbol,
+    canonical_active_asset,
     auth_message,
     canonical_symbol,
     load_stored_session,
@@ -192,6 +193,7 @@ class PocketOptionBridge:
         #: server-authoritative asset symbols fetched from active_assets(), or
         #: None if the list could not be loaded (subscribe-error fallback then).
         self._available_assets: Optional[set[str]] = None
+        self._available_asset_records: list[Dict[str, object]] = []
         #: True once the PO client is authenticated AND the authoritative asset
         #: list has been loaded. The relay broadcasts a ``ready`` frame based on
         #: this so the Node backend can safely release its staged subscribes.
@@ -241,6 +243,7 @@ class PocketOptionBridge:
         #: symbols that currently own a reader task (re-arm guard: never spawn
         #: two readers for the same symbol).
         self._reader_symbols: set = set()
+        self._reader_tasks: Dict[str, asyncio.Task] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -274,6 +277,10 @@ class PocketOptionBridge:
         """True once the PO client is authenticated and the authoritative asset
         list is loaded — the relay only signals ``ready`` when this is set."""
         return self._assets_ready
+
+    def available_assets_payload(self) -> list[Dict[str, object]]:
+        """Return the broker-authoritative active asset registry for clients."""
+        return [dict(record) for record in self._available_asset_records]
 
     # Highest-priority optional dependency; used in the clean actionable message
     # emitted when it is missing (never auto-installed, never retried in a loop).
@@ -474,6 +481,19 @@ class PocketOptionBridge:
             for a in active
             if isinstance(a, dict) and a.get("symbol") and a.get("is_active", True)
         }
+        self._available_asset_records = []
+        for raw in sorted(symbols):
+            canonical = canonical_active_asset(str(raw))
+            if not canonical:
+                continue
+            asset_type = asset_type_for_symbol(canonical)
+            self._available_asset_records.append({
+                "symbol": canonical,
+                "name": canonical,
+                "label": f"{canonical}{' OTC' if asset_type == 'otc' else ''}",
+                "assetSubType": asset_type,
+                "type": "crypto" if asset_type == "crypto" else "otc",
+            })
         self._available_assets = symbols or None
         return self._available_assets
 
@@ -879,14 +899,31 @@ class PocketOptionBridge:
         if symbol in self._reader_symbols:
             return None
         task = asyncio.create_task(self._reader_loop(symbol, asset))
+        self._reader_tasks[symbol] = task
         self._reader_symbols.add(symbol)
 
         def _done(_t: asyncio.Task) -> None:
             self._reader_symbols.discard(symbol)
+            self._reader_tasks.pop(symbol, None)
 
         task.add_done_callback(_done)
         self._tasks.append(task)
         return task
+
+    async def request_unsubscription(self, symbol: str) -> None:
+        canonical = canonical_symbol(symbol)
+        if not canonical or canonical not in self._dynamic_symbols:
+            return
+        self._dynamic_symbols.discard(canonical)
+        self._subs.pop(canonical, None)
+        task = self._reader_tasks.get(canonical)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        logger.info("dynamic subscription removed [%s]", canonical)
 
     def _start_static_readers(self) -> None:
         """Spawn reader tasks for the configured startup pairs (idempotent)."""
@@ -954,6 +991,7 @@ class PocketOptionBridge:
         self._subs.clear()
         self._assets_ready = False
         self._available_assets = None
+        self._available_asset_records = []
         self._first_tick.clear()
 
     async def _teardown_client(self) -> None:
@@ -972,6 +1010,7 @@ class PocketOptionBridge:
         self._reader_symbols.clear()
         self._assets_ready = False
         self._available_assets = None
+        self._available_asset_records = []
         if self.client is not None:
             try:
                 await self.client.disconnect()

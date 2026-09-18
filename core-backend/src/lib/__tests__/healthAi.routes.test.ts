@@ -24,9 +24,25 @@ vi.mock("../../services/forexData.service", () => ({
 
 const axiosMock = vi.hoisted(() => ({
   get: vi.fn(),
+  post: vi.fn(),
+  put: vi.fn(),
+  delete: vi.fn(),
+  create: vi.fn(() => ({
+    get: axiosMock.get,
+    post: axiosMock.post,
+    put: axiosMock.put,
+    delete: axiosMock.delete,
+    interceptors: { request: { use: vi.fn() }, response: { use: vi.fn() } },
+  })),
 }));
 vi.mock("axios", () => ({
-  default: { get: axiosMock.get },
+  default: {
+    get: axiosMock.get,
+    post: axiosMock.post,
+    put: axiosMock.put,
+    delete: axiosMock.delete,
+    create: axiosMock.create,
+  },
 }));
 
 import healthRouter from "../../routes/health.routes";

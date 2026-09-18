@@ -1,76 +1,69 @@
-# free_ports.ps1 - free the dev-stack ports from OUR dev processes.
-# Ports: 3000 (client), 4000 (core backend), 8000 (ai-engine), 8788 (bridge WS), 8789 (bridge health).
+# free_ports.ps1 — EADDRINUSE rescue for the trading stack.
 #
-# Docker-family processes (com.docker.backend, wslrelay, ...) are NEVER killed:
-# they belong to Docker Desktop, and killing the backend takes the engine down.
-# Ports still held by them are reported as SKIP (docker-managed) - `docker-compose
-# up --force-recreate` reclaims those bindings on the next recreate.
-# Exit: 0 when nothing non-docker is left on the ports; 1 otherwise.
+# Finds any process bound to the dev ports (3000=frontend, 4000=backend,
+# 8000=ai-engine, 8788/8789=pocket-bridge), kills it, re-verifies, and prints
+# a port/pid/status table. Safe to re-run. Uses netstat (fast, always present)
+# instead of the slow WMI/Get-NetTCPConnection path.
 
-param(
-  [int[]]$Ports = @(3000, 4000, 8000, 8788, 8789),
-  [switch]$NoForce
-)
+$ErrorActionPreference = "Stop"
 
-$ErrorActionPreference = "Continue"
+$ports = @(3000, 4000, 8000, 8788, 8789)
 
-$SkipProcesses = @(
-  "com.docker.backend", "com.docker.build", "com.docker.service",
-  "wslrelay", "vpnkit", "docker", "dockerd", "com.docker.vpnkit", "com.docker.hyperkit"
-)
-
-function Test-PortFree {
-  param([int]$Port)
-  return @(Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue).Count -eq 0
+function Get-PidOnPort($port) {
+    $netstat = netstat -ano -n
+    foreach ($line in $netstat) {
+        if ($line -match "\sTCP\s+\S+:${port}\s+\S+:0?\s+LISTENING\s+(\d+)\s*$") {
+            return [int]$matches[1]
+        }
+    }
+    return $null
 }
 
 $rows = @()
-$conflicts = @()
-
-foreach ($p in $Ports) {
-  $conn = @(Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue)
-  if ($conn.Count -eq 0) {
-    $rows += [pscustomobject]@{ Port = $p; State = "FREE"; Pid = "-"; Process = "-"; Action = "none" }
-    continue
-  }
-  $owners = @($conn | Select-Object -ExpandProperty OwningProcess -Unique)
-  foreach ($procId in $owners) {
-    $name = "-"
-    $alive = $true
-    try { $name = (Get-Process -Id $procId -ErrorAction Stop).ProcessName } catch { $alive = $false }
-    if (-not $alive) {
-      $rows += [pscustomobject]@{ Port = $p; State = "STALE"; Pid = $procId; Process = "(gone)"; Action = "ignored" }
-      continue
-    }
-    if ($SkipProcesses -contains $name) {
-      $rows += [pscustomobject]@{ Port = $p; State = "SKIP"; Pid = $procId; Process = $name; Action = "docker-managed" }
-      continue
-    }
-    $conflicts += $name
-    if ($NoForce) {
-      $rows += [pscustomobject]@{ Port = $p; State = "FOUND"; Pid = $procId; Process = $name; Action = "would kill" }
+foreach ($p in $ports) {
+    $pidOnPort = Get-PidOnPort $p
+    if ($pidOnPort) {
+        $proc = Get-Process -Id $pidOnPort -ErrorAction SilentlyContinue
+        $rows += [PSCustomObject]@{
+            port   = $p
+            pid    = $pidOnPort
+            status = "killing"
+            note   = if ($proc) { $proc.ProcessName } else { "unknown" }
+        }
+        Stop-Process -Id $pidOnPort -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 300
     } else {
-      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-      $rows += [pscustomobject]@{ Port = $p; State = "KILLED"; Pid = $procId; Process = $name; Action = "killed" }
+        $rows += [PSCustomObject]@{
+            port   = $p
+            pid    = $null
+            status = "free"
+            note   = ""
+        }
     }
-  }
 }
 
-$rows | Format-Table -AutoSize | Out-String | Write-Host
-if ($conflicts.Count -gt 0) { Start-Sleep -Milliseconds 800 }
+Start-Sleep -Milliseconds 500
 
-$stillBusy = @()
-foreach ($p in $Ports) {
-  if (-not (Test-PortFree $p)) { $stillBusy += $p }
+foreach ($r in $rows) {
+    if ($r.status -eq "killing") {
+        $still = Get-PidOnPort $r.port
+        if ($still) {
+            $r.status = "STILL LISTENING"
+            $r.note = "pid still alive: $still"
+        } else {
+            $r.status = "free"
+            $r.note = "killed"
+        }
+    }
 }
 
-if ($NoForce) {
-  Write-Host ("[free_ports] inspected only; {0} non-docker process(es) would need a kill on ports {1}" -f $conflicts.Count, ($stillBusy -join ","))
-  exit 1
+Write-Output "PORTS:"
+$rows | Format-Table -AutoSize -Property port, pid, status, note | Out-String | Write-Output
+
+$locked = @($rows | Where-Object { $_.status -ne "free" })
+if ($locked.Count -gt 0) {
+    Write-Error "Cannot free: $($locked.port -join ', '). Re-run as Administrator."
+    exit 1
 }
-if ($stillBusy.Count -gt 0) {
-  Write-Host ("[free_ports] {0} port(s) still busy (docker-managed, will be reclaimed on recreate): {1}" -f $stillBusy.Count, ($stillBusy -join ","))
-  exit 0
-}
-Write-Host "[free_ports] all ports FREE"
+Write-Output "All ports free. Ready to start the stack."
 exit 0

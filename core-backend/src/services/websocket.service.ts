@@ -4,6 +4,18 @@ import { canonicalizeSymbol } from "../utils/symbolFormat";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { realtimeCandleAggregatorService } from "./realtimeCandleAggregator.service";
 
+/**
+ * MARKET TERMINAL ROOM — the dedicated global channel for the all-pairs grid.
+ * A client emits `subscribe_all` to join it. It receives:
+ *   • `market_quotes`  — 1Hz enriched all-symbol quote snapshots
+ *   • `live_quant_signal` — the AI engine's 1Hz micro-quant verdicts, relayed
+ *     from the per-symbol rooms so ONE grid socket watches all 34 pairs
+ * This room deliberately NEVER triggers per-symbol `replayHistory` /
+ * `replayCandleHistory` bursts (34 × 2000-tick replays would flood a fresh
+ * socket) — the terminal bootstraps from `GET /api/v1/quotes` + `market_quotes`.
+ */
+export const MARKET_TERMINAL_ROOM = "market-terminal";
+
 /** Payload contract for the high-confidence (>90%) priority notification. */
 export interface HighConfidenceSignalPayload {
   symbol: string;
@@ -120,15 +132,31 @@ export class WebSocketService {
 
   /**
    * True when at least ONE live client is currently joined to the symbol's room
-   * (e.g. a subscribed chart). Used to throttle expensive per-symbol compute
-   * (the AI Engine's live-quant scorer) to symbols the user is actually
-   * watching — instead of every auto-started pair on boot.
+   * (e.g. a subscribed chart), OR the market terminal is watching ALL symbols.
+   * Used to throttle expensive per-symbol compute (the AI Engine's live-quant
+   * scorer) to symbols the user is actually watching — the grid counts as
+   * watching every pair, so its 34-card session evaluates the full universe.
    */
   public hasActiveSubscribers(symbol: string): boolean {
     const server = this.io;
     if (!server) return false;
     try {
       const room = server.sockets.adapter.rooms.get(symbol);
+      if (room && room.size > 0) return true;
+      return this.hasTerminalWatchers();
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when at least one live client is joined to the MARKET TERMINAL ROOM
+   *  (the all-pairs grid). The 1Hz `market_quotes` broadcaster no-ops without
+   *  one so a silent terminal never burns CPU reading 34 rings. */
+  public hasTerminalWatchers(): boolean {
+    const server = this.io;
+    if (!server) return false;
+    try {
+      const room = server.sockets.adapter.rooms.get(MARKET_TERMINAL_ROOM);
       return !!room && room.size > 0;
     } catch {
       return false;
@@ -438,7 +466,10 @@ export class WebSocketService {
    * the /tick-signal forwarder (liveTickSignal.dispatch). Emitted on the
    * dedicated `live_quant_signal` room event so the 1Hz live scorer never
    * spams the global feed / priority toast channel (both stay reserved for
-   * full /predict signals and REAL >=96.5% DEFINITIVE broadcasts).
+   * full /predict signals and REAL >=60% DEFINITIVE broadcasts).
+   *
+   * MARKET TERMINAL: the same verdict is relayed into the terminal room so the
+   * all-pairs grid sees every pair's live CALL/PUT without joining 34 rooms.
    */
   public broadcastLiveQuantSignal(payload: {
     symbol: string;
@@ -458,6 +489,34 @@ export class WebSocketService {
   }) {
     if (!this.io) return;
     this.io.to(payload.symbol).emit("live_quant_signal", payload);
+    this.io.to(MARKET_TERMINAL_ROOM).emit("live_quant_signal", payload);
+  }
+
+  /**
+   * MARKET QUOTES BROADCAST — 1Hz all-pairs quote snapshots (price / spread /
+   * tick count / freshness + instrument metadata) streamed ONLY to the market
+   * terminal room. This is the grid's single live quotation channel; it is
+   * deliberately lightweight (one compact frame, ~34 entries) and skips the
+   * per-symbol replay/re-subscribe machinery entirely.
+   */
+  public broadcastMarketQuotes(quotes: unknown): void {
+    if (!this.io) return;
+    this.io.to(MARKET_TERMINAL_ROOM).emit("market_quotes", {
+      quotes,
+      count: Array.isArray(quotes) ? quotes.length : 0,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /** Targeted twin of broadcastMarketQuotes — seeds a freshly joined terminal
+   *  socket with an immediate snapshot so the grid paints real prices before
+   *  the first 1Hz beat arrives. Emitted only to the calling socket. */
+  public replayMarketQuotes(socket: Socket, quotes: unknown): void {
+    socket.emit("market_quotes", {
+      quotes,
+      count: Array.isArray(quotes) ? quotes.length : 0,
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 

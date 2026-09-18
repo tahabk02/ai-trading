@@ -1,21 +1,21 @@
 """
-test_endpoint_mixed.py — END-TO-END /predict VERIFICATION OF THE 96.5% THERMAL GATE
+test_endpoint_mixed.py — END-TO-END /predict VERIFICATION OF THE 98% THERMAL GATE
 
 Boots the FastAPI app in-process (TestClient) and fires REAL requests at
 POST /api/v1/predict across multiple symbols and horizons, asserting:
 
   1. Healthy mixed arbitration THROUGH the full API: a fully-converged uptrend
-     (v10 two-factor confluence) ORGANICALLY CLEARS the 96.5% gate and
+     (v10 two-factor confluence) ORGANICALLY CLEARS the 98% gate and
      dispatches BUY even without a live order book — the microstructure queue
      falls back to the honest REAL tick-position proxy — while a sub-thermal
      downtrend gates to the OPPOSITE attempt (diagnostics.gated_direction
      SELL), never two identical directions.
-  2. The strict 96.5% confluence gate: any directional attempt whose
+  2. The strict 98% confluence gate: any directional attempt whose
      convergence index (agreement × magnitude through the canonical logistic)
      is below DEFINITIVE_CONFIDENCE_MIN KEEPS its true BUY/SELL direction and
      becomes an honest market-waiting signal:
      signal=<true direction>, waiting_reason=CONFLUENCE_BELOW_THERMAL,
-     market_waiting=True, confidence == the REAL confluence score (< 96.5),
+     market_waiting=True, confidence == the REAL confluence score (< 98),
      gate=INSUFFICIENT, high_confidence_alert=False, and the waiting target is
      the REAL directional projection (SELL → below current, never a bogus
      reversed projection).
@@ -120,8 +120,8 @@ def assert_gated_waiting(d, failures, tag):
     if d.get("high_confidence_alert"):
         failures.append(f"{tag}: gated market-waiting signal must never fire the alert")
     conf = float(d.get("confidence", 0))
-    if not (0.0 <= conf < 96.5):
-        failures.append(f"{tag}: gated confidence {conf} outside [0, 96.5)")
+    if not (0.0 <= conf < 98):
+        failures.append(f"{tag}: gated confidence {conf} outside [0, 98)")
     # The confidence the client sees IS the authoritative confluence number.
     bc = d.get("book_confluence", {})
     cs = float((bc.get("confluence") or {}).get("score", -1))
@@ -218,7 +218,7 @@ def main():
     else:
         # v10: this tape is FULLY CONVERGED (all three pillars live — the
         # microstructure queue uses the real tick-position proxy when the API
-        # call carries no order book) so it ORGANICALLY CLEARS 96.5% and
+        # call carries no order book) so it ORGANICALLY CLEARS 98% and
         # dispatches BUY, ending the old permanent "no-book => always HOLD".
         diag1 = d1.get("diagnostics", {})
         if d1.get("signal") != "BUY":
@@ -284,7 +284,7 @@ def main():
                 f"BUY at every horizon"
             )
         elif float(dd.get("confidence", 0)) < DEFINITIVE_CONFIDENCE_MIN:
-            failures.append(f"USD/JPY {tf} confidence {dd.get('confidence')} below 96.5%")
+            failures.append(f"USD/JPY {tf} confidence {dd.get('confidence')} below 98%")
         elif dd.get("waiting_reason") is not None:
             failures.append(f"USD/JPY {tf} dispatched but waiting_reason={dd.get('waiting_reason')}")
         if dist <= 1e-9:
@@ -312,10 +312,10 @@ def main():
     if '"signal": "BUY"' in body_str or '"signal":"BUY"' in body_str:
         failures.append("Error response contains a fabricated BUY signal!")
 
-    # ── TEST D: DEFINITIVE 96.5% EMISSION THROUGH THE FULL API ──
+    # ── TEST D: DEFINITIVE 98% EMISSION THROUGH THE FULL API ──
     # The same fully-converged tape, forwarded WITH a live order book — the
     # mandatory microstructure pillar converges, the confluence gate fires
-    # DEFINITIVE (≥96.5), the alert trips, and the emitted confidence equals
+    # DEFINITIVE (≥98), the alert trips, and the emitted confidence equals
     # the confluence score (the ML corroborator enrichs diagnostics.ml only).
     pc, pspot, pbid, pask = scenario_perfect_confluence()
     rd = client.post("/api/v1/predict", json={
@@ -336,8 +336,8 @@ def main():
     else:
         if dd.get("signal") != "BUY":
             failures.append(f"Definitive tape returned {dd.get('signal')}, expected BUY")
-        if float(dd.get("confidence", 0)) < 96.5:
-            failures.append(f"Definitive confidence {dd.get('confidence')} below the 96.5% gate")
+        if float(dd.get("confidence", 0)) < 98:
+            failures.append(f"Definitive confidence {dd.get('confidence')} below the 98% gate")
         if not dd.get("high_confidence_alert"):
             failures.append("Definitive BUY through the API must fire the alert")
         if dd.get("market_waiting") or dd.get("waiting_reason"):
@@ -362,12 +362,12 @@ def main():
         sys.exit(1)
     else:
         print("ALL ENDPOINT TESTS PASSED  (mixed arbitration through the "
-              "full API — fully-converged trend clears 96.5% + dispatches BUY "
+              "full API — fully-converged trend clears 98% + dispatches BUY "
               "via the real tick-position proxy, sub-thermal attempt gates to "
-              "the opposite gated_direction, strict 96.5% confluence gate + "
+              "the opposite gated_direction, strict 98% confluence gate + "
               "CONFLUENCE_BELOW_THERMAL market-waiting, confidence == "
               "book_confluence.confluence.score, √horizon target scaling, "
-              "DEFINITIVE 96.5% emission with ML corroboration, clean errors "
+              "DEFINITIVE 98% emission with ML corroboration, clean errors "
               "on bad input)")
 
 

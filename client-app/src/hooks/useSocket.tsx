@@ -10,7 +10,8 @@ import React, {
   ReactNode,
 } from "react";
 import { io, Socket, ManagerOptions, SocketOptions } from "socket.io-client";
-import { getWsUrl } from "@/utils/getBaseUrl";
+import { logDebounced503 } from "@/lib/logDebouncer";
+import { WS_URL, API_URL } from "@/lib/env";
 
 export type SocketConnectionStatus =
   | "connecting"
@@ -34,60 +35,68 @@ interface SocketContextType {
   reconnectAttempt: number;
   /** Last transport error message (e.g. "websocket error / ERR_CONNECTION_REFUSED"). */
   lastError: string | null;
-  /** True when the transport fell back to the same-origin socket.io rewrite. */
-  usingFallbackUrl: boolean;
 }
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
 
+// ── BACKEND URL RESOLUTION (env-driven, NEVER window.location.origin) ──
+// The socket MUST connect to the backend (port 4000), never to the Next.js
+// origin. Priority (values come from src/lib/env.ts, inlined at build time —
+// `process` is never referenced in this client module):
+//   1. WS_URL   — the explicit WebSocket/backend tunnel host.
+//   2. API_URL  — same backend; a trailing "/api/v1" base is normalized away
+//                 so the socket.io handshake hits "/socket.io" on the origin
+//                 (never ".../api/v1/socket.io/...").
+//   3. http://localhost:4000 — safe loopback fallback.
+// window.location.origin is deliberately UNUSED: the Next.js frontend lives on
+// a different port/tunnel (e.g. :3001 devtunnel) whose origin would 404 the
+// socket.io handshake.
+function envWsBase(): string | null {
+  return urlToWsBase(WS_URL || API_URL);
+}
+
+/** Strip a trailing "/api/v1" (and any slashes) so a WS origin never points at
+ *  a scoped API path. Returns a bare origin or null. */
+function urlToWsBase(raw: string | undefined): string | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  let value = raw.trim().replace(/\/+$/, "");
+  if (value.endsWith("/api/v1")) value = value.slice(0, -"/api/v1".length);
+  try {
+    const u = new URL(value);
+    return u.origin;
+  } catch {
+    return value;
+  }
+}
+
+const getBackendUrl = (): string => envWsBase() ?? "http://localhost:4000";
+
 // ── CONNECTION ROBUSTNESS CONFIG ──
-//
-// PRIMARY endpoint = env-resolved backend URL (development `.env.local` forces
-//   http://localhost:4000 → ws://localhost:4000/socket.io; expected).
-// FALLBACK endpoint = "/" → same-origin Socket.IO — Next.js `/socket.io/:path*`
-//   rewrite proxies to the backend. This is the graceful escape hatch when the
-//   DIRECT ws:// to :4000 is refused (backend briefly down, firewall, mixed
-//   content, Dev Tunnel CSP) while the Next server is still serving the page.
-//
-//   - After FALLBACK_AFTER_FAILURES consecutive `connect_error`s the provider
-//     rebinds ONCE to the fallback endpoint (socket.io's own exponential
-//     backoff already throttles direct-endpoint retries in the meantime).
-//   - When the fallback CONNECTS, a PRIMARY_RETRY_MS probe rebinds back to the
-//     preferred direct endpoint so a recovered backend is reclaimed
-//     automatically (if still down it fails once more and falls back again).
-const FALLBACK_AFTER_FAILURES = 3;
 const PRIMARY_RETRY_MS = 60_000;
-/** Throttle console.warn so a refused backend never spams the devtools log —
- *  one warn every 2s per reconnect storm (MASTER MISSION part 2). */
+/** Throttle console.warn so a refused backend never spams the devtools log. */
 const WARN_THROTTLE_MS = 2_000;
 
 const SOCKET_OPTS: Partial<ManagerOptions & SocketOptions> = {
-  // websocket-first with polling fallback handshake (same as before)
-  transports: ["websocket", "polling"],
+  path: "/socket.io",
+  transports: ["websocket"],
+  upgrade: false,
   autoConnect: true,
-  // ── EXPONENTIAL BACKOFF, NOT SPAM ──
-  // socket.io-client doubles reconnectionDelay per failure, capped at
-  // reconnectionDelayMax (1s → 10s randomized). A longer base + lower cap keep
-  // the reconnect machine gentle under sustained outages while the transport
-  // still reclaims a recovered backend within seconds.
+  withCredentials: true,
   reconnection: true,
-  reconnectionAttempts: Infinity, // never give up — live ticks are mandatory
+  reconnectionAttempts: Infinity,
   reconnectionDelay: 1_000,
   reconnectionDelayMax: 10_000,
   randomizationFactor: 0.4,
-  timeout: 10_000,
+  timeout: 15_000,
 };
 
-// ── MODULE-LEVEL SINGLETON PER ENDPOINT (Fast-Refresh / remount friendly) ──
-// Keeps one cached Socket tagged with the endpoint it was created for, so a
-// fallback rebind tears down the old transport and swaps cleanly.
+// ── MODULE-LEVEL SINGLETON (Fast-Refresh / remount friendly) ──
 let globalSocket: Socket | null = null;
 let globalEndpoint: string | null = null;
 
 function connectEndpoint(endpoint: string): Socket {
   if (globalSocket && globalEndpoint === endpoint) return globalSocket;
   if (globalSocket) {
-    // Swapping endpoints — tear the old transport down cleanly first.
     globalSocket.removeAllListeners();
     globalSocket.disconnect();
     globalSocket = null;
@@ -97,43 +106,24 @@ function connectEndpoint(endpoint: string): Socket {
   return globalSocket;
 }
 
-/**
- * SINGLETON Socket.IO socket bound to the RESOLVED backend URL with automatic
- * fallback + exponential backoff + throttled diagnostics.
- *
- * URL resolution (getWsUrl):
- *   - localhost dev      → NEXT_PUBLIC_WS_URL (http://localhost:4000)
- *   - Dev Tunnels/remote → same-origin "/" (Next.js rewrite proxies
- *                          /socket.io/* to the backend — no hardcoded host).
- *   - Production hosts   → ws(s)://<hostname>:4000
- */
 export const SocketProvider: React.FC<{ children: ReactNode }> = ({
   children,
 }) => {
   const [socket, setSocket] = useState<Socket | null>(() => {
-    // Lazily create the singleton on first render. NEVER on the server: SSR
-    // would construct a real socket.io manager on the Node side and burn
-    // connections during build/SSR — the client re-hydrates with its own.
     if (typeof window === "undefined") return null;
-    return connectEndpoint(getWsUrl());
+    return connectEndpoint(getBackendUrl());
   });
   const [status, setStatus] = useState<SocketConnectionStatus>("connecting");
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [lastError, setLastError] = useState<string | null>(null);
-  const [usingFallbackUrl, setUsingFallbackUrl] = useState(false);
 
-  // Latest instance + endpoint so the runtime rebind can target the CURRENT
-  // transport without creating a circular useCallback dependency.
   const socketRef = useRef<Socket | null>(null);
   socketRef.current = socket;
-  const endpointRef = useRef<string>(getWsUrl());
-  const failureCountRef = useRef(0);
+  const endpointRef = useRef<string>(getBackendUrl());
   const lastWarnAtRef = useRef(0);
   const primaryRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  // Holds the LATEST rebind implementation; attach() reads it at runtime.
-  const rebindRef = useRef<(endpoint: string) => void>(() => {});
 
   const clearPrimaryRetryTimer = useCallback(() => {
     if (primaryRetryTimerRef.current) {
@@ -142,23 +132,19 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
     }
   }, []);
 
-  const throttledWarn = useCallback(
-    (msg: string, detail: unknown) => {
-      const now = Date.now();
-      if (now - lastWarnAtRef.current >= WARN_THROTTLE_MS) {
-        lastWarnAtRef.current = now;
-        console.warn(msg, detail);
-      } else {
-        console.debug(msg, detail);
-      }
-    },
-    [],
-  );
+  const throttledWarn = useCallback((msg: string, detail: unknown) => {
+    const now = Date.now();
+    if (now - lastWarnAtRef.current >= WARN_THROTTLE_MS) {
+      lastWarnAtRef.current = now;
+      console.warn(msg, detail);
+    } else {
+      console.debug(msg, detail);
+    }
+  }, []);
 
   const attach = useCallback(
     (instance: Socket) => {
       const onConnect = () => {
-        failureCountRef.current = 0;
         clearPrimaryRetryTimer();
         setReconnectAttempt(0);
         setLastError(null);
@@ -166,20 +152,9 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
         console.info("[SocketProvider] Connected:", instance.id, {
           endpoint: endpointRef.current,
         });
-
-        // Landed on the fallback → probe back to the preferred direct
-        // endpoint so a recovered backend is reclaimed automatically.
-        if (endpointRef.current !== getWsUrl()) {
-          clearPrimaryRetryTimer();
-          primaryRetryTimerRef.current = setTimeout(() => {
-            primaryRetryTimerRef.current = null;
-            rebindRef.current(getWsUrl());
-          }, PRIMARY_RETRY_MS);
-        }
       };
 
       const onDisconnect = (reason: string) => {
-        // "io client disconnect" is an intentional local close (we initiated).
         setStatus(
           reason === "io client disconnect" ? "disconnected" : "reconnecting",
         );
@@ -187,29 +162,26 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
       };
 
       const onConnectError = (err: Error) => {
-        failureCountRef.current += 1;
-        const attempt = failureCountRef.current;
-        setReconnectAttempt(attempt);
-        setStatus(attempt > 1 ? "reconnecting" : "connecting");
+        setReconnectAttempt((prev) => prev + 1);
+        setStatus("reconnecting");
         const msg = err?.message ?? "Socket connection failed";
         setLastError(msg);
-        // Throttle to one warn / WARN_THROTTLE_MS — a refused backend must NOT
-        // spam ERR_CONNECTION_REFUSED warnings for every backoff retry.
-        throttledWarn("[SocketProvider] Connection error:", msg);
-
-        // Fallback once per failure run (never rebind in a tight loop):
-        // direct endpoint → same-origin rewrite after repeated refusals.
-        if (
-          attempt >= FALLBACK_AFTER_FAILURES &&
-          endpointRef.current === getWsUrl()
-        ) {
-          rebindRef.current("/");
+        // 503-class transport failures (polling handshake refused while the
+        // backend recovers) go through the debounced 503 gate: first warn,
+        // silent for 10s, re-warn on a new incident.
+        if (/503|Service Unavailable/i.test(msg)) {
+          logDebounced503("[SocketProvider] Connection 503:", msg);
+        } else {
+          throttledWarn("[SocketProvider] Connection error:", msg);
         }
       };
 
-      // Socket.IO fires this for manager-level errors too (polling 4xx / 5xx).
       const onIoError = (err: Error) => {
-        throttledWarn("[SocketProvider] Transport error:", err?.message);
+        if (/503|Service Unavailable/i.test(err?.message ?? "")) {
+          logDebounced503("[SocketProvider] Transport 503:", err?.message);
+        } else {
+          throttledWarn("[SocketProvider] Transport error:", err?.message);
+        }
       };
 
       instance.on("connect", onConnect);
@@ -217,9 +189,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
       instance.on("connect_error", onConnectError);
       instance.on("error", onIoError);
 
-      // Already connected (e.g. re-attach after Fast Refresh reuse).
       if (instance.connected) {
-        failureCountRef.current = 0;
         clearPrimaryRetryTimer();
         setReconnectAttempt(0);
         setLastError(null);
@@ -229,33 +199,13 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
     [clearPrimaryRetryTimer, throttledWarn],
   );
 
-  // Rebind implementation (kept in a ref to avoid a useCallback cycle).
-  rebindRef.current = (endpoint: string) => {
-    const current = socketRef.current;
-    if (current) {
-      current.removeAllListeners();
-    }
-    const next = connectEndpoint(endpoint);
-    endpointRef.current = endpoint;
-    setUsingFallbackUrl(endpoint !== getWsUrl());
-    setStatus("connecting");
-    setSocket(next);
-    attach(next);
-  };
-
   useEffect(() => {
-    // Mount: attach to the already-created singleton (lazily created above).
-    // On SSR there is no socket — the browser re-hydrates and re-runs this and
-    // the lazy initializer above on the client.
     if (socketRef.current) {
       attach(socketRef.current);
     }
 
     return () => {
       clearPrimaryRetryTimer();
-      // Detach listeners but KEEP the singleton transport alive so Fast
-      // Refresh, layout re-renders and future mounts reuse one live connection
-      // instead of churning sockets + re-arming the handshake each time.
       const current = socketRef.current;
       if (current) {
         current.removeAllListeners();
@@ -273,7 +223,6 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
         status,
         reconnectAttempt,
         lastError,
-        usingFallbackUrl,
       }}
     >
       {children}

@@ -80,10 +80,7 @@ export class RedisSubscriber {
   private async tryRedis(maxAttempts: number): Promise<void> {
     const { Redis } = await import("ioredis");
 
-    const redis = new Redis({
-      host: secrets.REDIS_HOST,
-      port: secrets.REDIS_PORT,
-      password: secrets.REDIS_PASSWORD || undefined,
+    const options = {
       maxRetriesPerRequest: 1, // each command only retries once
       retryStrategy: (times: number) => {
         if (times >= maxAttempts) {
@@ -98,7 +95,16 @@ export class RedisSubscriber {
       enableReadyCheck: true,
       lazyConnect: true,
       connectTimeout: 5_000, // fail fast if host is unreachable
-    });
+    };
+
+    const redis = secrets.REDIS_URL
+      ? new Redis(secrets.REDIS_URL, options)
+      : new Redis({
+          host: secrets.REDIS_HOST,
+          port: secrets.REDIS_PORT,
+          password: secrets.REDIS_PASSWORD || undefined,
+          ...options,
+        });
 
     // Silence individual Redis error events to prevent log spam
     redis.on("error", () => {

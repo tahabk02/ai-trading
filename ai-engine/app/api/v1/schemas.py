@@ -170,6 +170,26 @@ class PredictRequest(BaseModel):
         default=False,
         description="Force retrain the ML model",
     )
+    horizon_minutes: Optional[int] = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description=(
+            "Target-expiry horizon in minutes (1m, 2m, 3m, 5m, 10m). Drives the "
+            "rolling trend-momentum feature window, the stabilized CALL/PUT "
+            "contract and the expiry timestamp. Snap-resolved by the horizon engine."
+        ),
+    )
+    factor_inputs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "0.98 ensemble watershed window: {timeframes: {tf: {close/high/low/volume}}, "
+            "atr, price, volume, volume_sma20, buy_volume, sell_volume}. When a real "
+            "multi-timeframe window is supplied, the five-factor quality gate is ENFORCED "
+            "(mtf/momentum/volatility/volume/pressure must weighted-score >= 0.98 before a "
+            "signal is released). Absent = latency window (quality reported None honestly)."
+        ),
+    )
 
     @field_validator("symbol")
     @classmethod

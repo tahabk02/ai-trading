@@ -33,10 +33,10 @@ import { useTradingStore } from "@/store/useTradingStore";
 import { cn } from "@/utils/cn";
 import { formatPairPrice } from "@/utils/format";
 
-/** PRODUCTION THRESHOLD — mirrors the v10 AI Engine DEFINITIVE 96.5% thermal
+/** PRODUCTION THRESHOLD — mirrors the v12 AI Engine DEFINITIVE 98% thermal
  *  gate; a signal is priority-alerted only when all ten books organically
  *  converge to an actionable CALL/PUT at or above this confidence. */
-const HIGH_CONFIDENCE_THRESHOLD = 96.5;
+const HIGH_CONFIDENCE_THRESHOLD = 98.0;
 
 interface HighConfidenceSignal {
   id: string;

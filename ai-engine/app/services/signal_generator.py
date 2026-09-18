@@ -7,7 +7,7 @@ Root-cause fixes for the "ALL-CALL @ static 75%" production failure:
      a neutral confluence never maps to HOLD; an exactly-zero weighted score is
      tied deterministically through the freshest REAL micro factor.
   2. DYNAMIC UNCLIPPED CONFIDENCE [0, 100+]: pure monotonic mapping of real
-     multi-factor strength; when confluence strictly clears 96.5% the emitted
+     multi-factor strength; when confluence strictly clears 98% the emitted
      score IS the raw unclipped strength (never floored, never capped).
   3. HIGH-CONFIDENCE ALERT FLAG: ``high_confidence_alert`` is True when
      confidence exceeds 90% so downstream systems can trigger priority
@@ -17,6 +17,10 @@ Root-cause fixes for the "ALL-CALL @ static 75%" production failure:
   5. NEVER HOLD: the signal state is ALWAYS directional — a below-thermal
      verdict keeps its true SUPÉRIEUR/ACHAT or INFÉRIEUR/VENTE direction and
      is only flagged ``market_waiting`` (CONFLUENCE_BELOW_THERMAL).
+  6. 0.98 QUALITY WATERSHED (quality_gate.py): when a real multi-factor
+     window (timeframes / ATR / volume / tick pressure) is supplied the
+     five-factor ensemble must ALSO score >= 0.98 before emission — signal
+     and confidence collapse to null when it doesn't (direction still kept).
 
 Layer 1: Market Regime via ADX(14)   → context, never a direction vote
 Layer 2: Volatility / news barrier   → freeze on anomalous expansion
@@ -38,8 +42,11 @@ from .quant_matrix import (
     symbol_price_digits,
     HIGH_CONFIDENCE_ALERT_THRESHOLD,
 )
+from .financial_analysis import FinancialAnalysisService
 
 from app.core.config import settings
+from .quality_gate import apply_quality_gate
+from .signal_gatekeeper import resolve_tier, TIER_LABELS, MIN_EXECUTABLE_TIER
 
 logger = structlog.get_logger(__name__)
 
@@ -68,7 +75,7 @@ class SignalGenerator:
     Layer 3: Unbiased quant momentum matrix.
       - Direction ALWAYS resolved BUY/SELL (never HOLD) from REAL factors
         with a strict zero-tie policy.
-      - Confidence is the dynamic UNCLIPPED confluence score — 96.5%+ when
+      - Confidence is the dynamic UNCLIPPED confluence score — 98%+ when
         the strict thermal gate passes (SUPÉRIEUR/ACHAT | INFÉRIEUR/VENTE).
     """
 
@@ -156,7 +163,7 @@ class SignalGenerator:
 
         # The quant matrix ALWAYS resolves BUY/SELL (never HOLD). Keep the true
         # directional verdict and attach the honest confidence plus the strict
-        # 96.5% thermal-gate market_waiting flag from diagnostics. The signal
+        # 98% thermal-gate market_waiting flag from diagnostics. The signal
         # state is ALWAYS directional — SUPÉRIEUR/ACHAT or INFÉRIEUR/VENTE.
         direction = verdict.direction
         diagnostics = verdict.diagnostics or {}
@@ -175,10 +182,56 @@ class SignalGenerator:
                 f"threshold {self.threshold_percent:.2f}%"
             )
 
+        # ── 0.98 QUALITY WATERSHED (Part 2.3/2.4) ──
+        # When a real multi-factor window is provided by the caller the
+        # five-factor ensemble (mtf/momentum/volatility/volume/pressure) must
+        # collectively reach >= 0.98 before a signal is released. Below it the
+        # directional verdict is KEPT but signal collapses to null.
+        quality = None
+        quality_factors = None
+        quality_reason = None
+        factor_inputs = data.get("factor_inputs")
+        if factor_inputs:
+            qq = apply_quality_gate(direction, confidence, factor_inputs)
+            quality = qq.get("quality")
+            quality_factors = qq.get("factors")
+            quality_reason = qq.get("reason")
+            if qq.get("signal") is None:
+                signal_type = None
+                market_waiting = True
+                waiting_reason = "QUALITY_BELOW_GATE"
+                waiting_detail = (
+                    f"NO SIGNAL — quality {quality:.4f} < watershed "
+                    f"{qq.get('gate', 0.98):.4f} ({quality_reason})"
+                )
+
         entry = last_close
         digits = symbol_price_digits(symbol)
 
         stop_loss, take_profit = self._atr_stops(direction, entry, atr)
+
+        # ── UNIFIED FINANCIAL ANALYSIS (multi-tier enrichment) ──
+        # Fold the already-resolved direction/confidence through the shared
+        # financial-analysis pipeline so the payload carries the honest tier
+        # ladder (T1 PREMIUM … T5 WEAK) plus the 10-book confluence gate.
+        # This is additive — the gates above remain the emission authority;
+        # a failure here must never fabricate a tier, so it degrades to the
+        # plain confidence-based tier.
+        analysis = None
+        try:
+            analysis = FinancialAnalysisService().analyze(
+                symbol=symbol,
+                candles=candles,
+                live_price=live_price,
+                timeframe=str(data.get("timeframe", "1d")),
+                direction=direction,
+                confidence=confidence,
+            )
+        except Exception:  # noqa: BLE001 — enrichment must not fabricate
+            analysis = None
+
+        resolved_tier = analysis.tier if analysis is not None else resolve_tier(confidence)
+        resolved_label = analysis.tier_label if analysis is not None else TIER_LABELS.get(resolved_tier, "WEAK")
 
         payload = {
             "symbol": symbol,
@@ -186,10 +239,19 @@ class SignalGenerator:
             "signal_type": signal_type,
             "price": round(entry, digits),
             "confidence": confidence,
+            "tier": resolved_tier,
+            "tier_label": resolved_label,
             "high_confidence_alert": verdict.high_confidence_alert and signal_type is not None,
             "market_waiting": market_waiting,
             "waiting_reason": waiting_reason,
             "waiting_detail": waiting_detail,
+            "quality": quality,
+            "factors": quality_factors,
+            "quality_reason": quality_reason,
+            "book_confluence": (
+                {"gate": analysis.book_gate, "score": round(analysis.book_score, 4)}
+                if analysis is not None else None
+            ),
             "stop_loss": round(stop_loss, digits),
             "take_profit": round(take_profit, digits),
             "indicators": {
@@ -242,6 +304,7 @@ def generate_unbiased_prediction(
     candles: list,
     live_price: Optional[float],
     timeframe: str = "1d",
+    factor_inputs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Standalone unbiased prediction used by the /predict fallback chain.
 
@@ -249,7 +312,9 @@ def generate_unbiased_prediction(
       • direction ALWAYS resolved by the zero-tie quant matrix (BUY | SELL —
         never HOLD)
       • genuine dynamic UNCLIPPED confidence in [0, 100+] (raw strength %)
-      • high_confidence_alert flag when > 96.5%
+      • high_confidence_alert flag when > 90%
+      • quality/factors/reason from the 0.98 ensemble watershed when a real
+        multi-factor window is supplied (otherwise quality=None — honest)
       • √horizon-scaled ATR target projection (1m → 10 days)
 
     Raises:
@@ -294,19 +359,32 @@ def generate_unbiased_prediction(
         else 0.0
     )
 
+    # ── 0.98 QUALITY WATERSHED (Part 2.3/2.4) ──
+    quality = None
+    quality_factors = None
+    quality_reason = None
+    emitted_on_quality = True
+    if factor_inputs:
+        qq = apply_quality_gate(verdict.direction, float(verdict.confidence), factor_inputs)
+        quality = qq.get("quality")
+        quality_factors = qq.get("factors")
+        quality_reason = qq.get("reason")
+        emitted_on_quality = qq.get("signal") is not None
+
+    conf_pct = (
+        float(settings.CONFIDENCE_THRESHOLD)
+        if float(settings.CONFIDENCE_THRESHOLD) > 1
+        else float(settings.CONFIDENCE_THRESHOLD) * 100
+    )
+    tier = resolve_tier(float(verdict.confidence))
+
     return {
         "symbol": symbol,
-        "signal": verdict.direction if float(verdict.confidence) >= (
-            float(settings.CONFIDENCE_THRESHOLD)
-            if float(settings.CONFIDENCE_THRESHOLD) > 1
-            else float(settings.CONFIDENCE_THRESHOLD) * 100
-        ) else None,
+        "signal": verdict.direction if float(verdict.confidence) >= conf_pct else None,
         "confidence": float(verdict.confidence),
-        "high_confidence_alert": verdict.high_confidence_alert and float(verdict.confidence) >= (
-            float(settings.CONFIDENCE_THRESHOLD)
-            if float(settings.CONFIDENCE_THRESHOLD) > 1
-            else float(settings.CONFIDENCE_THRESHOLD) * 100
-        ),
+        "tier": tier,
+        "tier_label": TIER_LABELS.get(tier, "WEAK"),
+        "high_confidence_alert": verdict.high_confidence_alert and float(verdict.confidence) >= conf_pct,
         "target_price": target_price,
         "current_price": round(current_price, digits),
         "atr": round(atr_now, 8),
@@ -321,6 +399,10 @@ def generate_unbiased_prediction(
         "model_accuracy": round(
             max(0.0, min(float(verdict.diagnostics.get("agreement", 0.0)), 1.0)), 4
         ),
+        "quality": quality,
+        "factors": quality_factors,
+        "quality_reason": quality_reason,
+        "quality_watershed_blocked": not emitted_on_quality,
         "timeframe": timeframe,
         "delta_pct": delta_pct,
         "indicators": {

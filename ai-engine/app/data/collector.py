@@ -1,9 +1,12 @@
 import asyncio
 import math
+import time
 import httpx
 import structlog
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
+
+from ..core.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -441,4 +444,105 @@ class MarketDataCollector:
         }
 
     async def close(self):
+        await self.client.aclose()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ASSETHISTORY 60s UPSERT JOB (Alpha.5 Pro, Part 6.3)
+# ═══════════════════════════════════════════════════════════════════
+# Every 60 seconds the ai-engine pushes ONE real 1-minute AssetHistory bar
+# per whitelisted symbol (open=high=low=close = the REAL observed live rate,
+# tick_count=1) to the core-backend /history/ingest store. This reconciles the
+# same (symbol, timeframe, bucketStartMs) key the core tape collector writes —
+# idempotent, 100% real observed prices, ZERO fabrication. A bar is only ever
+# emitted when a genuine live rate is available.
+ASSET_HISTORY_UPSERT_INTERVAL_SECONDS = 60.0
+ASSET_HISTORY_WINDOW_LABEL = "30m"
+ASSET_HISTORY_TIMEFRAME = "1m"
+
+
+class AssetHistoryUpsertJob:
+    """Periodic ai-engine-side AssetHistory reconciliation job."""
+
+    def __init__(self, collector: MarketDataCollector):
+        self.collector = collector
+        self.backend_url = settings.BACKEND_API_URL.rstrip("/")
+        self.client = httpx.AsyncClient(timeout=10.0)
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+
+    @staticmethod
+    def minute_bucket_ms(now_ms: float) -> int:
+        return int(now_ms // 60000 * 60000)
+
+    async def _post_bars(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        resp = await self.client.post(f"{self.backend_url}/history/ingest", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def run_once(self) -> int:
+        total = 0
+        bucket_ms = self.minute_bucket_ms(time.time() * 1000.0)
+        for symbol in sorted(OTC_SET):
+            try:
+                price = await self.collector.fetch_live_spot(symbol)
+            except Exception as e:
+                logger.warning("[AssetHistory] live spot failed", symbol=symbol, error=str(e))
+                continue
+            if not price or price <= 0 or not math.isfinite(price):
+                continue  # no real rate → no row (never fabricate)
+
+            payload = {
+                "symbol": symbol,
+                "timeframe": ASSET_HISTORY_TIMEFRAME,
+                "bars": [
+                    {
+                        "bucketStartMs": bucket_ms,
+                        "open": round(price, 6),
+                        "high": round(price, 6),
+                        "low": round(price, 6),
+                        "close": round(price, 6),
+                        "volume": None,
+                        "tickCount": 1,
+                    }
+                ],
+            }
+            try:
+                result = await self._post_bars(payload)
+                upserted = int(result.get("ingested", 0))
+            except Exception as e:
+                logger.warning("[AssetHistory] upsert failed", symbol=symbol, error=str(e))
+                continue
+            total += upserted
+            logger.info(
+                "AssetHistory upserted",
+                symbol=symbol,
+                bars=upserted,
+                window=ASSET_HISTORY_WINDOW_LABEL,
+            )
+        return total
+
+    async def run_forever(self) -> None:
+        self._running = True
+        while self._running:
+            try:
+                await self.run_once()
+            except Exception as e:
+                logger.warning("[AssetHistory] job pass failed", error=str(e))
+            await asyncio.sleep(ASSET_HISTORY_UPSERT_INTERVAL_SECONDS)
+
+    def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self.run_forever())
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
         await self.client.aclose()

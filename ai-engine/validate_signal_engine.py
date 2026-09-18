@@ -2,14 +2,14 @@
 validate_signal_engine.py — Python-side proof harness for the AI engine.
 
 Runs the REAL `evaluate_quant_matrix` (quant_matrix.py) against shaped
-tapes and asserts the STRICT 96.5% THERMAL-GATE / NEVER-HOLD contract
+tapes and asserts the STRICT 98% THERMAL-GATE / NEVER-HOLD contract
 (v11 lock-down):
 
-  1. Fully-converged bullish trend -> BUY with confidence >= 96.5
+  1. Fully-converged bullish trend -> BUY with confidence >= 98
      (multi-book confluence through the logistic sharpener), alert fires.
   2. Sub-thermal tapes (bearish drift, flat, range-bound consolidation)
      KEEP their true BUY/SELL direction and are flagged market-waiting
-     (CONFLUENCE_BELOW_THERMAL), confidence < 96.5, high-confidence alert
+     (CONFLUENCE_BELOW_THERMAL), confidence < 98, high-confidence alert
      NEVER fires on them, and HOLD is never returned.
 
 Exit code 0 = contract satisfied.
@@ -44,10 +44,10 @@ def must_be_directional(v, label):
 
 
 print("=" * 72)
-print("PYTHON UNBIASED QUANT MATRIX — STRICT 96.5% THERMAL-GATE / NEVER-HOLD VALIDATION")
+print("PYTHON UNBIASED QUANT MATRIX — STRICT 98% THERMAL-GATE / NEVER-HOLD VALIDATION")
 print("=" * 72)
 
-# 1. Fully-converged bullish tape -> BUY (definitive 96.5% emission).
+# 1. Fully-converged bullish tape -> BUY (definitive 98% emission).
 bull = evaluate_quant_matrix(
     scenario_bullish(120), live_price=1.134, timeframe="1d"
 )
@@ -57,8 +57,8 @@ check(
     f"(got {bull.direction})",
 )
 check(
-    "definitive BUY confidence >= 96.5 (never padded above real strength)",
-    bull.confidence >= 96.5,
+    "definitive BUY confidence >= 98 (never padded above real strength)",
+    bull.confidence >= 98,
     f"(got {bull.confidence})",
 )
 check(
@@ -88,8 +88,8 @@ check(
     f"(got {bear.waiting_reason})",
 )
 check(
-    "sub-thermal confidence honestly below 96.5",
-    bear.confidence < 96.5,
+    "sub-thermal confidence honestly below 98",
+    bear.confidence < 98,
     f"(got {bear.confidence})",
 )
 check(
@@ -108,7 +108,7 @@ must_be_directional(flat, "flat tape")
 check("flat tape is market-waiting (zero-tie, never HOLD)", flat.market_waiting is True, f"(got {flat.market_waiting})")
 check(
     "flat confidence honest (no inflated floor)",
-    flat.confidence < 96.5,
+    flat.confidence < 98,
     f"(got {flat.confidence})",
 )
 check(
@@ -139,7 +139,7 @@ must_be_directional(rng, "range-bound consolidation")
 check("range-bound consolidation is market-waiting", rng.market_waiting is True, f"(got {rng.market_waiting})")
 check(
     "consolidation confidence honest",
-    rng.confidence < 96.5,
+    rng.confidence < 98,
     f"(got {rng.confidence})",
 )
 check(
@@ -152,4 +152,4 @@ print("-" * 72)
 print(f" RESULT: {passed} passed, {failed} failed")
 if failed:
     sys.exit(1)
-print(" STRICT 96.5% THERMAL GATE / NEVER-HOLD SATISFIED — zero false positives.")
+print(" STRICT 98% THERMAL GATE / NEVER-HOLD SATISFIED — zero false positives.")

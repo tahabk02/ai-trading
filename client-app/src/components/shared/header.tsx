@@ -8,7 +8,8 @@ import { useLangContext } from "@/hooks/useLangContext";
 import { useAuthStore } from "@/store/useAuthStore";
 import { ThemeSwitcher, LanguageSwitcher } from "./theme-lang-switcher";
 import {
-  LayoutDashboard,
+  LayoutGrid,
+  LineChart,
   History,
   ShieldCheck,
   Settings,
@@ -90,18 +91,23 @@ export const Header: React.FC = () => {
 
   // Localized navigation links (EN/FR/AR/ES)
   const navItems = [
-    { label: t("liveTerminal"), href: "/", icon: LayoutDashboard },
+    { label: t("marketTerminal"), href: "/dashboard", icon: LayoutGrid },
+    { label: t("proTerminal"), href: "/dashboard/pro", icon: LineChart },
     { label: t("tradingHistory"), href: "/history", icon: History },
     { label: t("riskRules"), href: "/risk-rules", icon: ShieldCheck },
     { label: t("systemSettings"), href: "/settings", icon: Settings },
   ];
 
-  const isActive = (href: string) =>
-    href === "/" ? pathname === "/" : pathname.startsWith(href);
+  const isActive = (href: string) => {
+    if (href === "/dashboard/pro") return pathname === "/dashboard/pro";
+    if (href === "/dashboard") return pathname === "/" || pathname === "/dashboard";
+    if (href === "/") return pathname === "/";
+    return pathname.startsWith(href);
+  };
   return (
     <>
-      <nav className="border-b border-slate-800/80 bg-obsidian/80 backdrop-blur-xl sticky top-0 z-40 transition-colors duration-200">
-        <div className="max-w-full mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-3">
+      <nav className="border-b border-[var(--tp-border)] bg-header-sheen backdrop-blur-xl sticky top-0 z-40 transition-colors duration-150">
+        <div className="max-w-full mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-3">
           {/* Left: Hamburger (mobile/tablet) + Branding */}
           <div className="flex items-center gap-2.5 shrink-0">
             <button
@@ -116,7 +122,7 @@ export const Header: React.FC = () => {
               <div className="w-7 h-7 sm:w-8 sm:h-8 bg-gradient-to-br from-blue-600 to-blue-800 rounded-lg flex items-center justify-center shadow-lg shadow-blue-600/20 group-hover:shadow-blue-600/40 transition-shadow duration-300">
                 <span className="text-white font-black text-[10px] sm:text-xs">T</span>
               </div>
-              <span className="text-white font-bold text-xs sm:text-sm tracking-widest uppercase hidden sm:inline whitespace-nowrap">
+              <span className="text-slate-100 font-bold text-xs sm:text-sm tracking-widest uppercase hidden sm:inline whitespace-nowrap">
                 Alpha.5 Pro
               </span>
             </Link>

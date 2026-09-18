@@ -33,9 +33,14 @@ export function isAllowedCorsOrigin(origin: string): boolean {
   try {
     const url = new URL(origin);
     if (url.protocol !== "https:") return false;
+    // Accept ANY *.devtunnels.ms hostname (any region, any port suffix).
+    // Old regex /[^.]+\.devtunnels\.ms$/ only matched 2-label hostnames like
+    // "foo.devtunnels.ms" but Dev Tunnel URLs are 3-label: "{id}-{port}.{region}.devtunnels.ms"
+    // (e.g. b3lrfrj9-3000.uks1.devtunnels.ms) which the old regex rejected,
+    // causing CORS to block the socket.io polling handshake from the browser.
     return (
-      /^[^.]+\.devtunnels\.ms$/.test(url.hostname) ||
-      /^[^.]+\.uks1\.devtunnels\.ms$/.test(url.hostname)
+      /\.devtunnels\.ms$/.test(url.hostname) ||
+      /\.tunnels\.api\.visualstudio\.com$/.test(url.hostname)
     );
   } catch {
     return false;

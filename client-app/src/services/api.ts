@@ -5,6 +5,7 @@ import axios, {
 } from "axios";
 import { getApiBaseUrl } from "@/utils/getBaseUrl";
 import { OTC_WHITELIST } from "@/constants/symbols";
+import { logDebounced503 } from "@/lib/logDebouncer";
 
 /**
  * SYMBOL PAYLOAD NORMALIZER — guarantees the POST body sent to
@@ -114,6 +115,13 @@ export interface PredictionResponse {
     gated_direction?: string;
     threshold?: number;
   };
+  /**
+   * AI Engine multi-tier dispatch tier (T1…T5) — the honest quality band
+   * (T1 PREMIUM … T5 WEAK). Resolved by the engine; never client-derived.
+   */
+  tier?: string;
+  /** Human label for the tier (PREMIUM / HIGH / MEDIUM / LOW / WEAK). */
+  tier_label?: string;
   diagnostics?: {
     confidence_gated?: boolean;
     gated_direction?: string;
@@ -155,6 +163,18 @@ export interface PredictionResponse {
    * toast + audio chime; never fabricated client-side.
    */
   high_confidence_alert?: boolean;
+  /**
+   * 0.98 ensemble watershed diagnostics (the 5-factor quality lock):
+   * `quality` is the weighted score (0..1); `quality_factors` the per-factor
+   * 0|1 alignment (mtf/momentum/volatility/volume/pressure); `quality_reason`
+   * names the block reason. NULL while the factor window is unavailable —
+   * the ensemble is honestly reported, never fabricated.
+   */
+  quality?: number | null;
+  quality_factors?: Record<string, number> | null;
+  quality_reason?: string | null;
+  /** True when the 0.98 watershed collapsed a confidence-valid verdict. */
+  quality_watershed_blocked?: boolean;
   verification?: {
     samples: number;
     correct: number;
@@ -177,6 +197,56 @@ export interface PredictionResponse {
   atr?: number;
   volatility_pct?: number;
   payout?: number;
+  // ── TARGET-EXPIRY HORIZON CONTRACT (Alpha.5 Pro) ──
+  /** Requested horizon in minutes (1/2/3/5/10) — snap-resolved by the backend. */
+  horizon_minutes?: number;
+  /**
+   * Rolling trend-momentum stabilized horizon contract (Alpha.5 Pro).
+   * `stable_signal` is the EWMA-deadband-smoothed directional verdict
+   * (CALL/PUT). `confidence` is the calibrated, smoothed confidence
+   * (0–100). `expires_in_seconds` is the remaining time until the
+   * horizon window closes. NULL when the horizon engine fails.
+   */
+  horizon?: {
+    horizon_minutes: number;
+    backend_timeframe: string;
+    stable_signal: "CALL" | "PUT" | "NEUTRAL";
+    direction: "BUY" | "SELL";
+    confidence: number;
+    confidence_prev: number;
+    delta_confidence: number;
+    stable_flips: number;
+    entry_ts: string;
+    expiry_ts: string;
+    expires_in_seconds: number;
+    live_price: number | null;
+    atr: number | null;
+    timeframe: string | null;
+    features: {
+      ema_cross: number;
+      ema_cross_velocity: number;
+      ema_fast: number;
+      ema_slow: number;
+      rsi_14: number;
+      rsi_delta: number;
+      regression_slope: number;
+      regression_r2: number;
+      divergence: number;
+      divergence_kind: string;
+      momentum: number;
+      position: number;
+      volatility: number;
+    };
+    raw_direction: "CALL" | "PUT" | "NEUTRAL";
+    raw_confidence: number;
+    stability: {
+      alpha: number;
+      reversal_halfwidth: number;
+      flip_inertia: number;
+      samples: number;
+      buffer_ticks: number;
+    };
+  };
 }
 
 export interface SignalData {
@@ -186,6 +256,8 @@ export interface SignalData {
   signal_type?: "BUY" | "SELL";
   price?: number;
   confidence?: number;
+  /** AI Engine dispatch tier T1…T5 (PART 6) — mirrors signal-gatekeeper. */
+  tier?: string;
   createdAt?: string;
   timestamp?: string;
   indicators?: Record<string, unknown>;
@@ -195,6 +267,49 @@ export interface SignalData {
   pnl?: number;
   /** Broker payout percentage for this instrument (e.g. 92). */
   payout?: number;
+}
+
+// ── MARKET TERMINAL (all-pairs grid) ──
+/** Enriched single-pair live quote — the exact payload of GET /api/v1/quotes
+ *  and the `market_quotes` WS snapshots. Strictly real tape data. */
+export interface MarketQuote {
+  symbol: string;
+  name: string;
+  type: string;
+  assetSubType: string;
+  label: string;
+  digits: number;
+  payout: number;
+  price: number | null;
+  bid: number | null;
+  ask: number | null;
+  spread: number | null;
+  tickCount: number;
+  lastTickAt: string | null;
+  ageMs: number | null;
+}
+
+export interface QuotesResponse {
+  success: boolean;
+  count: number;
+  quotes: MarketQuote[];
+  timestamp: string;
+}
+
+export interface MultiPredictSymbolResult {
+  ok: boolean;
+  status: number;
+  data?: PredictionResponse;
+  error?: unknown;
+}
+
+export interface MultiPredictResponse {
+  success: boolean;
+  count: number;
+  timeframe: string;
+  requestedAt: string;
+  generatedAt: string;
+  results: Record<string, MultiPredictSymbolResult>;
 }
 
 export interface TradeRequest {
@@ -408,6 +523,17 @@ api.interceptors.response.use(
       localStorage.removeItem("token");
     }
 
+    // ── DEBOUNCED 503 WARNING ──
+    // The grid survives an AI-Engine/feed outage by re-polling every pair with
+    // backoff — a burst of HTTP 503s. Log the FIRST one, stay silent through
+    // the 10s window, then warn again only on a genuinely NEW incident.
+    if (error.response?.status === 503) {
+      logDebounced503("[api] 503 Service Unavailable", {
+        url: config?.url,
+        method: config?.method,
+      });
+    }
+
     // ══ RETRYABLE TRANSPORT FAILURES → exponential backoff retry ══
     // 429 (rate limited) · 502/503/504 (gateway / backend temporarily
     // unavailable / live-quote proxy refusing to price) · ECONNABORTED
@@ -540,6 +666,7 @@ const apiClient = {
     symbol: string,
     timeframe: string = "1d",
     signal?: AbortSignal,
+    horizonMinutes?: number,
   ): Promise<PredictionResponse> {
     const _cb = Date.now();
     // ── NORMALIZE BEFORE SEND — never transmit a non-whitelist format.
@@ -548,6 +675,9 @@ const apiClient = {
     // error listing supported symbols).
     const cleanSymbol = normalizeSymbol(symbol) ?? symbol.trim().toUpperCase();
     const cleanTimeframe = timeframe.trim().toLowerCase();
+    const hz = Number.isFinite(horizonMinutes) && (horizonMinutes as number) >= 1
+      ? Math.min(10, Math.round(horizonMinutes as number))
+      : undefined;
 
     try {
       const { data } = await api.post<PredictionResponse>(
@@ -556,6 +686,7 @@ const apiClient = {
           symbol: cleanSymbol,
           timeframe: cleanTimeframe,
           dataSource: "otc_forex",
+          ...(hz != null ? { horizon_minutes: hz } : {}),
           _cb,
         },
         { signal },
@@ -613,7 +744,7 @@ const apiClient = {
 
   async getSymbols(
     search?: string,
-    type?: "stock" | "crypto" | "etf",
+    type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
     limit = 50,
   ): Promise<{
     success: boolean;
@@ -621,7 +752,8 @@ const apiClient = {
     symbols: Array<{
       symbol: string;
       name: string;
-      type: "stock" | "crypto" | "etf" | "otc";
+      type: "stock" | "crypto" | "etf" | "otc" | "commodity";
+      assetSubType?: "forex" | "otc" | "crypto" | "commodity";
       exchange: string;
       currency: string;
       payout: number;
@@ -640,6 +772,40 @@ const apiClient = {
     const { data } = await api.get<OrderBookResponse>("/orderbook", {
       params: { symbol: symbol.toUpperCase() },
     });
+    return data;
+  },
+
+  // ── MARKET TERMINAL (all-pairs grid) ──
+  /** REST bootstrap for the grid — one enriched snapshot of every live pair. */
+  async getQuotes(): Promise<QuotesResponse> {
+    const { data } = await api.get<QuotesResponse>("/quotes");
+    return data;
+  },
+
+  /**
+   * Batch prediction (horizon refresh). Fans the symbol list through the SAME
+   * /predict pipeline server-side (real bars + live tick + ATR targets, 5s
+   * result cache, bounded concurrency); `silent` suppresses the global
+   * high-confidence toasts so a 34-card horizon change never spams alerts.
+   * Longer window than the default 15s — a cold batch across all pairs can
+   * take longer than the standard request budget.
+   */
+  async multiPredict(
+    symbols: string[],
+    timeframe: string = "1m",
+  ): Promise<MultiPredictResponse> {
+    const cleanSymbols = symbols
+      .map((s) => normalizeSymbol(s) ?? s.trim().toUpperCase())
+      .filter(Boolean);
+    const { data } = await api.post<MultiPredictResponse>(
+      "/multi-predict",
+      {
+        symbols: cleanSymbols,
+        timeframe: timeframe.trim().toLowerCase(),
+        _cb: Date.now(),
+      },
+      { timeout: 60_000 },
+    );
     return data;
   },
 

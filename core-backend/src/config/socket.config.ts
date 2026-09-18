@@ -1,4 +1,5 @@
 import type { ServerOptions } from "socket.io";
+import { corsOptions } from "./cors";
 
 /**
  * Socket.IO engine options (single source of truth for the server + tests).
@@ -8,18 +9,18 @@ import type { ServerOptions } from "socket.io";
  *    from the tick flood / chart work) must NOT trip the heartbeat and force a
  *    disconnect↔reconnect cycle. 25s/20s tolerates transient main-thread
  *    stalls while still pruning genuinely wedged pipes in ~45s worst case.
- *  • CORS explicitly allows the frontend origin http://localhost:3000 with
- *    credentials, transports "websocket" + "polling" fallback so the very first
- *    connection handshake always has a path.
+ *  • CORS reuses the shared `corsOptions` resolver so the Socket.IO engine
+ *    and the Express middleware can never drift — both allow the frontend
+ *    origin and every *.devtunnels.ms origin with credentials.
  */
 export const SOCKET_SERVER_OPTIONS: Partial<ServerOptions> = {
   cors: {
-    origin: "http://localhost:3000",
+    origin: corsOptions.origin,
     methods: ["GET", "POST"],
-    credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: corsOptions.credentials,
+    allowedHeaders: corsOptions.allowedHeaders,
   },
-  transports: ["websocket", "polling"],
+  transports: ["polling", "websocket"],
   pingInterval: 25_000,
   pingTimeout: 20_000,
   connectTimeout: 10_000,

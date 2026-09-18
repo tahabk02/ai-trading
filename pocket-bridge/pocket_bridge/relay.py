@@ -94,12 +94,14 @@ class RelayServer:
         #: entrypoint so the bridge can dynamically arm the requested symbol
         #: and reply with its ``subscribed`` confirmation.
         self.on_subscribe = None
+        self.on_unsubscribe = None
         #: optional sync callback () -> bool reporting whether the bridge has
         #: finished authenticating + loading its asset list. When True, the
         #: relay tells each new client immediately with a ``ready`` frame so the
         #: backend can release its staged subscribes without waiting for the
         #: next global broadcast.
         self.is_ready: Optional[Callable[[], bool]] = None
+        self.asset_provider: Optional[Callable[[], list]] = None
         self.health_provider: Optional[Callable[[], Dict]] = None
         #: total frames of type "candle" pushed through broadcast() this
         #: process (MASTER MISSION 2.x — surfaced on /health). Incremented in
@@ -166,7 +168,10 @@ class RelayServer:
             if self.is_ready is not None and self.is_ready():
                 await self.send(
                     websocket,
-                    {"type": "ready", "payload": {"assets_initialized": True}},
+                    {"type": "ready", "payload": {
+                        "assets_initialized": True,
+                        "assets": self.asset_provider() if self.asset_provider else [],
+                    }},
                 )
             while True:
                 message = await websocket.recv()
@@ -183,16 +188,17 @@ class RelayServer:
                     frame = json.loads(trimmed)
                 except (ValueError, TypeError):
                     continue
-                if not isinstance(frame, dict) or frame.get("type") != "subscribe":
+                if not isinstance(frame, dict) or frame.get("type") not in {"subscribe", "unsubscribe"}:
                     continue
                 payload = (
                     frame.get("payload")
                     if isinstance(frame.get("payload"), dict)
                     else {}
                 )
-                if self.on_subscribe is not None:
+                callback = self.on_subscribe if frame.get("type") == "subscribe" else self.on_unsubscribe
+                if callback is not None:
                     try:
-                        await self.on_subscribe(websocket, payload)
+                        await callback(websocket, payload)
                     except Exception:  # noqa: BLE001 - a broken subscribe must
                         # never kill the relay handler loop.
                         logger.exception("relay subscribe handler failed")

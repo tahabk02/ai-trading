@@ -44,6 +44,7 @@ import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { forexDataService } from "./forexData.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { websocketService } from "./websocket.service";
+import { symbolRegistry } from "./symbolRegistry.service";
 
 // ─── Bridge Process Constants ───
 const BRIDGE_PYTHON_MODULE = "pocket_bridge.main";
@@ -85,6 +86,8 @@ interface BridgeTickFrame {
   price: number;
   ts_ms: number;
   ts_utc: number;
+  /** Monotonic emit counter stamped by the relay (drop detection). */
+  seq?: number;
   /** Strict classification stamped by the bridge ("forex"|"otc"|"crypto"). */
   asset_type?: string;
 }
@@ -133,8 +136,7 @@ export class PocketOptionBridgeService {
    *  same failed attempt from being counted twice (error + close) and double
    *  fast-forwarding the backoff / tripping the circuit breaker on one drop. */
   private wsErrorSeen = false;
-  private lastStatus: "ONLINE" | "DEGRADED" | "awaiting_ssid" | "idle" =
-    "idle";
+  private lastStatus: "ONLINE" | "DEGRADED" | "awaiting_ssid" | "idle" = "idle";
   /** Raw relay status string ("connected" | "stalled" | "awaiting_ssid" |
    *  "connection_error" | "session_expired" ...) — the precise source for the
    *  feed-status mapping (DEGRADED collapses several relay states). */
@@ -201,11 +203,7 @@ export class PocketOptionBridgeService {
     return this.connected;
   }
 
-  public getStatus():
-    | "ONLINE"
-    | "DEGRADED"
-    | "awaiting_ssid"
-    | "idle" {
+  public getStatus(): "ONLINE" | "DEGRADED" | "awaiting_ssid" | "idle" {
     return this.lastStatus;
   }
 
@@ -224,15 +222,28 @@ export class PocketOptionBridgeService {
   public requestSymbolSubscription(symbol: string): void {
     const normalized = forexDataService.toCanonicalSymbol(symbol || "");
     if (!normalized) {
-      logger.debug("[PO Bridge] Ignoring subscription push for unresolvable symbol", {
-        symbol,
-      });
+      logger.debug(
+        "[PO Bridge] Ignoring subscription push for unresolvable symbol",
+        {
+          symbol,
+        },
+      );
       return;
     }
     this.poArmedByClient.add(normalized);
     // Gate on the relay's `ready` frame (assets initialised) — do NOT race
     // Python's startup: flushStagedSubscriptions only sends once assetsReady.
     this.flushStagedSubscriptions();
+  }
+
+  public requestSymbolUnsubscription(symbol: string): void {
+    const normalized = forexDataService.toCanonicalSymbol(symbol || "");
+    if (!normalized) return;
+    this.poArmedByClient.delete(normalized);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({ type: "unsubscribe", payload: { symbol: normalized } }),
+    );
   }
 
   /** Push every staged symbol to the relay — but ONLY once the bridge is ready
@@ -254,7 +265,9 @@ export class PocketOptionBridgeService {
       this.readyFallbackTimer = null;
       if (this.assetsReady) return;
       this.assetsReady = true;
-      logger.info("[PO Bridge] Readiness fallback elapsed — flushing staged subscribes");
+      logger.info(
+        "[PO Bridge] Readiness fallback elapsed — flushing staged subscribes",
+      );
       this.flushStagedSubscriptions();
     }, READINESS_FALLBACK_MS);
   }
@@ -286,10 +299,13 @@ export class PocketOptionBridgeService {
         "[PO Bridge] POCKET_OPTION_SSID is not set — running in awaiting_ssid state (real PO live ticks disabled; no fabricated prices). Set POCKET_OPTION_SSID to enable the PO SSOT tier.",
       );
     } else {
-      logger.info("[PO Bridge] POCKET_OPTION_SSID is configured — PO SSOT tier enabled", {
-        ssidLength: ssid.length,
-        ssidPrefix: `${ssid.slice(0, 8)}…`,
-      });
+      logger.info(
+        "[PO Bridge] POCKET_OPTION_SSID is configured — PO SSOT tier enabled",
+        {
+          ssidLength: ssid.length,
+          ssidPrefix: `${ssid.slice(0, 8)}…`,
+        },
+      );
     }
 
     if (this.bridgeAutoSpawn) {
@@ -416,9 +432,12 @@ export class PocketOptionBridgeService {
     // Verify the Python module exists
     const moduleFile = join(bridgeDir, "pocket_bridge", "__init__.py");
     if (!existsSync(moduleFile)) {
-      logger.warn("[PO Bridge] pocket_bridge module not found, skipping auto-spawn", {
-        tried: moduleFile,
-      });
+      logger.warn(
+        "[PO Bridge] pocket_bridge module not found, skipping auto-spawn",
+        {
+          tried: moduleFile,
+        },
+      );
       return;
     }
 
@@ -586,7 +605,9 @@ export class PocketOptionBridgeService {
         return; // Still alive
       }
       if (this.bridgeAutoSpawn) {
-        logger.warn("[PO Bridge] Bridge process health check failed — restarting");
+        logger.warn(
+          "[PO Bridge] Bridge process health check failed — restarting",
+        );
         this.spawnBridgeProcess();
       }
     }, BRIDGE_HEALTH_CHECK_INTERVAL_MS);
@@ -634,7 +655,9 @@ export class PocketOptionBridgeService {
     if (this.circuitState === "OPEN") {
       if (now - this.circuitOpenedAt >= CB_RESET_TIMEOUT_MS) {
         this.circuitState = "HALF_OPEN";
-        logger.info("[PO Bridge] Circuit breaker entering HALF_OPEN — allowing probe");
+        logger.info(
+          "[PO Bridge] Circuit breaker entering HALF_OPEN — allowing probe",
+        );
         return true;
       }
       return false; // Still open, suppress reconnect
@@ -645,10 +668,13 @@ export class PocketOptionBridgeService {
       (t) => now - t < CB_RATE_LIMIT_WINDOW_MS,
     );
     if (this.reconnectAttempts.length >= CB_MAX_ATTEMPTS_PER_WINDOW) {
-      logger.debug("[PO Bridge] Rate limiter: suppressing reconnect (%d/%d in window)", {
-        attempts: this.reconnectAttempts.length,
-        max: CB_MAX_ATTEMPTS_PER_WINDOW,
-      });
+      logger.debug(
+        "[PO Bridge] Rate limiter: suppressing reconnect (%d/%d in window)",
+        {
+          attempts: this.reconnectAttempts.length,
+          max: CB_MAX_ATTEMPTS_PER_WINDOW,
+        },
+      );
       return false;
     }
 
@@ -671,9 +697,12 @@ export class PocketOptionBridgeService {
       // Probe failed — re-open the circuit
       this.circuitState = "OPEN";
       this.circuitOpenedAt = Date.now();
-      logger.warn("[PO Bridge] Circuit breaker: HALF_OPEN probe failed — re-opening circuit", {
-        consecutiveFailures: this.consecutiveFailures,
-      });
+      logger.warn(
+        "[PO Bridge] Circuit breaker: HALF_OPEN probe failed — re-opening circuit",
+        {
+          consecutiveFailures: this.consecutiveFailures,
+        },
+      );
     } else if (this.consecutiveFailures >= CB_FAILURE_THRESHOLD) {
       this.circuitState = "OPEN";
       this.circuitOpenedAt = Date.now();
@@ -755,10 +784,13 @@ export class PocketOptionBridgeService {
         this.recordReconnectFailure();
       }
       this.broadcastFeedStatusIfChanged();
-      logger.warn("[PO Bridge] Relay connection closed — scheduling reconnect", {
-        delayMs: this.reconnectDelayMs,
-        circuitState: this.circuitState,
-      });
+      logger.warn(
+        "[PO Bridge] Relay connection closed — scheduling reconnect",
+        {
+          delayMs: this.reconnectDelayMs,
+          circuitState: this.circuitState,
+        },
+      );
       this.scheduleReconnect();
     });
 
@@ -774,9 +806,12 @@ export class PocketOptionBridgeService {
       if (this.circuitState !== "OPEN") {
         logger.warn("[PO Bridge] Relay connection error", { error: msg });
       } else {
-        logger.debug("[PO Bridge] Relay error (suppressed by circuit breaker)", {
-          error: msg,
-        });
+        logger.debug(
+          "[PO Bridge] Relay error (suppressed by circuit breaker)",
+          {
+            error: msg,
+          },
+        );
       }
 
       // Set the dedup guard and forcibly release the dead socket so ws emits
@@ -833,7 +868,7 @@ export class PocketOptionBridgeService {
         this.handleStatus(frame.payload as { status?: string; error?: string });
         break;
       case "ready":
-        this.handleReady();
+        this.handleReady(frame.payload as { assets?: unknown[] });
         break;
       case "heartbeat":
         this.handleHeartbeat(frame.payload as Record<string, unknown>);
@@ -864,12 +899,22 @@ export class PocketOptionBridgeService {
     const tsMs = toFiniteNumber(tick.ts_ms);
     const poTimestamp =
       tsMs !== null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
+    // TEMPORARY LATENCY DIAGNOSTICS: the relay decorates every frame with its
+    // monotonic `seq` and a `ts_utc` emission stamp. Capture the local
+    // backend reception instant here and forward all three so the browser-probe
+    // can decompose broker→bridge→backend→browser latency + detect seq drops.
+    const receivedUtcMs = Date.now();
     tickIngestionService.ingestTick(
       tick.symbol,
       price,
       "pocket_option",
       poTimestamp,
       tick.asset_type,
+      {
+        seq: toFiniteNumber(tick.seq) ?? undefined,
+        tsUtc: toFiniteNumber(tick.ts_utc) ?? undefined,
+        receivedUtcMs,
+      },
     );
   }
 
@@ -887,7 +932,10 @@ export class PocketOptionBridgeService {
 
   /** Relay broadcast `ready` — the PO client is authenticated and the asset
    *  list is loaded. This is the go-ahead to release every staged subscribe. */
-  private handleReady(): void {
+  private handleReady(payload?: { assets?: unknown[] }): void {
+    if (Array.isArray(payload?.assets) && payload.assets.length > 0) {
+      symbolRegistry.replaceFromBridgeAssets(payload.assets);
+    }
     if (this.readyFallbackTimer) {
       clearTimeout(this.readyFallbackTimer);
       this.readyFallbackTimer = null;
@@ -904,7 +952,10 @@ export class PocketOptionBridgeService {
   private handleStatus(payload: { status?: string; error?: string }): void {
     const status = payload?.status || "idle";
     this.lastRelayStatus = status;
-    logger.info("[PO Bridge] Status from relay", { status, error: payload?.error });
+    logger.info("[PO Bridge] Status from relay", {
+      status,
+      error: payload?.error,
+    });
 
     if (status === "awaiting_ssid") {
       this.lastStatus = "awaiting_ssid";
@@ -937,10 +988,14 @@ export class PocketOptionBridgeService {
    *  rule and used to re-derive + push the authoritative feed_status. */
   private handleHeartbeat(payload: Record<string, unknown>): void {
     this.lastHeartbeatAt = Date.now();
-    if (typeof payload?.status === "string" && payload.status !== this.lastRelayStatus) {
+    if (
+      typeof payload?.status === "string" &&
+      payload.status !== this.lastRelayStatus
+    ) {
       this.lastRelayStatus = payload.status;
       if (payload.status === "connected") this.lastStatus = "ONLINE";
-      else if (payload.status === "awaiting_ssid") this.lastStatus = "awaiting_ssid";
+      else if (payload.status === "awaiting_ssid")
+        this.lastStatus = "awaiting_ssid";
       else if (
         payload.status === "connection_error" ||
         payload.status === "disconnected" ||
@@ -956,7 +1011,10 @@ export class PocketOptionBridgeService {
    *  grounded on the raw relay status + heartbeat age, never fabricated. */
   private computeFeedStatus(): FeedStatus {
     if (this.permanentlyDegraded) return "degraded";
-    if (this.lastHeartbeatAt > 0 && Date.now() - this.lastHeartbeatAt > HEARTBEAT_STALE_MS) {
+    if (
+      this.lastHeartbeatAt > 0 &&
+      Date.now() - this.lastHeartbeatAt > HEARTBEAT_STALE_MS
+    ) {
       return "disconnected";
     }
     if (this.lastRelayStatus === "awaiting_ssid") return "awaiting_ssid";
@@ -982,7 +1040,8 @@ export class PocketOptionBridgeService {
       status: this.computeFeedStatus(),
       lastHeartbeatTs:
         this.lastHeartbeatAt > 0 ? this.lastHeartbeatAt : undefined,
-      heartbeatAgeMs: this.lastHeartbeatAt > 0 ? Date.now() - this.lastHeartbeatAt : 0,
+      heartbeatAgeMs:
+        this.lastHeartbeatAt > 0 ? Date.now() - this.lastHeartbeatAt : 0,
     };
   }
 
@@ -994,7 +1053,8 @@ export class PocketOptionBridgeService {
     const ageMs =
       this.lastHeartbeatAt > 0 ? Date.now() - this.lastHeartbeatAt : 0;
     websocketService.broadcastFeedStatus(status, {
-      lastHeartbeatTs: this.lastHeartbeatAt > 0 ? this.lastHeartbeatAt : undefined,
+      lastHeartbeatTs:
+        this.lastHeartbeatAt > 0 ? this.lastHeartbeatAt : undefined,
       heartbeatAgeMs: ageMs,
     });
   }
@@ -1010,7 +1070,8 @@ export class PocketOptionBridgeService {
   }
 
   private handleSubscribed(payload: Record<string, unknown>): void {
-    if (!payload || typeof payload.symbol !== "string" || !payload.symbol) return;
+    if (!payload || typeof payload.symbol !== "string" || !payload.symbol)
+      return;
     const status =
       typeof payload.status === "string" ? payload.status : "subscribed";
     const norm = forexDataService.toCanonicalSymbol(payload.symbol);
@@ -1053,7 +1114,9 @@ export class PocketOptionBridgeService {
     }
 
     if (Array.isArray(payload.closed_candles)) {
-      for (const mc of payload.closed_candles as Array<Record<string, unknown>>) {
+      for (const mc of payload.closed_candles as Array<
+        Record<string, unknown>
+      >) {
         if (!mc) continue;
         const o = toFiniteNumber(mc.open);
         const h = toFiniteNumber(mc.high);
@@ -1179,5 +1242,6 @@ export class PocketOptionBridgeService {
   }
 }
 
-export const pocketOptionBridgeService = PocketOptionBridgeService.getInstance();
+export const pocketOptionBridgeService =
+  PocketOptionBridgeService.getInstance();
 export default pocketOptionBridgeService;

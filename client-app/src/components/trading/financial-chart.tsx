@@ -16,6 +16,7 @@ import {
 } from "lightweight-charts";
 import { useTradingStore, realtimeAggregator } from "@/store/useTradingStore";
 import { useLangContext } from "@/hooks/useLangContext";
+import { useTheme } from "@/hooks/useTheme";
 import {
   normalizeTimeframe,
   timeframeToMs,
@@ -39,6 +40,10 @@ import {
 } from "@/lib/realtimeCandleAggregator";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
+import {
+  chartDebugQualityFields,
+  type QualityPredictDebug,
+} from "@/lib/chartDebug";
 
 declare global {
   interface Window {
@@ -95,6 +100,24 @@ const PRICE_LINE = "rgba(148,163,184,0.85)";
 const TGT_LINE = "#26a69a";
 const ANC_LINE = "#94a3b8";
 const STOP_LINE = "#ef5350";
+
+/**
+ * Read a design-system token from the live document root. The chart is drawn
+ * on a <canvas>, so it cannot consume Tailwind classes directly — it resolves
+ * the SAME `--tp-*` variables defined in globals.css instead. Falls back to the
+ * institutional dark value when the variable is unavailable (SSR/headless).
+ */
+function cssVar(name: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const value = getComputedStyle(document.documentElement)
+      .getPropertyValue(name)
+      .trim();
+    return value || fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 type GridCandle = Candle & {
   isGap?: boolean;
@@ -350,7 +373,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   predictedTargetPrice,
   predictionAnchorPrice,
   atr = 0,
-  expirationSeconds = 60,
+  expirationSeconds = 300,
   signal,
   confidence,
   streamStalled = false,
@@ -373,6 +396,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const setLeadOffset = useTradingStore((s) => s.setLeadOffset);
   const predictionData = useTradingStore((s) => s.predictionData);
   const { t } = useLangContext();
+  const { resolvedTheme } = useTheme();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -382,6 +406,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const dataRef = useRef<GridCandle[]>([]);
   const linesRef = useRef<ChartLineBag>({});
   const targetSlotKeyRef = useRef("");
+  const targetStructuralKeyRef = useRef("");
   const projectionRef = useRef<TargetProjectionEngine>(new TargetProjectionEngine());
   const signalHoldRef = useRef<SignalHoldBuffer>(
     new SignalHoldBuffer({ holdNeutralEvals: 2 }),
@@ -392,6 +417,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // pending paint; ONE requestAnimationFrame flush drains them per frame.
   const pendingPaintRef = useRef(false);
   const lastPaintedCountRef = useRef(0);
+  // FRAME CACHE (quick-fix part 2) — fingerprint of the forming candle from
+  // the last frame we actually painted. When a coalesced burst of ticks
+  // resolves to the SAME count + forming-candle values, the repaint is skipped
+  // entirely (no series updates, no target-layer projection/markers).
+  const lastPaintedTipKeyRef = useRef("");
   const [hasCandles, setHasCandles] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
   const [lookaheadHorizon, setLookaheadHorizon] = useState<number>(
@@ -648,8 +678,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           rows.length > 0 ? rows[rows.length - 1].close : 0,
         signal: signalRef.current ?? predictionDataRef.current?.signal ?? null,
         confidence: Number(confPropRef.current ?? predictionDataRef.current?.confidence ?? 0),
+        // PART 3 — 0.98 quality lock mirrors on the chart debug surface
+        ...chartDebugQualityFields(
+          predictionDataRef.current as QualityPredictDebug | null | undefined,
+          rows.length,
+        ),
         targetAlphaStart: 0.95,
-        targetAlphaMin: 0.65,
+        targetAlphaMin: 0.35,
         projectionKey: projectionRef.current.currentKey,
         projectionAnchorClose: projectionRef.current.currentAnchor,
       });
@@ -718,6 +753,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         targetPrice,
         atr: Number(atrRef.current) || 0,
         signal: signalValue,
+        // PART 6 — engine tier gate: target candles render T1–T3 only.
+        tier: predictionDataRef.current?.tier ?? undefined,
       });
 
       if (snap.changed) {
@@ -732,6 +769,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           lastSlot: snap.lastSlotSec,
           targetPrice,
           anchorLiveClose: snap.anchorLiveClose,
+          expirationSec: expSec,
+          timeframeSec: tfSec,
           count: snap.candles.length,
           signal: signalValue,
           key: snap.key,
@@ -764,37 +803,47 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       precision: digits,
       minMove: Math.pow(10, -digits),
     };
+    // ── THEME-AWARE CANVAS COLORS ──
+    // Resolved from the design-system tokens so the canvas flips with the
+    // dark/light toggle. Candle bodies stay teal/coral in BOTH themes (brand
+    // constant), only the surfaces/axes/grid adapt.
+    const chartBg = cssVar("--tp-chart-bg", OBSIDIAN);
+    const axisText = cssVar("--tp-axis-text", AXIS_TEXT);
+    const gridLine = cssVar("--tp-grid", GRID_LINE);
+    const chartBorder = cssVar("--tp-chart-border", BORDER);
+    const crosshair = cssVar("--tp-crosshair", CROSSHAIR);
+    const crosshairLabelBg = cssVar("--tp-elevated", "#171c28");
     const chart = createChart(el, {
       width: Math.max(el.clientWidth || 600, 100),
       height: Math.max(el.clientHeight || height, 120),
       autoSize: false,
       layout: {
-        background: { type: ColorType.Solid, color: OBSIDIAN },
-        textColor: AXIS_TEXT,
+        background: { type: ColorType.Solid, color: chartBg },
+        textColor: axisText,
         fontSize: 11,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       },
       grid: {
-        vertLines: { color: GRID_LINE },
-        horzLines: { color: GRID_LINE },
+        vertLines: { color: gridLine },
+        horzLines: { color: gridLine },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: {
-          color: CROSSHAIR,
+          color: crosshair,
           width: 1,
           style: LineStyle.Dashed,
-          labelBackgroundColor: "#171c28",
+          labelBackgroundColor: crosshairLabelBg,
         },
         horzLine: {
-          color: CROSSHAIR,
+          color: crosshair,
           width: 1,
           style: LineStyle.Dashed,
-          labelBackgroundColor: "#171c28",
+          labelBackgroundColor: crosshairLabelBg,
         },
       },
       timeScale: {
-        borderColor: BORDER,
+        borderColor: chartBorder,
         timeVisible: true,
         secondsVisible: bw < 60_000,
         rightOffset: TARGET_RIGHT_GUTTER,
@@ -806,7 +855,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         allowShiftVisibleRangeOnWhitespaceReplacement: true,
       },
       rightPriceScale: {
-        borderColor: BORDER,
+        borderColor: chartBorder,
         borderVisible: true,
         scaleMargins: { top: 0.08, bottom: 0.22 },
       },
@@ -832,6 +881,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // MASTER MISSION part 5 — PO-style candles ALWAYS render body+wick
       wickVisible: true,
       borderVisible: true,
+      priceLineVisible: true,
+      lastValueVisible: true,
       priceFormat,
     });
     const volume = chart.addHistogramSeries({
@@ -851,6 +902,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         rightOffset: TARGET_RIGHT_GUTTER,
         fixLeftEdge: true,
         fixRightEdge: false,
+        shiftVisibleRangeOnNewBar: true,
       });
     } catch {}
     const targetSeries = chart.addCandlestickSeries({
@@ -871,6 +923,22 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     candleSeriesRef.current = candleSeries;
     volumeRef.current = volume;
     targetSeriesRef.current = targetSeries;
+    // ── DEBUG SURFACE BASELINE (zero-data parity) ──
+    // `writeChartDebug` is otherwise only reachable through `updateTargetLayer`,
+    // which requires at least one rendered candle. On a cold/offline start (no
+    // seed bars yet) that never fires, so `window.__chartDebug` stayed
+    // `undefined` and the verification surface produced no JSON. Always stamp a
+    // baseline here so the object exists from mount onward; live data paths
+    // merge the full snapshot over it.
+    writeChartDebug({
+      symbol: activeSymbol,
+      timeframe: tf,
+      bucketMs,
+      candleCount: 0,
+      barSpacing: INITIAL_BAR_SPACING_PX,
+      chartWidth: el.clientWidth ?? 0,
+      phase: "MOUNTED",
+    });
     const projection = projectionRef.current;
     const signalHold = signalHoldRef.current;
     const ro =
@@ -902,7 +970,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       projection.reset();
       signalHold.reset();
     };
-  }, [activeSymbol, height, tf, bucketMs]);
+  }, [activeSymbol, height, tf, bucketMs, resolvedTheme]);
 
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
@@ -924,9 +992,26 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     dataRef.current = rows;
     applyCandleData(candleSeries, volume, rows);
     targetSlotKeyRef.current = "";
-    try {
-      targetSeriesRef.current?.setData([]);
-    } catch {}
+    // ── TARGET-LAYER ANCHOR (fix: no vanish on server candle close) ──
+    // `swapKey` changes whenever serverCandleVersion / data.length / dataEpoch /
+    // lead offset changes. Only the STRUCTURAL part (symbol/timeframe/data
+    // epoch/lead) means the old target layer is meaningless for a different
+    // grid — reset the projection engine + free the layer that time. A mere
+    // server candle close must NOT call setData([]) here: updateTargetLayer
+    // only repaints when `present()` returns changed, so an unconditional
+    // clear on every version bump made the target overlay blink out at every
+    // close (the anchor-vanish bug).
+    const structuralKey = `SYM|${activeSymbolRef.current}|${tf}|${dataEpoch}|${
+      selectedLeadOffsetMs ?? "auto"
+    }`;
+    if (targetStructuralKeyRef.current !== structuralKey) {
+      targetStructuralKeyRef.current = structuralKey;
+      projectionRef.current.reset();
+      signalHoldRef.current.reset();
+      try {
+        targetSeriesRef.current?.setData([]);
+      } catch {}
+    }
     if (rows.length > 0) {
       updateTargetLayer(effectiveSignal(), rows[rows.length - 1].close);
     } else {
@@ -936,6 +1021,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     }
     firstTickRef.current = rows.length === 0;
     lastPaintedCountRef.current = rows.length;
+    lastPaintedTipKeyRef.current = "";
     pendingPaintRef.current = false;
     const chart = chartRef.current;
     if (chart) {
@@ -953,7 +1039,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       rows.length,
       targetIntervalsFor(expSecondsRef.current, tfSecondsRef.current),
     );
-  }, [swapKey, updateTargetLayer, reanchor, effectiveSignal, feedStatus]);
+  }, [swapKey, updateTargetLayer, reanchor, effectiveSignal, feedStatus, tf, dataEpoch, selectedLeadOffsetMs]);
 
   useEffect(() => {
     if (dataRef.current.length > 0) {
@@ -1027,59 +1113,77 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           const arr = dataRef.current;
           const count = arr.length;
           if (candleSeries && count > 0) {
-            const volume = volumeRef.current;
-            const liveSignal = buildSignalView(
-              predictionDataRef.current,
-              SIGNAL_CONFIDENCE_THRESHOLD,
-            ).gatedSignal;
-            const colorBar = (base: CandlestickData, row: GridCandle) => {
-              if (row.isGap === true) {
-                return {
-                  ...base,
-                  color: GAP_CANDLE,
-                  borderColor: GAP_CANDLE,
-                  wickColor: GAP_CANDLE,
-                };
+            // ── FRAME CACHE (quick-fix part 2) — a coalesced burst of ticks
+            // that resolves to the SAME row set MUST NOT re-paint. Compare the
+            // forming-candle fingerprint + row count against the last frame we
+            // drew and skip the whole repaint (series update calls + the
+            // target-layer projection + markers + grid applyOptions) when
+            // nothing actually moved. setData is reserved for the one-time full
+            // rebuild after a swap; steady-state paints touch only the live
+            // forming candle and the target tip.
+            const tip = arr[count - 1];
+            const tipKey = `${tip.timestamp}|${tip.open}|${tip.high}|${tip.low}|${tip.close}|${tip.volume}`;
+            const unchangedFrame =
+              count === lastPaintedCountRef.current &&
+              tipKey === lastPaintedTipKeyRef.current;
+            if (!unchangedFrame) {
+              const volume = volumeRef.current;
+              const liveSignal = buildSignalView(
+                predictionDataRef.current,
+                SIGNAL_CONFIDENCE_THRESHOLD,
+              ).gatedSignal;
+              const colorBar = (base: CandlestickData, row: GridCandle) => {
+                if (row.isGap === true) {
+                  return {
+                    ...base,
+                    color: GAP_CANDLE,
+                    borderColor: GAP_CANDLE,
+                    wickColor: GAP_CANDLE,
+                  };
+                }
+                if (liveSignal === "BUY" || liveSignal === "SELL") {
+                  const c = liveSignal === "BUY" ? BULLISH : BEARISH;
+                  return { ...base, color: c, borderColor: c, wickColor: c };
+                }
+                return base;
+              };
+              if (firstTickRef.current) {
+                candleSeries.setData(candleData(arr));
+                volume?.setData(volumeData(arr));
+                firstTickRef.current = false;
+              } else {
+                // Append/refresh every row that changed since the last paint
+                // (newly closed bars + the forming bar), then refresh the live
+                // forming candle — coalesces any number of ticks into ONE paint
+                // of the NEW rows only. The frame cache above guarantees we get
+                // here only when at least one row actually moved.
+                const from = Math.max(0, lastPaintedCountRef.current);
+                for (let i = from; i < count; i++) {
+                  candleSeries.update(colorBar(candleRow(arr[i]), arr[i]));
+                  volume?.update(volumeRow(arr[i]));
+                }
+                candleSeries.update(
+                  colorBar(candleRow(arr[count - 1]), arr[count - 1]),
+                );
+                volume?.update(volumeRow(arr[count - 1]));
               }
-              if (liveSignal === "BUY" || liveSignal === "SELL") {
-                const c = liveSignal === "BUY" ? BULLISH : BEARISH;
-                return { ...base, color: c, borderColor: c, wickColor: c };
+              lastPaintedCountRef.current = count;
+              lastPaintedTipKeyRef.current = tipKey;
+              const chart = chartRef.current;
+              if (chart && arr.length > 0) {
+                chart.applyOptions({
+                  grid: {
+                    vertLines: { color: GRID_LINE },
+                    horzLines: { color: GRID_LINE },
+                  },
+                });
               }
-              return base;
-            };
-            if (firstTickRef.current) {
-              candleSeries.setData(candleData(arr));
-              volume?.setData(volumeData(arr));
-              firstTickRef.current = false;
-            } else {
-              // Append/refresh every row that changed since the last paint
-              // (newly closed bars + the forming bar), then always refresh the
-              // forming bar — coalesces any number of ticks into ONE paint.
-              const from = Math.max(0, lastPaintedCountRef.current);
-              for (let i = from; i < count; i++) {
-                candleSeries.update(colorBar(candleRow(arr[i]), arr[i]));
-                volume?.update(volumeRow(arr[i]));
+              if (count > 0) {
+                updateTargetLayer(effectiveSignal(), arr[count - 1].close);
               }
-              candleSeries.update(
-                colorBar(candleRow(arr[count - 1]), arr[count - 1]),
-              );
-              volume?.update(volumeRow(arr[count - 1]));
             }
-            lastPaintedCountRef.current = count;
           } else {
             firstTickRef.current = true;
-          }
-          const chart = chartRef.current;
-          if (chart && arr.length > 0) {
-            chart.applyOptions({
-              grid: {
-                vertLines: { color: GRID_LINE },
-                horzLines: { color: GRID_LINE },
-              },
-            });
-          }
-          if (count > 0) {
-            updateTargetLayer(effectiveSignal(), arr[count - 1].close);
           }
         }
         // ── (2) + (3) DIVIDER + HUD CLOCK — at most once per second ──
@@ -1144,16 +1248,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         ).padStart(2, "0")}`
       : null;
   const hudSignalColor =
-    hudSignal === "BUY"
-      ? "#00f5a0"
-      : hudSignal === "SELL"
-        ? "#ff3366"
-        : "#64748b";
+    hudSignal === "BUY" ? BULLISH : hudSignal === "SELL" ? BEARISH : AXIS_TEXT;
 
   return (
     <div
-      className="relative w-full h-[320px] sm:h-[360px] md:h-[400px] lg:h-[450px] rounded-xl overflow-hidden border transition-colors duration-200"
-      style={{ backgroundColor: OBSIDIAN, borderColor: BORDER }}
+      className="relative w-full h-[calc(100vh-320px)] min-h-[500px] rounded-xl overflow-hidden border bg-[var(--tp-chart-bg)] border-[var(--tp-border)] transition-colors duration-150"
     >
       <div ref={containerRef} className="absolute inset-0" />
 

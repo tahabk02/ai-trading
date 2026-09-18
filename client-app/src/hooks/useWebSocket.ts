@@ -2,10 +2,12 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import {
   useTradingStore,
   getAggregatorParityDebug,
+  resolveHorizonMinutes,
 } from "@/store/useTradingStore";
 import { useSocket } from "./useSocket";
 import { normalizeSymbol } from "@/services/api";
 import { normalizeTimeframe } from "@/lib/realtimeCandleAggregator";
+import { tickLatencyProbe } from "@/lib/tickLatencyProbe";
 
 // ── CANONICAL SUBSCRIPTION SYMBOL ──
 // Every subscribe payload pushed to the backend MUST use the canonical
@@ -24,13 +26,20 @@ const canonicalSymbol = (raw: string): string =>
 // `history_candles` for exactly the selected resolution. The trade expiry is
 // deliberately NOT part of the payload — chart timeframe and trade expiry are
 // fully decoupled (Alpha.5 Pro), so changing expiration never re-buckets the
-// chart and changing timeframe never moves the trade duration.
-const subscribePayload = (): { symbol: string; timeframe: string } | null => {
+// chart and changing timeframe never moves the trade duration. The TARGET-EXPIRY
+// HORIZON (mirrored through the store's selectedHorizonMinutes) IS carried so
+// the /predict tick path evaluates on the same convergence window the UI
+// shows, keeping the authoritative and stabilized contracts phase-aligned.
+const subscribePayload = (): {
+  symbol: string;
+  timeframe: string;
+  horizon_minutes: number;
+} | null => {
   const store = useTradingStore.getState();
   const symbol = canonicalSymbol(store.activeSymbol);
   if (!symbol) return null;
   const timeframe = normalizeTimeframe(store.selectedTimeframe) ?? "M1";
-  return { symbol, timeframe };
+  return { symbol, timeframe, horizon_minutes: 5 };
 };
 
 // ── STALL / STALE THRESHOLDS (module scope — stable, never recreated per
@@ -92,7 +101,6 @@ export const useWebSocket = (_url?: string) => {
     status: socketStatus,
     reconnectAttempt,
     lastError,
-    usingFallbackUrl,
   } = useSocket();
   const [connected, setConnected] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -196,6 +204,14 @@ export const useWebSocket = (_url?: string) => {
     if (!socket) return;
     const payload = subscribePayload();
     if (!payload) return;
+    const previousSymbol = subscribedSymbolRef.current;
+    const previousTimeframe = lastSubscribedTfRef.current;
+    if (previousSymbol && previousSymbol !== payload.symbol) {
+      socket.emit("unsubscribe_symbol", {
+        symbol: previousSymbol,
+        timeframe: previousTimeframe,
+      });
+    }
     socket.emit("subscribe", payload);
     subscribedSymbolRef.current = payload.symbol;
     lastSubscribedTfRef.current = payload.timeframe;
@@ -423,6 +439,9 @@ export const useWebSocket = (_url?: string) => {
 
     const onLiveTick = (tick: any) => {
       markTick(tick);
+      // TEMPORARY LATENCY AUDIT — logs the 100-tick broker→browser delta + leg
+      // breakdown + seq-drop count to the console (see tickLatencyProbe.ts).
+      tickLatencyProbe.record(tick);
       ingestLiveTick(tick);
     };
 
@@ -781,8 +800,12 @@ export const useWebSocket = (_url?: string) => {
   const unsubscribeSymbol = useCallback(
     (symbol: string) => {
       if (socket) {
-        socket.emit("unsubscribe_symbol", symbol.toUpperCase());
-        if (subscribedSymbolRef.current === symbol.toUpperCase()) {
+        const normalized = canonicalSymbol(symbol);
+        socket.emit("unsubscribe_symbol", {
+          symbol: normalized,
+          timeframe: lastSubscribedTfRef.current,
+        });
+        if (subscribedSymbolRef.current === normalized) {
           subscribedSymbolRef.current = "";
         }
       }
@@ -801,7 +824,6 @@ export const useWebSocket = (_url?: string) => {
     socketStatus,
     reconnectAttempt,
     lastError,
-    usingFallbackUrl,
     isScanning,
     socket,
     streamStalled,
