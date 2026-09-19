@@ -413,6 +413,16 @@ OTC_FOREX_SYMBOLS: frozenset = frozenset({
 
 CRYPTO_SYMBOLS: frozenset = frozenset({"BTC/USD", "ETH/USD"})
 
+# ── REAL NON-OTC FOREX (PART 14) ──────────────────────────────────────
+# Standard wholesale forex pairs resolved via the already-integrated ECB feed
+# (Frankfurter + open.er-api), assetSubType "forex" — NOT the Pocket Option
+# OTC venue. Classification is explicit so OTC vs standard-forex pricing never
+# mixes on the relay.
+REAL_FOREX_SYMBOLS: frozenset = frozenset({
+    "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK",
+    "EUR/HUF", "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
+})
+
 
 def canonical_symbol(raw: str) -> str:
     """Map any backend/UI symbol variant onto the canonical ``BASE/QUOTE`` form.
@@ -449,14 +459,17 @@ def asset_type_for_symbol(symbol: str) -> str:
 
     Every symbol that resolves to a Pocket Option OTC instrument is tagged
     ``otc`` (its OTC attribute is preserved explicitly). Standard wholesale
-    forex pairs (non-OTC venue/pricing) are tagged ``forex``. Crypto majors
-    are tagged ``crypto``. Nothing is mixed across these classes.
+    forex pairs (non-OTC venue/pricing, including the 10 REAL_FOREX_SYMBOLS)
+    are tagged ``forex``. Crypto majors are tagged ``crypto``. Nothing is
+    mixed across these classes.
     """
     normalized = symbol.replace("/", "").upper()
     if normalized in {"BTCUSD", "ETHUSD", "BTCUSDT", "ETHUSDT"}:
         return "crypto"
     if symbol.replace(" ", "").replace("/", "/").upper() in OTC_FOREX_SYMBOLS:
         return "otc"
+    if symbol.upper() in REAL_FOREX_SYMBOLS:
+        return "forex"
     # Any other pair with a `/`-separated base/quote is standard forex.
     if "/" in (symbol or ""):
         return "forex"

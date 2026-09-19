@@ -20,6 +20,14 @@ Pipeline stages (each stage contributes its genuine verdict):
   5. TIER       — resolve_tier from signal_gatekeeper (T1 PREMIUM … T5 WEAK);
                   a verdict is executable only when it clears the dispatched
                   minimum tier (default T4 = 0.70).
+   6. REGIME     — PART 14 [46]: a bias-corrected Hurst classification of the
+                  real close tape (>= MIN_CLOSES = 100 candles). A RANDOM_WALK
+                  symbol is demoted to scored-only (tier T5, never executable)
+                  even at T1 confidence, stamped
+                  `suppressed_reason="regime_scored_only"`. Fewer than 100
+                  closes, or regime classification failure, means the regime
+                  gate is NOT asserted (``regime_gate`` stays None) — the
+                  existing multi-tier gate keeps its authority.
 
 Direction is ALWAYS kept when a real verdict is resolved — a sub-tier result
 is flagged ``market_waiting`` with the honest tier reached, never coerced to
@@ -38,9 +46,14 @@ from .technical_analysis import TechnicalAnalysisService
 from .quant_matrix import evaluate_quant_matrix, QuantVerdict
 from .book_instruments import evaluate_book_confluence
 from .quality_gate import apply_quality_gate, build_factor_inputs_from_candles
+from .regime_detector import classify_regime, MIN_CLOSES
 from .signal_gatekeeper import (
     TIER_LABELS,
     MIN_EXECUTABLE_TIER,
+    REGIME_GATE_TRADABLE,
+    REGIME_GATE_SCORED_ONLY,
+    SUPPRESSED_REASON_REGIME,
+    SUPPRESSED_TIER,
     is_dispatchable_tier,
     resolve_tier,
     tier_min_confidence,
@@ -72,6 +85,8 @@ class FinancialAnalysisReport:
     quality: Optional[float] = None     # five-factor ensemble 0..1 (None honest)
     quality_reason: Optional[str] = None
     quality_field: Dict[str, Any] = field(default_factory=dict)
+    regime_gate: Optional[str] = None   # PART 14 [46] — "scored_only"|"tradable"|None
+    suppressed_reason: Optional[str] = None  # "regime_scored_only" rides the payload
     factors: Dict[str, float] = field(default_factory=dict)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
@@ -251,6 +266,41 @@ class FinancialAnalysisService:
                 f"minimum tier bar {exec_bar * 100.0:.2f}% (T{resolved_tier})"
             )
 
+        # ── Stage 6: REGIME — PART 14 [46] random_walk → scored-only ──
+        # A bias-corrected Hurst classification of the real tape. RANDOM_WALK
+        # symbols are NEVER tradable (demoted to T5 even at T1 confidence).
+        # The gate is only asserted when >= MIN_CLOSES real closes make a
+        # classification honest; shorter/failed windows leave regime_gate=None
+        # so the existing multi-tier gate keeps full authority.
+        regime_gate: Optional[str] = None
+        suppressed_reason: Optional[str] = None
+        if len(closes) >= MIN_CLOSES:
+            try:
+                regime_result = classify_regime(closes.tolist())
+                if regime_result.regime == "random_walk":
+                    regime_gate = REGIME_GATE_SCORED_ONLY
+                    suppressed_reason = SUPPRESSED_REASON_REGIME
+                else:
+                    regime_gate = REGIME_GATE_TRADABLE
+            except Exception:  # noqa: BLE001 — never fails the pipeline
+                regime_gate = None
+                suppressed_reason = None
+        if regime_gate == REGIME_GATE_SCORED_ONLY:
+            resolved_tier = SUPPRESSED_TIER
+            executable = False
+            market_waiting = True
+            waiting_reason = "REGIME_RANDOM_WALK"
+            waiting_detail = (
+                "SCORED-ONLY — random_walk regime gate: this symbol is never "
+                "tradable regardless of confidence (PART 14 scored_only)"
+            )
+            logger.warning(
+                "REGIME_SCORED_ONLY_DEMOTED",
+                symbol=symbol,
+                direction=direction,
+                confidence=round(confidence, 2),
+            )
+
         report = FinancialAnalysisReport(
             symbol=symbol,
             direction=direction,
@@ -269,6 +319,8 @@ class FinancialAnalysisService:
             quality=quality,
             quality_reason=quality_reason,
             quality_field=quality_field,
+            regime_gate=regime_gate,
+            suppressed_reason=suppressed_reason,
             factors=dict(verdict_factors or {}),
             diagnostics=diagnostics,
             timestamp=pd.Timestamp.utcnow().isoformat(),
@@ -304,6 +356,8 @@ class FinancialAnalysisService:
             },
             "quality": report.quality,
             "quality_reason": report.quality_reason,
+            "regime_gate": report.regime_gate,
+            "suppressed_reason": report.suppressed_reason,
             "factors": report.factors,
             "diagnostics": report.diagnostics,
             "timestamp": report.timestamp,

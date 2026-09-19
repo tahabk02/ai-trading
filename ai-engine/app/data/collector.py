@@ -11,10 +11,15 @@ from ..core.config import settings
 logger = structlog.get_logger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — FULL 34-PAIR UNIVERSE (0 DEMO, 100% REAL)
+# STRICT OTC WHITELIST — FULL 44-PAIR UNIVERSE (0 DEMO, 100% REAL)
 # Mirrors core-backend symbolRegistry.service.ts. Includes the CRYPTO
 # MAJORS (BTC/USD, ETH/USD) resolved through CoinGecko's public API —
 # real exchange-aggregated prices, never synthetic.
+#
+# PART 14: adds 10 REAL NON-OTC wholesale forex pairs (assetSubType
+# "forex"). They resolve through the SAME already-integrated ECB feed
+# (Frankfurter reference rates + open.er-api spot) — a genuinely
+# integrated real market source, never an invented feed.
 #
 # Backed by live data sources:
 #   1. Fiat spot cross-rates: https://open.er-api.com/v6/latest/{BASE}
@@ -68,9 +73,29 @@ OTC_PAIRS: Dict[str, Dict[str, Any]] = {
     "KES/USD": {"base": "KES", "quote": "USD", "daily_vol_pct": 0.004},
 }
 
+# ── REAL NON-OTC FOREX (10) — PART 14 ────────────────────────────────
+# Standard wholesale forex pairs (assetSubType "forex"), disjoint from the
+# OTC book. They resolve through the SAME already-integrated ECB feed
+# (Frankfurter daily reference rates + open.er-api live spot). Verified to
+# return >= 100 real daily closes each (6-12 months history) — see PART 14
+# Step 1. No invented market data anywhere in this path.
+REAL_FOREX_PAIRS: Dict[str, Dict[str, Any]] = {
+    "EUR/SEK": {"base": "EUR", "quote": "SEK", "daily_vol_pct": 0.005},
+    "EUR/NOK": {"base": "EUR", "quote": "NOK", "daily_vol_pct": 0.005},
+    "EUR/DKK": {"base": "EUR", "quote": "DKK", "daily_vol_pct": 0.002},
+    "EUR/PLN": {"base": "EUR", "quote": "PLN", "daily_vol_pct": 0.006},
+    "EUR/CZK": {"base": "EUR", "quote": "CZK", "daily_vol_pct": 0.005},
+    "EUR/HUF": {"base": "EUR", "quote": "HUF", "daily_vol_pct": 0.006},
+    "USD/SEK": {"base": "USD", "quote": "SEK", "daily_vol_pct": 0.005},
+    "USD/NOK": {"base": "USD", "quote": "NOK", "daily_vol_pct": 0.006},
+    "USD/PLN": {"base": "USD", "quote": "PLN", "daily_vol_pct": 0.006},
+    "USD/CZK": {"base": "USD", "quote": "CZK", "daily_vol_pct": 0.006},
+}
+
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 OTC_SET: set = set(OTC_PAIRS.keys())
+REAL_FOREX_SET: set = set(REAL_FOREX_PAIRS.keys())
 
 
 def is_stock_symbol(symbol: str) -> bool:
@@ -82,9 +107,17 @@ def is_stock_symbol(symbol: str) -> bool:
 
 
 def is_otc_pair(symbol: str) -> bool:
-    """Strict membership check against the 10-pair whitelist."""
+    """Strict membership check against the OTC whitelist."""
     sym = (symbol or "").strip().upper()
     return sym in OTC_SET
+
+
+def is_real_forex_pair(symbol: str) -> bool:
+    """Strict membership check against the 10 REAL NON-OTC forex pairs
+    (assetSubType "forex"). These are standard wholesale pairs resolved via
+    the already-integrated ECB feed — never mixed into the OTC book."""
+    sym = (symbol or "").strip().upper()
+    return sym in REAL_FOREX_SET
 
 
 class MarketDataCollector:
@@ -103,7 +136,7 @@ class MarketDataCollector:
     FRANKFURTER_API = "https://api.frankfurter.dev/v1"
 
     def __init__(self, base_url: str = "https://api.binance.com/api/v3"):
-        # base_url kept for API compatibility but unused — OTC forex only.
+        # base_url kept for API compatibility but unused — forex only.
         self.base_url = base_url
         self.client = httpx.AsyncClient(timeout=12.0)
         self._spot_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (price, ts)
@@ -118,7 +151,11 @@ class MarketDataCollector:
     # ── Lookup helpers ──
 
     def _spec(self, symbol: str) -> Optional[Dict[str, Any]]:
-        return OTC_PAIRS.get((symbol or "").strip().upper())
+        """Resolve a symbol spec: OTC pairs first, then the 10 real NON-OTC
+        wholesale forex pairs (PART 14). Both default to the SAME integrated
+        ECB feed (Frankfurter / open.er-api)."""
+        sym = (symbol or "").strip().upper()
+        return OTC_PAIRS.get(sym) or REAL_FOREX_PAIRS.get(sym)
 
     # ── Live spot (open.er-api.com) ──
 
@@ -411,9 +448,9 @@ class MarketDataCollector:
             return []
 
     async def fetch(self, symbol: str, interval: str = "1d", limit: int = 500) -> Dict[str, Any]:
-        """Unified fetch for a whitelisted OTC pair — candles + live spot."""
+        """Unified fetch for a whitelisted OTC OR real non-OTC forex pair — candles + live spot."""
         sym = (symbol or "").strip().upper()
-        if not is_otc_pair(sym):
+        if not is_otc_pair(sym) and not is_real_forex_pair(sym):
             logger.error(
                 "[OTC] Rejecting non-whitelisted symbol at strict boundary",
                 symbol=symbol,

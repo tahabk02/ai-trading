@@ -812,8 +812,15 @@ export interface SignalHoldBufferOptions {
  *  - ``"too_late"`` the engine demoted this emission (not enough real time
  *                  left in the bucket to act); the UI shows blank + this
  *                  reason instead of a misleading signal.
+ *  - ``"regime_scored_only"`` PART 14 — the engine's regime gate classified
+ *                  this symbol as random_walk, so the emission is scored-only
+ *                  and never tradable regardless of confidence.
  *  - ``null``     nothing suppressed. */
-export type SignalSuppressReason = "too_late" | "frozen" | null;
+export type SignalSuppressReason =
+  | "too_late"
+  | "frozen"
+  | "regime_scored_only"
+  | null;
 
 export class SignalHoldBuffer {
   private held: "BUY" | "SELL" | null = null;
@@ -853,7 +860,7 @@ export class SignalHoldBuffer {
     raw: "BUY" | "SELL" | null,
     wallSec: number,
     bucketSec?: number,
-    suppress: "too_late" | null = null,
+    suppress: "too_late" | "regime_scored_only" | null = null,
     realMs?: number,
   ): "BUY" | "SELL" | null {
     const freeze = Math.max(1, bucketSec ?? this.commitBucketSec);
@@ -863,6 +870,13 @@ export class SignalHoldBuffer {
     // PART 9 — engine time-gate: signal too close to bucket close to act.
     if (suppress === "too_late") {
       this.suppressedReason = "too_late";
+      return null;
+    }
+    // PART 14 — regime gate: a random_walk symbol is scored-only, never
+    // tradable regardless of confidence. Same blanking semantics as the
+    // time-gate so the UI surfaces the regime reason.
+    if (suppress === "regime_scored_only") {
+      this.suppressedReason = "regime_scored_only";
       return null;
     }
     // Currently held directional signal — frozen for its active bucket
@@ -929,7 +943,8 @@ export class SignalHoldBuffer {
     return this.held;
   }
 
-  /** PART 9 — why the signal is suppressed ("too_late" | "frozen" | null). */
+  /** PART 9/14 — why the signal is suppressed
+   *  ("too_late" | "regime_scored_only" | "frozen" | null). */
   get reason(): SignalSuppressReason {
     return this.suppressedReason;
   }

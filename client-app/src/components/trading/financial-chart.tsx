@@ -515,6 +515,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     // PART 9 — engine-decided time-gate: when the backend demoted this very
     // emission to "too_late" (not enough real time left in the bucket to act),
     // the buffer blanks the label and surfaces the reason. Never client-derived.
+    // PART 14 — the regime gate rides the SAME suppressed_reason channel:
+    // a random_walk symbol arrives as "regime_scored_only" (scored, never
+    // tradable) and is blanked + reasoned the same way.
     const engineSuppress =
       (
         predictionDataRef.current as {
@@ -522,7 +525,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         } | null
       )?.suppressed_reason?.trim().toLowerCase() === "too_late"
         ? ("too_late" as const)
-        : null;
+        : (
+            predictionDataRef.current as {
+              suppressed_reason?: string | null;
+            } | null
+          )?.suppressed_reason?.trim().toLowerCase() === "regime_scored_only"
+          ? ("regime_scored_only" as const)
+          : null;
     return signalHoldRef.current.evaluate(
       rawGated,
       wallSec,
@@ -1291,9 +1300,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       : null;
   const hudSignalColor =
     hudSignal === "BUY" ? BULLISH : hudSignal === "SELL" ? BEARISH : AXIS_TEXT;
-  // PART 9 — why the signal display is held/suppressed: "too_late" (engine
-  // demoted the emission — not enough real time to act) or "frozen" (a
-  // fresh contradictory candidate withheld by the stability freeze window).
+  // PART 9/14 — why the signal display is held/suppressed: "too_late" (engine
+  // demoted the emission — not enough real time to act), "regime_scored_only"
+  // (PART 14 random_walk symbol — never tradable) or "frozen" (a fresh
+  // contradictory candidate withheld by the stability freeze window).
   // The UI shows the reason instead of silently going blank.
   const hudSuppressReason = signalHoldRef.current.reason;
 
@@ -1449,6 +1459,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               {hudSuppressReason === "too_late" ? (
                 <span className="font-black text-amber-300">
                   TOO LATE TO ACT
+                </span>
+              ) : hudSuppressReason === "regime_scored_only" ? (
+                <span className="font-black text-violet-300">
+                  SCORED-ONLY — RANDOM WALK
                 </span>
               ) : (
                 <span className="font-bold text-slate-300">

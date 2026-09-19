@@ -75,6 +75,62 @@ DEFINITIVE_CONFIDENCE_MIN = round(HARD_GATE * 100.0, 2)
 GATE_REASON = "TIER_GATE"          # canonical gate name for sub-tier verdicts
 LEGACY_GATE_REASON = "HARD_GATE"   # the old single-gate name, for diagnostics
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PART 14 [44] — REGIME GATE (random_walk → SCORED-ONLY, never tradable)
+# ═══════════════════════════════════════════════════════════════════════════
+# classify_regime (regime_detector.py) labels the price window as
+# "trending" / "mean_reverting" / "random_walk". HARD RULE (PART 14): a
+# random_walk symbol MUST NOT emit a tradable tier — the ensemble may still
+# *score* it, but the executable verdict is demoted to T5 (scored-only)
+# regardless of confidence, and the demotion is stamped
+# `suppressed_reason="regime_scored_only"` riding the payload (the same
+# suppressedReason UI pattern the client already renders for "too_late").
+#
+# Trending / mean_reverting windows are TRADABLE — the full ensemble runs.
+REGIME_GATE_TRADABLE = "tradable"
+REGIME_GATE_SCORED_ONLY = "scored_only"
+SUPPRESSED_REASON_REGIME = "regime_scored_only"
+
+def apply_regime_gate(
+    result: Dict[str, Any],
+    regime_gate: Any,
+) -> Dict[str, Any]:
+    """Apply the PART 14 regime override to an already-tiered gateway result.
+
+    ``regime_gate`` is "tradable"|"scored_only" from financial_analysis.
+    A "scored_only" (random_walk) window is demoted to T5 and NEVER
+    dispatched — confidence does not matter. "tradable" passes through
+    untouched (the full ensemble keeps its authority).
+    """
+    out = dict(result or {})
+    gate = str(regime_gate or "").strip().lower()
+    if gate == REGIME_GATE_SCORED_ONLY:
+        out["regime_gate"] = REGIME_GATE_SCORED_ONLY
+        out["suppressed_reason"] = SUPPRESSED_REASON_REGIME
+        out["tier"] = SUPPRESSED_TIER
+        out["executable"] = False
+        out["market_waiting"] = direction_is_kept(out)
+        out["gate"] = SUPPRESSED_TIER
+        out["suppressed"] = True
+        _logger.warning(
+            "SIGNAL_REGIME_SCORED_ONLY",
+            signal=out.get("signal"),
+            confidence=out.get("confidence"),
+            reason=SUPPRESSED_REASON_REGIME,
+        )
+    else:
+        out["regime_gate"] = REGIME_GATE_TRADABLE
+        out.setdefault("suppressed_reason", None)
+        out.setdefault("suppressed", False)
+    return out
+
+
+def direction_is_kept(payload: Dict[str, Any]) -> bool:
+    """True when the payload still carries a real BUY/SELL direction
+    (kept directional, merely marked waiting — never coerced to HOLD)."""
+    signal = _as_signal(payload.get("signal"))
+    return signal in ("BUY", "SELL")
+
 # UI-facing labels for the five tiers (colors applied client-side).
 TIER_LABELS: Dict[str, str] = {
     "T1": "PREMIUM",

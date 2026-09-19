@@ -1,10 +1,12 @@
 /**
- * symbolRegistry.service.ts — STRICT OTC FOREX + CRYPTO WHITELIST (34 REAL ASSETS)
+ * symbolRegistry.service.ts — STRICT OTC FOREX + CRYPTO WHITELIST (44 REAL ASSETS)
  *
  * PRODUCTION ENFORCEMENT:
- * The symbol registry is a HARD-CODED strict whitelist of exactly 34 real
+ * The symbol registry is a HARD-CODED strict whitelist of exactly 44 real
  * instruments matching Pocket Option / professional broker standards:
- * 32 OTC forex pairs (EUR/USD OTC etc.) + BTC/USD + ETH/USD (crypto).
+ * 32 OTC forex pairs (EUR/USD OTC etc.) + BTC/USD + ETH/USD (crypto) +
+ * 10 standard wholesale NON-OTC forex pairs (EUR/SEK, USD/NOK …), all backed
+ * by REAL ECB reference rates (Frankfurter / open.er-api).
  * The previous live Alpaca asset universe fetch is REMOVED.
  *
  * All validation functions (`getAll`, `search`, `findBySymbol`, `isValidSymbol`)
@@ -33,8 +35,8 @@ export interface SymbolEntry {
   symbol: string;
   /** Human-readable name */
   name: string;
-  /** Legacy broker instrument type (back-compat): "otc" or "crypto" */
-  type: "otc" | "crypto" | "commodity";
+  /** Legacy broker instrument type (back-compat): "otc", "crypto" or "forex" */
+  type: "otc" | "crypto" | "commodity" | "forex";
   /**
    * STRICT ASSET CLASSIFICATION — "forex" (standard wholesale forex),
    * "otc" (Pocket Option OTC instrument, distinct venue/pricing model),
@@ -55,8 +57,10 @@ export interface SymbolEntry {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// THE 34 STRICT ASSETS — HARD-CODED, NO EXTERNAL FETCH
-// 32 OTC forex pairs (assetSubType "otc") + BTC/USD + ETH/USD (crypto).
+// THE 44 STRICT ASSETS — HARD-CODED, NO EXTERNAL FETCH
+// 32 OTC forex pairs (assetSubType "otc") + 10 REAL NON-OTC wholesale
+// forex pairs (assetSubType "forex", ECB-sourced) + BTC/USD + ETH/USD
+// (crypto).
 // ════════════════════════════════════════════════════════════════════
 const OTC_WHITELIST: SymbolEntry[] = [
   // ── Forex Majors (7) ────────────────────────────────────────────────
@@ -447,6 +451,121 @@ const OTC_WHITELIST: SymbolEntry[] = [
     digits: 5,
     label: "KES/USD OTC",
   },
+
+  // ── Real Non-OTC Forex (10) — standard wholesale forex, assetSubType
+  // ── "forex" (NOT "otc"). Backed by REAL ECB reference rates via the
+  // ── Frankfurter + open.er-api feed — the same integrated source already
+  // ── used for the OTC book. Never mixed into OTC pricing/venue. ────────
+  {
+    symbol: "EUR/SEK",
+    name: "Euro / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "SEK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/SEK",
+  },
+  {
+    symbol: "EUR/NOK",
+    name: "Euro / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "NOK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/NOK",
+  },
+  {
+    symbol: "EUR/DKK",
+    name: "Euro / Danish Krone",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "DKK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/DKK",
+  },
+  {
+    symbol: "EUR/PLN",
+    name: "Euro / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "PLN",
+    payout: 92,
+    digits: 5,
+    label: "EUR/PLN",
+  },
+  {
+    symbol: "EUR/CZK",
+    name: "Euro / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "CZK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/CZK",
+  },
+  {
+    symbol: "EUR/HUF",
+    name: "Euro / Hungarian Forint",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "HUF",
+    payout: 92,
+    digits: 5,
+    label: "EUR/HUF",
+  },
+  {
+    symbol: "USD/SEK",
+    name: "US Dollar / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "SEK",
+    payout: 92,
+    digits: 5,
+    label: "USD/SEK",
+  },
+  {
+    symbol: "USD/NOK",
+    name: "US Dollar / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "NOK",
+    payout: 92,
+    digits: 5,
+    label: "USD/NOK",
+  },
+  {
+    symbol: "USD/PLN",
+    name: "US Dollar / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "PLN",
+    payout: 92,
+    digits: 5,
+    label: "USD/PLN",
+  },
+  {
+    symbol: "USD/CZK",
+    name: "US Dollar / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "CZK",
+    payout: 92,
+    digits: 5,
+    label: "USD/CZK",
+  },
 ];
 
 /** Set for O(1) strict membership checks */
@@ -487,7 +606,9 @@ export class SymbolRegistryService {
             ? "crypto"
             : assetSubType === "commodity"
               ? "commodity"
-              : "otc",
+              : assetSubType === "forex"
+                ? "forex"
+                : "otc",
         assetSubType,
         exchange: String(item.exchange || "POCKET_OPTION"),
         currency: String(item.currency || symbol.split("/").at(-1) || "USD"),
@@ -502,13 +623,14 @@ export class SymbolRegistryService {
   /**
    * Get ALL whitelisted symbols.
    * The `type` filter is accepted for API compatibility; "otc" returns the
-   * 32 OTC forex pairs, "crypto" returns BTC/ETH. Any other type → [].
+   * 32 OTC forex pairs, "forex" returns the 10 real non-OTC pairs, "crypto"
+   * returns BTC/ETH. Any other type → [].
    */
   async getAll(
-    type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
+    type?: "stock" | "crypto" | "etf" | "otc" | "commodity" | "forex",
   ): Promise<SymbolEntry[]> {
     if (!type) return [...this.entries];
-    if (type === "otc" || type === "crypto" || type === "commodity") {
+    if (type === "otc" || type === "crypto" || type === "commodity" || type === "forex") {
       return this.entries.filter((e) => e.type === type);
     }
     return [];
@@ -549,7 +671,7 @@ export class SymbolRegistryService {
    */
   async search(
     query: string,
-    _type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
+    _type?: "stock" | "crypto" | "etf" | "otc" | "commodity" | "forex",
     limit: number = 40,
   ): Promise<SymbolEntry[]> {
     const q = (query || "").trim().toUpperCase();
