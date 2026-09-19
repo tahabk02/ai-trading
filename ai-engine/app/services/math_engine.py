@@ -645,37 +645,128 @@ def adf_statistic(series: Sequence[float]) -> float:
     return float(b / se) if se > _EPS else 0.0
 
 
+def _standard_normal_cdf(x: float) -> float:
+    """Standard normal CDF via erfc (Hull N(d), no scipy dependency)."""
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def adf_pvalue(tau: float) -> float:
+    """MacKinnon (1994/2010) approximate p-value for an ADF tau statistic.
+
+    Uses the response-surface coefficients published in statsmodels'
+    ``adfvalues.mackinnonp`` for the regression-with-constant ("c") case, N=1 —
+    the exact model family that :func:`adf_statistic` computes (demeaned AR(1)
+    difference regression, no trend). Returns the same p-value that
+    ``statsmodels.tsa.stattools.adfuller`` reports for the same tau, without
+    importing statsmodels.
+
+    Lower tau -> smaller p (stronger unit-root rejection); the surface saturates
+    at 0.0 / 1.0 well past the tails.
+    """
+    # Cut-off values for the left-tail surface ("c" case, N=1 row) — MacKinnon.
+    maxstat = 2.74
+    minstat = -18.83
+    starstat = -1.61
+    if tau > maxstat:
+        return 1.0
+    if tau < minstat:
+        return 0.0
+    if tau <= starstat:
+        # tau_c_smallp[0] = [2.1659, 1.4412, 3.8269] * [1, 1, 1e-2]
+        # polyval(reversed): 2.1659 + 1.4412*tau + 0.038269*tau**2
+        z = 2.1659 + 1.4412 * tau + 0.038269 * tau * tau
+    else:
+        # tau_c_largep[0] = [1.7339, 9.3202, -1.2745, -1.0368] * [1, 1e-1, 1e-1, 1e-2]
+        # polyval(reversed): 1.7339 + 0.93202*tau - 0.12745*tau**2 - 0.010368*tau**3
+        z = 1.7339 + 0.93202 * tau - 0.12745 * tau * tau - 0.010368 * tau * tau * tau
+    return float(_standard_normal_cdf(z))
+
+
+def _expected_rs(m: int) -> float:
+    """Anis & Lloyd (1976) finite-sample expectation of R/S for iid normal
+    increments of length ``m``:
+        E[R/S](m) = Gamma((m-1)/2) / (sqrt(pi) * Gamma(m/2)) * sum_{k=1}^{m-1} sqrt((m-k)/k)
+
+    Evaluated in log space to avoid Gamma overflow on large ``m``. Dividing the
+    observed R/S by this null-model curve removes the upward small-scale bias of
+    the raw R/S t-statistic: a pure white-noise sequence reads H == 0.5, not the
+    spuriously high ~0.55 of the uncorrected estimator (which misclassifies
+    random walks as trending)."""
+    if m < 3:
+        return float("nan")
+    logg = math.lgamma((m - 1) / 2.0) - (0.5 * math.log(math.pi) + math.lgamma(m / 2.0))
+    total = 0.0
+    for k in range(1, m):
+        total += math.sqrt((m - k) / k)
+    return total * math.exp(logg)
+
+
 def hurst_rs(series: Sequence[float]) -> float:
     """Hurst exponent via rescaled-range (R/S) analysis (Hurst 1951; Mandelbrot).
-    H in (0.5,1) trending, H<0.5 mean-reverting, H=0.5 random walk."""
+    H in (0.5,1) trending, H<0.5 mean-reverting, H=0.5 random walk.
+
+    PART 12: Weron's overlapping-window R/S (Weron 2002) on a fine geometric
+    scale ladder (m from n//128 doubling-points up to n//4, ~4x overlap), then
+    an OLS slope of log(R/S) vs log(m). The observed R/S at each scale is FIRST
+    divided by the Anis-Lloyd iid expectation (_expected_rs) so that pure white
+    noise reads exactly H = 0.5 — the raw estimator is biased upward by the
+    finite-sample correction and would label random walks as trending. R is the
+    true range (max-min cumulative deviation), S the sample std (n-1 divisor).
+    The final estimate is clamped to [0, 1].
+    """
     s = [float(x) for x in series]
     n = len(s)
     if n < 20:
         raise ValueError("need >=20 observations")
-    min_len = max(8, n // 3)
-    rs_values = []
-    lengths = []
-    m = min_len
-    while m <= n // 2:
-        rs = 0.0
+
+    def _rs_at(m: int) -> float:
+        nw = n - m + 1
+        step = max(1, m // 4)  # ~4x overlap, bounded below by 1
+        total = 0.0
         count = 0
-        for start in range(0, n - m + 1, m):
+        denom = max(m - 1, 1)
+        for start in range(0, nw, step):
             block = s[start:start + m]
             mean = sum(block) / m
-            devs = [b - mean for b in block]
             cum = 0.0
-            R = 0.0
-            for d in devs:
-                cum += d
-                R = max(R, abs(cum))
-            S = math.sqrt(sum((d - 0.0) ** 2 for d in devs) / m)
+            lo = 0.0
+            hi = 0.0
+            for x in block:
+                cum += x - mean
+                if cum < lo:
+                    lo = cum
+                if cum > hi:
+                    hi = cum
+            R = hi - lo
+            S = math.sqrt(sum((x - mean) ** 2 for x in block) / denom)
             if S > _EPS:
-                rs += R / S
+                total += R / S
                 count += 1
-        if count:
-            rs_values.append(math.log(rs / count))
-            lengths.append(math.log(m))
-        m *= 2
+        return total / count if count else 0.0
+
+    rs_values: list[float] = []
+    lengths: list[float] = []
+    seen: set[int] = set()
+    m = max(8, n // 128)
+    while m < n // 4:
+        mi = int(m)
+        if mi >= 8 and mi not in seen:
+            seen.add(mi)
+            v = _rs_at(mi)
+            e = _expected_rs(mi)
+            if v > 0.0 and e > 0.0:
+                rs_values.append(math.log(v / e))
+                lengths.append(math.log(mi))
+        m *= 1.2
+    # Guarantee the top scale n//4 is always represented.
+    m2 = n // 4
+    if m2 >= 8 and m2 not in seen and m2 < n:
+        seen.add(m2)
+        v = _rs_at(m2)
+        e = _expected_rs(m2)
+        if v > 0.0 and e > 0.0:
+            rs_values.append(math.log(v / e))
+            lengths.append(math.log(m2))
     if len(rs_values) < 2:
         return 0.5
     mlx = sum(lengths) / len(lengths)
@@ -684,7 +775,7 @@ def hurst_rs(series: Sequence[float]) -> float:
     if sxx <= _EPS:
         return 0.5
     slope = sum((lengths[i] - mlx) * (rs_values[i] - mly) for i in range(len(lengths))) / sxx
-    return float(max(0.0, min(1.0, slope)))
+    return float(max(0.0, min(1.0, 0.5 + slope)))
 
 
 def fractional_differentiation(series: Sequence[float], d: float = 0.5, cutoff: float = 1e-6) -> List[float]:
