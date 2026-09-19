@@ -371,6 +371,66 @@ export function targetHollowFillRgba(
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${HOLLOW_FILL_ALPHA.toFixed(3)})`;
 }
 
+// ── PART 8: TIER-AWARE TARGET CANDLE STYLING ──
+// The engine demotes the OVERLAY with the tier it dispatched:
+//   T1 (PREMIUM)  → near-full body opacity, thin 2px outline at 60% alpha
+//   T2 (HIGH)     → 70% body opacity, the same outline
+//   T3 (MEDIUM)   → 45% body opacity, same outline + a "?" honesty marker
+//   below T3      → never rendered as a target candle (PART 6 gate)
+//   no tier       → LEGACY hollow overlay (unchanged visual)
+// The direction colours (green/red) are untouched — only opacity changes, so a
+// projected candle can NEVER be mistaken for a confirmed live candle (the 2px
+// outline at 60% is the distinguishing cue). lightweight-charts v4 has no
+// per-candle dashed border, so the "dashed outline" is honestly rendered as a
+// 2px border at 60% alpha over the semi-transparent body.
+export const TIER_OUTLINE_ALPHA = 0.6;
+export const TIER_OUTLINE_WIDTH = 2;
+
+export interface TierTargetStyle {
+  /** Body-fill alpha for this tier (T1 ~full, T2 0.70, T3 0.45). */
+  bodyAlpha: number;
+  /** Outline/wick alpha — identical (60%) across T1–T3. */
+  outlineAlpha: number;
+  /** "?" marker above the wick — T3 only. */
+  marker: "?" | null;
+  /** True when tier-aware styling applies (T1–T3); false = legacy hollow. */
+  tierStyled: boolean;
+}
+
+export function tierTargetStyle(tier?: string | null): TierTargetStyle {
+  const t = (tier || "").trim().toUpperCase();
+  if (t === "T1") {
+    return {
+      bodyAlpha: 0.95,
+      outlineAlpha: TIER_OUTLINE_ALPHA,
+      marker: null,
+      tierStyled: true,
+    };
+  }
+  if (t === "T2") {
+    return {
+      bodyAlpha: 0.7,
+      outlineAlpha: TIER_OUTLINE_ALPHA,
+      marker: null,
+      tierStyled: true,
+    };
+  }
+  if (t === "T3") {
+    return {
+      bodyAlpha: 0.45,
+      outlineAlpha: TIER_OUTLINE_ALPHA,
+      marker: "?",
+      tierStyled: true,
+    };
+  }
+  return {
+    bodyAlpha: HOLLOW_FILL_ALPHA,
+    outlineAlpha: 1,
+    marker: null,
+    tierStyled: false,
+  };
+}
+
 export interface TargetFrameCandle {
   time: number;
   open: number;
@@ -383,6 +443,8 @@ export interface TargetFrameCandle {
   alpha: number;
   offsetSec: number;
   index: number;
+  /** PART 8 — "?" honesty marker above the wick for T3 only; null otherwise. */
+  marker: "?" | null;
 }
 
 export interface TargetCandleData extends TargetFrameCandle {}
@@ -395,8 +457,10 @@ export function buildTargetFrame(opts: {
   target: number;
   atr: number;
   signal: string | null | undefined;
+  /** PART 8 — engine tier (T1…T3 reach this point). Drives opacity + marker. */
+  tier?: string | null;
 }): TargetFrameCandle[] {
-  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal } = opts;
+  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal, tier } = opts;
   if (!Number.isFinite(liveTipBucketSec) || liveTipBucketSec <= 0) return [];
   if (!Number.isFinite(intervals) || intervals < 1) return [];
   if (!Number.isFinite(timeframeSec) || timeframeSec <= 0) return [];
@@ -404,7 +468,21 @@ export function buildTargetFrame(opts: {
   if (!Number.isFinite(target) || target <= 0) return [];
   const n = Math.max(1, Math.round(intervals));
   const delta = target - liveClose;
-  const borderColor = targetColorFor(signal);
+  // PART 8 — the tier drives the BODY opacity while the direction colour is
+  // untouched; the outline stays at 60% alpha for every tier so the projected
+  // candles always read as an overlay, never as confirmed live candles.
+  const style = tierTargetStyle(tier);
+  const rgb =
+    signal === "BUY"
+      ? TARGET_RGB.BUY
+      : signal === "SELL"
+        ? TARGET_RGB.SELL
+        : TARGET_RGB.NEUTRAL;
+  const bodyRgba = (a: number) =>
+    `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`;
+  const borderColor = style.tierStyled
+    ? bodyRgba(style.outlineAlpha)
+    : targetColorFor(signal);
   const wickColor = borderColor;
   // MATH TAPER (Alpha.5 Pro, Part 4) — the projected close follows the
   // math-target arc instead of a straight line:
@@ -434,19 +512,22 @@ export function buildTargetFrame(opts: {
     const wick = Math.min(atrValid ? atr * 0.35 * taper : 0, safetyCap);
     const high = Math.max(open, close) + wick;
     const low = Math.max(0, Math.min(open, close) - wick);
-    const alpha = targetAlpha(k, n);
+    // PART 8 — tier-styled bodies carry the tier opacity; legacy keeps the
+    // hollow fill + per-slot alpha-decay value.
+    const alpha = style.tierStyled ? style.bodyAlpha : targetAlpha(k, n);
     frame.push({
       time: liveTipBucketSec + k * timeframeSec,
       open,
       high,
       low,
       close,
-      color: targetHollowFillRgba(signal),
+      color: style.tierStyled ? bodyRgba(style.bodyAlpha) : targetHollowFillRgba(signal),
       borderColor,
       wickColor,
       alpha,
       offsetSec: k * timeframeSec,
       index: k,
+      marker: style.marker,
     });
     prevClose = close;
   }
@@ -508,6 +589,7 @@ export function buildTargetCandles(opts: {
     target: targetPrice,
     atr,
     signal,
+    tier,
   });
 }
 
@@ -698,46 +780,117 @@ export class TargetProjectionEngine {
 // A directional signal commits at a bucket boundary and is IMMUTABLE for the
 // active bucket duration (freeze window). Confidence jitter around the 96.5%
 // gate can only flip the UI label after the bucket elapses, and a return to
-// neutral must persist for `holdNeutralEvals` consecutive reads — so the
-// BUY/SELL label never shimmers on every second tick.
+// neutral must persist for `holdNeutralEvals` reads SEPARATED BY REAL TIME —
+// so the BUY/SELL label never shimmers on every second tick.
+//
+// PART 11 — why the neutral-clear is measured in real time, not read count:
+// the renderer re-evaluates effectiveSignal() on every rAF frame / 1s HUD tick
+// while `wallSec` (the broker-grid bucket floor) does NOT advance between
+// prints, so "consecutive reads" in production were mere milliseconds apart.
+// Two null reads at the freeze-release instant (bucket rollover) used to blank
+// the label in ~2 frames even when the signal was only briefly under the gate,
+// then return it — the production "HUD flicker". The cleared neutral now has
+// to persist `neutralHysteresisMs` of real elapsed time (`realMs`) while the
+// freeze window itself still runs on the broker-grid `wallSec`.
 
 export interface SignalHoldBufferOptions {
-  /** Consecutive neutral reads before a held directional signal clears. */
+  /** Consecutive TIME-SEPARATED neutral reads before a held signal clears. */
   holdNeutralEvals?: number;
   /** Freeze window in wall seconds (default M1 = 60s). */
   commitBucketSec?: number;
+  /** PART 11 — minimum real elapsed time between two neutral reads for the
+   *  second read to count toward `holdNeutralEvals` (ms). Guards the
+   *  bucket-release flicker: without it, reads compressed onto one wallSec
+   *  (every frame/1s tick) let a 2-frame transient null blank the label. */
+  neutralHysteresisMs?: number;
 }
+
+/** PART 9 — WHY the stabilized signal is not (or not yet) what raw says:
+ *  - ``"frozen"``  a fresh directional candidate was withheld by the freeze
+ *                  window (buffer stability — the held signal is immutable
+ *                  until its bucket elapses).
+ *  - ``"too_late"`` the engine demoted this emission (not enough real time
+ *                  left in the bucket to act); the UI shows blank + this
+ *                  reason instead of a misleading signal.
+ *  - ``null``     nothing suppressed. */
+export type SignalSuppressReason = "too_late" | "frozen" | null;
 
 export class SignalHoldBuffer {
   private held: "BUY" | "SELL" | null = null;
   private committedSec = Number.MIN_SAFE_INTEGER;
   private nullStreak = 0;
+  private lastNullMs = 0;
+  private suppressedReason: SignalSuppressReason = null;
   private readonly holdNeutralEvals: number;
   private readonly commitBucketSec: number;
+  private readonly neutralHysteresisMs: number;
 
   constructor(opts?: SignalHoldBufferOptions) {
     this.holdNeutralEvals = Math.max(1, opts?.holdNeutralEvals ?? 2);
     this.commitBucketSec = Math.max(1, opts?.commitBucketSec ?? 60);
+    // PART 11 — DERIVED, not guessed: neutralHysteresisMs = p95(inter-read
+    // jitter) * 1.5, same methodology as MIN_ACTIONABLE_WINDOW_MS (PART 9).
+    // Measured from the real ai-engine log (15,072 LIVE_TICK_QUANT_DISPATCHED
+    // events = the WS store writer that drives the paint-loop read cadence at
+    // the volatile rollover instant): p95 inter-arrival = 984ms. 984 * 1.5 =
+    // 1476ms, rounded up to 1500ms. Every sub-gate null window shorter than
+    // ~1.5s cannot accumulate 2 spaced reads → no bucket-release flicker.
+    this.neutralHysteresisMs = Math.max(0, opts?.neutralHysteresisMs ?? 1500);
   }
 
-  /** Feed the raw gated signal. Returns the STABILIZED signal. */
+  /** Feed the raw gated signal. Returns the STABILIZED signal.
+   *  ``suppress`` = "too_late" (PART 9) surfaces an ENGINE-side time-gate
+   *  suppression: there isn't enough real time left in the bucket to act, so
+   *  the emission is blanked (never shown at an un-actionable instant) while
+   *  the committed hold state is kept intact for the next bucket.
+   *  ``realMs`` (PART 11) is the REAL elapsed clock — the paint loop's
+   *  Date.now(), NOT the broker-grid wallSec. wallSec is bucket-floor-quantized
+   *  and does not advance between prints, so it cannot measure how long a
+   *  neutral has persisted; the neutral-clear hysteresis uses realMs. When
+   *  omitted (legacy callers/tests) it falls back to `wallSec * 1000`, which
+   *  preserves the original read-count semantics for seconds-spaced reads. */
   evaluate(
     raw: "BUY" | "SELL" | null,
     wallSec: number,
     bucketSec?: number,
+    suppress: "too_late" | null = null,
+    realMs?: number,
   ): "BUY" | "SELL" | null {
     const freeze = Math.max(1, bucketSec ?? this.commitBucketSec);
+    const nowMs =
+      Number.isFinite(realMs) && (realMs ?? 0) > 0 ? realMs : wallSec * 1000;
+    this.suppressedReason = null;
+    // PART 9 — engine time-gate: signal too close to bucket close to act.
+    if (suppress === "too_late") {
+      this.suppressedReason = "too_late";
+      return null;
+    }
     // Currently held directional signal — frozen for its active bucket
     if (this.held !== null) {
       const frozen = wallSec - this.committedSec < freeze;
-      if (frozen) return this.held; // immutable within the freeze window
+      if (frozen) {
+        // A fresh CONTRARY candidate is withheld by the freeze window — that
+        // is a suppression event: the label stays as held, but the reason is
+        // surfaced so the UI can explain why it did not flip.
+        if (raw !== null && raw !== this.held) {
+          this.suppressedReason = "frozen";
+        }
+        return this.held; // immutable within the freeze window
+      }
       // Bucket elapsed — evaluate for change
       if (raw === null) {
-        this.nullStreak += 1;
-        if (this.nullStreak >= this.holdNeutralEvals) {
-          this.held = null;
-          this.nullStreak = 0;
-          this.committedSec = wallSec;
+        // PART 11 — a neutral read counts toward the clear only once it is
+        // REAL time apart from the previous counted read. Reads compressed
+        // onto one wallSec (renderer re-evaluating every frame/1s tick) no
+        // longer clear the label merely by being 2 consecutive frames.
+        if (nowMs - this.lastNullMs >= this.neutralHysteresisMs) {
+          this.nullStreak += 1;
+          this.lastNullMs = nowMs;
+          if (this.nullStreak >= this.holdNeutralEvals) {
+            this.held = null;
+            this.nullStreak = 0;
+            this.committedSec = wallSec;
+          }
         }
         // committedSec is NOT updated on a non-committing read; the bucket
         // window stays open so successive neutral reads can count toward the
@@ -747,6 +900,7 @@ export class SignalHoldBuffer {
       // Structural directional candidate arrives after the freeze → commit now
       this.held = raw;
       this.nullStreak = 0;
+      this.lastNullMs = 0;
       this.committedSec = wallSec;
       return this.held;
     }
@@ -754,6 +908,7 @@ export class SignalHoldBuffer {
     if (raw !== null) {
       this.held = raw;
       this.nullStreak = 0;
+      this.lastNullMs = 0;
       this.committedSec = wallSec;
     } else {
       this.nullStreak += 1;
@@ -766,10 +921,17 @@ export class SignalHoldBuffer {
     this.held = null;
     this.committedSec = Number.MIN_SAFE_INTEGER;
     this.nullStreak = 0;
+    this.lastNullMs = 0;
+    this.suppressedReason = null;
   }
 
   get current(): "BUY" | "SELL" | null {
     return this.held;
+  }
+
+  /** PART 9 — why the signal is suppressed ("too_late" | "frozen" | null). */
+  get reason(): SignalSuppressReason {
+    return this.suppressedReason;
   }
 }
 

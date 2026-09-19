@@ -27,6 +27,20 @@ from app.services.signal_gatekeeper import (
     tier_min_confidence,
     tier_rank,
     apply_gate,
+    # ── PART 9: execution-latency-aware time-gated emission ──
+    DEFAULT_MIN_ACTIONABLE_WINDOW_MS,
+    LATENCY_P95_MULTIPLIER,
+    MIN_MEASURED_SAMPLES,
+    SUPPRESSED_TIER,
+    SUPPRESSED_REASON_TOO_LATE,
+    percentile,
+    parse_execution_log_latencies,
+    compute_min_actionable_window_ms,
+    ExecutionLatencyTracker,
+    min_actionable_window_ms,
+    suppress_if_too_late,
+    align_expiration_to_bucket,
+    apply_time_gate,
 )
 
 
@@ -211,3 +225,169 @@ def test_apply_gate_invalid_inputs_safe_never_executable():
     result_bad = apply_gate("SELL", "abc")
     assert result_bad["executable"] is False
     assert result_bad["market_waiting"] is True
+
+
+# ═══ PART 9 — execution-latency-aware time-gated emission ═══
+
+
+def test_percentile_nearest_rank():
+    assert percentile([], 95.0) is None
+    assert percentile([None, float("nan"), float("inf"), -1.0], 95.0) is None
+    samples = [120.0, 110.0, 95.0, 130.0, 105.0]  # sorted: 95 … 130
+    assert percentile(samples, 95.0) == pytest.approx(130.0)
+    assert percentile(samples, 50.0) == pytest.approx(110.0)
+    assert percentile([1.0, 2.0, 3.0], 100.0) == pytest.approx(3.0)
+
+
+def test_parse_execution_log_latencies_real_formats():
+    text = (
+        '{"event":"Order executed successfully","latency_ms": 128.4, "symbol": "EUR/USD"}\n'
+        '{"event":"Order executed successfully","latency_ms": 255.9}\n'
+        "latency_ms=97.5 event=TradeExecuted symbol=EUR/USD\n"
+        "latency_ms= -12 (rejected)\n"
+        '{"event":"Order executed successfully","latency_ms": "nope"}\n'
+        '{"event":"market update","latency_ms": 999.0}\n'
+    )
+    samples = parse_execution_log_latencies(text)
+    assert samples == pytest.approx([128.4, 255.9, 97.5, 999.0])
+    assert parse_execution_log_latencies("") == []
+    assert parse_execution_log_latencies(None) == []
+
+
+def test_compute_min_actionable_window_ms_is_p95_times_1_5():
+    # 100 genuine latencies: 50 × 80ms … 20 × 120ms … 25 × 250ms … 5 × 800ms
+    latencies = [80.0] * 50 + [120.0] * 20 + [250.0] * 25 + [800.0] * 5
+    p95 = percentile(latencies, 95.0)
+    assert p95 == pytest.approx(250.0)
+    window = compute_min_actionable_window_ms(latencies)
+    # p95=250 ⇒ window = 250 × 1.5 = 375
+    assert window == pytest.approx(250.0 * LATENCY_P95_MULTIPLIER)
+    assert window == pytest.approx(375.0)
+    # No genuine measurement ⇒ honest bootstrap fallback, never 0.
+    assert compute_min_actionable_window_ms([]) == pytest.approx(
+        DEFAULT_MIN_ACTIONABLE_WINDOW_MS
+    )
+
+
+def test_execution_latency_tracker_rolling_window():
+    tracker = ExecutionLatencyTracker(window_size=100, min_samples=10)
+    assert tracker.is_measured() is False
+    for i in range(150):
+        tracker.add_sample(100.0 + i)
+    # Rolling window keeps only the LAST 100 executed trades.
+    samples = tracker.samples()
+    assert len(samples) == 100
+    assert samples[0] == 150.0
+    assert samples[-1] == pytest.approx(249.0)
+    tracker.add_sample(-5)  # garbage rejected
+    tracker.add_sample(float("nan"))
+    assert len(tracker.samples()) == 100
+    assert tracker.is_measured() is True
+    assert tracker.window_ms() > 0.0
+
+
+def test_refresh_reads_real_log_and_measures_window(tmp_path):
+    log = tmp_path / "execution.log"
+    lines = [
+        '{{"event":"Order executed successfully","latency_ms": {}}}'.format(100 + i)
+        for i in range(12)
+    ]
+    log.write_text("\n".join(lines), encoding="utf-8")
+    tracker = ExecutionLatencyTracker(
+        window_size=100, min_samples=10, log_path=str(log)
+    )
+    assert tracker.read_log() == 12
+    assert tracker.is_measured() is True
+    p95 = percentile(list(range(100, 112)), 95.0)  # 11th sample = 110
+    assert tracker.window_ms() == pytest.approx(p95 * LATENCY_P95_MULTIPLIER)
+    assert parse_execution_log_latencies(log.read_text(encoding="utf-8")) == [
+        float(100 + i) for i in range(12)
+    ]
+
+
+def test_min_actionable_window_ms_module_floor():
+    # While the singleton has no real measurements, the ACTIVE window stays the
+    # documented bootstrap default — an honest floor, never zero.
+    assert min_actionable_window_ms() == pytest.approx(DEFAULT_MIN_ACTIONABLE_WINDOW_MS)
+
+
+def test_suppress_if_too_late_remaining_below_window():
+    assert suppress_if_too_late(50.0, window_ms=200.0) is True
+    assert suppress_if_too_late(199.9, window_ms=200.0) is True
+    assert suppress_if_too_late(200.0, window_ms=200.0) is False  # == window OK
+    assert suppress_if_too_late(300.0, window_ms=200.0) is False
+    # Unknown remaining is conservatively suppressed (cannot confirm actionable).
+    assert suppress_if_too_late(None, window_ms=200.0) is True
+    assert suppress_if_too_late(None, window_ms=200.0, suppress_unknown=False) is False
+
+
+def test_apply_time_gate_too_late_demotes_never_silently():
+    result = apply_time_gate(
+        "BUY", 0.99, remaining_to_bucket_close_ms=80.0, window_ms=300.0
+    )
+    # Direction KEPT, tier demoted to T5, marked suppressed + market-waiting.
+    assert result["signal"] == "BUY"
+    assert result["tier"] == SUPPRESSED_TIER
+    assert result["suppressed"] is True
+    assert result["suppressed_reason"] == SUPPRESSED_REASON_TOO_LATE
+    assert result["executable"] is False
+    assert result["market_waiting"] is True
+    assert result["gate"] == SUPPRESSED_TIER
+    assert result["remaining_to_bucket_close_ms"] == pytest.approx(80.0)
+    assert result["min_actionable_window_ms"] == pytest.approx(300.0)
+
+
+def test_apply_time_gate_enough_time_passes_through():
+    result = apply_time_gate(
+        "BUY", 0.99, remaining_to_bucket_close_ms=400.0, window_ms=300.0
+    )
+    assert result["suppressed"] is False
+    assert result["suppressed_reason"] is None
+    assert result["tier"] == "T1"
+    assert result["executable"] is True
+    assert result["market_waiting"] is False
+
+
+def test_apply_time_gate_aligned_expiration_seconds():
+    # 60s timeframe, mid-bucket at elapsed 30s, window 300ms ⇒ next full bucket
+    # boundary at least 30.3s after the signal instant.
+    result = apply_time_gate(
+        "SELL",
+        0.90,
+        remaining_to_bucket_close_ms=30_000.0,
+        window_ms=300.0,
+        expiration_seconds=120,
+        timeframe_seconds=60,
+    )
+    assert result["suppressed"] is False
+    aligned = result["aligned_expiration_seconds"]
+    assert aligned is not None
+    assert aligned % 60 == 0
+    assert aligned >= 60
+    assert aligned * 1000.0 >= 30_000.0 + 300.0
+
+
+def test_align_expiration_to_bucket_property_based():
+    import random
+
+    rng = random.Random(1337)
+    for _ in range(500):
+        tf = rng.choice([5, 10, 15, 30, 60, 90, 120, 180, 300])
+        elapsed = rng.uniform(0.0, tf * 1000.0)
+        window = rng.uniform(0.0, 5000.0)
+        base_exp = tf * rng.randint(1, 8)
+        aligned = align_expiration_to_bucket(base_exp, tf, elapsed, window)
+        # 1. bucket-aligned (whole number of timeframes)
+        assert aligned % tf == 0
+        # 2. never inside the currently-forming bucket
+        assert aligned >= tf
+        # 3. at least `window` ms after the signal instant
+        assert aligned * 1000.0 >= elapsed + window
+        # 4. rounding always goes UP (never an earlier boundary than requested)
+        assert aligned >= base_exp
+
+
+def test_align_expiration_to_bucket_invalid_timeframe_safe():
+    assert align_expiration_to_bucket(60, None, 0, 300) == 60
+    assert align_expiration_to_bucket(None, 0, 0, 300) == 60
+    assert align_expiration_to_bucket(60, 60, 0, 300) == 60

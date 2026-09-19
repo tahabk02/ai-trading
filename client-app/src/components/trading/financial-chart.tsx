@@ -38,6 +38,7 @@ import {
   type Candle,
   type TargetCandleData,
 } from "@/lib/realtimeCandleAggregator";
+import { barTintForBufferedSignal } from "@/lib/signalRender";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import {
@@ -423,6 +424,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // entirely (no series updates, no target-layer projection/markers).
   const lastPaintedTipKeyRef = useRef("");
   const [hasCandles, setHasCandles] = useState(false);
+  const [targetLayerActive, setTargetLayerActive] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
   const [lookaheadHorizon, setLookaheadHorizon] = useState<number>(
     Math.max(1, Math.round(expSeconds / tfSeconds)),
@@ -510,7 +512,29 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       tip && tip.timestamp > 0 ? bucketStart(tip.timestamp, bw) : 0;
     const wallSec = tipGridMs > 0 ? Math.floor(tipGridMs / 1000) : 0;
     const tfSec = timeframeToSeconds(timeframeRef.current);
-    return signalHoldRef.current.evaluate(rawGated, wallSec, tfSec);
+    // PART 9 — engine-decided time-gate: when the backend demoted this very
+    // emission to "too_late" (not enough real time left in the bucket to act),
+    // the buffer blanks the label and surfaces the reason. Never client-derived.
+    const engineSuppress =
+      (
+        predictionDataRef.current as {
+          suppressed_reason?: string | null;
+        } | null
+      )?.suppressed_reason?.trim().toLowerCase() === "too_late"
+        ? ("too_late" as const)
+        : null;
+    return signalHoldRef.current.evaluate(
+      rawGated,
+      wallSec,
+      tfSec,
+      engineSuppress,
+      // PART 11 — REAL elapsed clock for the neutral-clears hysteresis.
+      // wallSec is the broker-grid bucket floor (constant between prints), so
+      // without this the "sustained neutral" was measured in consecutive
+      // render frames — milliseconds apart — and a 2-frame null at the
+      // freeze-release instant blanked the label on every bucket rollover.
+      Date.now(),
+    );
   }, []);
 
   const reanchor = useCallback((mainCount: number, intervals: number): void => {
@@ -736,6 +760,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             try { series.setData([]); } catch {}
           }
         }
+        if (series) {
+          try { series.setMarkers([]); } catch {}
+        }
+        setTargetLayerActive(false);
         syncMarkers(dirColor, null, 0, 0, 0);
         syncChartDebug(rows, bw, tipSec, intervals, [], signalValue);
         return;
@@ -762,6 +790,23 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           applyTargetStyle(series, signalValue);
           try { series.setData(targetData(snap.candles)); } catch {}
         }
+        // PART 8 — "?" honesty marker above the wick for T3-only projected
+        // candles. Rendered on the TARGET series so it cannot collide with the
+        // main tape; cleared whenever the track (re)builds.
+        if (series) {
+          const markers = snap.candles
+            .filter((c) => c.marker === "?")
+            .map((c) => ({
+              time: c.time as UTCTimestamp,
+              position: "aboveBar" as const,
+              shape: "circle" as const,
+              color: dirColor,
+              text: "?" as const,
+              size: 1,
+            }));
+          try { series.setMarkers(markers); } catch {}
+        }
+        setTargetLayerActive(snap.candles.length > 0);
         if (snap.candles.length > 0) reanchor(rows.length, snap.intervals);
         console.debug("[target]", {
           intervals: snap.intervals,
@@ -1128,25 +1173,22 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               tipKey === lastPaintedTipKeyRef.current;
             if (!unchangedFrame) {
               const volume = volumeRef.current;
-              const liveSignal = buildSignalView(
-                predictionDataRef.current,
-                SIGNAL_CONFIDENCE_THRESHOLD,
-              ).gatedSignal;
-              const colorBar = (base: CandlestickData, row: GridCandle) => {
-                if (row.isGap === true) {
-                  return {
-                    ...base,
-                    color: GAP_CANDLE,
-                    borderColor: GAP_CANDLE,
-                    wickColor: GAP_CANDLE,
-                  };
-                }
-                if (liveSignal === "BUY" || liveSignal === "SELL") {
-                  const c = liveSignal === "BUY" ? BULLISH : BEARISH;
-                  return { ...base, color: c, borderColor: c, wickColor: c };
-                }
-                return base;
-              };
+              // PART 11 — bar tint MUST follow the BUFFERED signal — the same
+              // `effectiveSignal()` the HUD label renders — never a second RAW
+              // read of predictionDataRef. Two store writers (REST /predict +
+              // WS applyLiveSignal, different cadences) flip the raw field at
+              // will; the unbuffered paint read made bars shimmer color while
+              // the label was frozen (the production "HUD flicker").
+              const bufferedSignal = effectiveSignal();
+              const colorBar = (base: CandlestickData, row: GridCandle) =>
+                barTintForBufferedSignal(
+                  base,
+                  row.isGap === true,
+                  bufferedSignal,
+                  GAP_CANDLE,
+                  BULLISH,
+                  BEARISH,
+                );
               if (firstTickRef.current) {
                 candleSeries.setData(candleData(arr));
                 volume?.setData(volumeData(arr));
@@ -1249,6 +1291,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       : null;
   const hudSignalColor =
     hudSignal === "BUY" ? BULLISH : hudSignal === "SELL" ? BEARISH : AXIS_TEXT;
+  // PART 9 — why the signal display is held/suppressed: "too_late" (engine
+  // demoted the emission — not enough real time to act) or "frozen" (a
+  // fresh contradictory candidate withheld by the stability freeze window).
+  // The UI shows the reason instead of silently going blank.
+  const hudSuppressReason = signalHoldRef.current.reason;
 
   return (
     <div
@@ -1358,6 +1405,17 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         </div>
       ) : null}
 
+      {/* PART 8 — PERSISTENT TARGET-CANDLE LEGEND. Always visible while ANY
+          target candle is drawn; deliberately NOT a settings toggle so the
+          projection can never be mistaken for confirmed price action. */}
+      {targetLayerActive ? (
+        <div className="pointer-events-none absolute bottom-2 left-2 z-10">
+          <span className="text-[9px] font-mono text-slate-300 uppercase tracking-widest font-bold bg-obsidian/85 border border-slate-500/40 rounded px-1.5 py-0.5">
+            Target = projection, not a confirmed price
+          </span>
+        </div>
+      ) : null}
+
       {/* PREDICTION HUD — floating micro-cards above the Future Prediction
           Zone: AI confidence %, exact target price with live delta, the exact
           target-candle count & chart timeframe (always shown once candles
@@ -1381,6 +1439,22 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
                   {hudConf.toFixed(1)}%
                 </span>
               ) : null}
+            </div>
+          ) : null}
+          {/* PART 9 — SUPPRESSION HUD. Shown only when the stability/engine
+              gate actually suppressed the display, so the user sees WHY the
+              label didn't flip instead of a silent blank. */}
+          {hudSuppressReason ? (
+            <div className="flex items-center gap-2 rounded-md border border-amber-400/30 bg-amber-500/10 backdrop-blur-sm px-2 py-1 font-mono text-[9px] uppercase tracking-widest">
+              {hudSuppressReason === "too_late" ? (
+                <span className="font-black text-amber-300">
+                  TOO LATE TO ACT
+                </span>
+              ) : (
+                <span className="font-bold text-slate-300">
+                  FROZEN — STABILITY HOLD
+                </span>
+              )}
             </div>
           ) : null}
           {hudTarget > 0 ? (

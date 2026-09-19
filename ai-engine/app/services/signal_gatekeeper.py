@@ -30,7 +30,17 @@ Contract:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import json
+import math
+import os
+import re
+import threading
+from collections import deque
+from typing import Any, Dict, Iterable, Optional
+
+import structlog
+
+_logger = structlog.get_logger(__name__)
 
 # ── THE MULTI-TIER LADDER — one canonical value, one source of truth ──
 TIER_THRESHOLDS: Dict[str, float] = {
@@ -223,3 +233,323 @@ def _as_signal(value: Any) -> Optional[str]:
         s = value.strip().upper()
         return s if s in ("BUY", "SELL") else None
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART 9 — EXECUTION-LATENCY-AWARE TIME-GATED EMISSION
+# ═══════════════════════════════════════════════════════════════════════════
+# A verdict the engine REACHES at the right tier can still be USELESS if it
+# arrives while the bucket is about to close: by the time order placement +
+# fill latency passes, the candle has already expired. We therefore measure
+# the REAL per-execution latency of the last executed trades and refuse to
+# dispatch any signal whose remaining time-to-bucket-close is below
+# `MIN_ACTIONABLE_WINDOW_MS = p95(measured_latency) * 1.5`.
+#
+# The window is DERIVED — never guessed. `ExecutionLatencyTracker` reads the
+# `latency_ms` the execution-engine logs on every successful order
+# ("Market order placed successfully" / "Order executed successfully") from
+# the last 100 executed trades and computes the p95. `MIN_ACTIONABLE_WINDOW_MS`
+# is the module-level bootstrap default that `refresh_execution_latency()` sets
+# to the measured value once enough real samples exist.
+#
+# Contract:
+#   * A suppressed verdict is demoted to tier "T5" (never dispatched) BUT is
+#     NEVER dropped silently: `suppressed_reason="too_late"` rides the payload
+#     and the demotion is logged with the exact remaining/window numbers.
+#   * Expirations are aligned UP to the NEXT full bucket boundary that sits at
+#     least `MIN_ACTIONABLE_WINDOW_MS` after the signal instant, so an
+#     expiration can never land inside the currently-forming bucket.
+#   * This gate ONLY removes signals that cannot be acted on in time — it does
+#     NOT measure win rate. Accuracy is tracked separately by accuracy_tracker.
+
+DEFAULT_MIN_ACTIONABLE_WINDOW_MS = 1500.0  # bootstrap only; replaced by p95×1.5
+LATENCY_WINDOW_SIZE = 100                  # last 100 executed trades
+LATENCY_P95_MULTIPLIER = 1.5               # safety margin on the real p95
+MIN_MEASURED_SAMPLES = 10                  # below this → window is unmeasured
+SUPPRESSED_TIER = "T5"
+SUPPRESSED_REASON_TOO_LATE = "too_late"
+MIN_ACTIONABLE_WINDOW_MS = DEFAULT_MIN_ACTIONABLE_WINDOW_MS
+
+# Where the execution-engine writes its structured order logs. Overridable via
+# EXECUTION_LOG_PATH so tests point at a fixture; defaults to the live path.
+EXECUTION_LOG_PATH = os.environ.get(
+    "EXECUTION_LOG_PATH",
+    os.path.normpath(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "..", "..",
+            "execution-engine", "execution.log",
+        )
+    ),
+)
+
+
+def percentile(values: Iterable[Any], p: float) -> Optional[float]:
+    """Nearest-rank percentile of the finite, non-negative samples."""
+    finite = sorted(
+        v
+        for v in values
+        if isinstance(v, (int, float)) and math.isfinite(v) and v >= 0.0
+    )
+    if not finite:
+        return None
+    rank = max(1, min(len(finite), int(math.ceil((float(p) / 100.0) * len(finite)))))
+    return finite[rank - 1]
+
+
+def parse_execution_log_latencies(text: str) -> list:
+    """Extract REAL per-execution `latency_ms` values from execution-engine
+    log text (structlog JSON lines `{"latency_ms": 12.5}` and key=value lines
+    `latency_ms=12.5`). Only finite, >= 0 samples survive; NaN/negative/garbage
+    are rejected so a single malformed record can never poison the window."""
+    samples: list = []
+    if not text:
+        return samples
+    kv_re = re.compile(
+        r"latency_ms\s*=\s*([0-9]+(?:\.[0-9]+)?)"
+        r"|\blatency_ms\s*:\s*([0-9]+(?:\.[0-9]+)?)"
+    )
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        value: Optional[float] = None
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                raw = obj.get("latency_ms")
+                if isinstance(raw, (int, float)):
+                    value = float(raw)
+        except (ValueError, TypeError):
+            m = kv_re.search(line)
+            if m:
+                value = float(m.group(1) if m.group(1) else m.group(2))
+        if (
+            value is not None
+            and math.isfinite(value)
+            and value >= 0.0
+        ):
+            samples.append(value)
+    return samples
+
+
+def compute_min_actionable_window_ms(
+    latencies: Iterable[Any],
+    multiplier: float = LATENCY_P95_MULTIPLIER,
+) -> float:
+    """``MIN_ACTIONABLE_WINDOW_MS = p95(measured_latency) * 1.5``.
+
+    Honest bootstrap: with NO genuine measurement the documented default is
+    returned (the gate is conservative before real data exists, never zero)."""
+    p95 = percentile(latencies, 95.0)
+    if p95 is None:
+        return float(DEFAULT_MIN_ACTIONABLE_WINDOW_MS)
+    return round(p95 * float(multiplier), 2)
+
+
+class ExecutionLatencyTracker:
+    """Rolling window of the last ``window_size`` EXECUTED-trade latencies,
+    measured from the execution-engine's own logs — never assumed or seeded."""
+
+    def __init__(
+        self,
+        window_size: int = LATENCY_WINDOW_SIZE,
+        min_samples: int = MIN_MEASURED_SAMPLES,
+        log_path: Optional[str] = None,
+    ) -> None:
+        self._window: deque = deque(maxlen=max(1, int(window_size)))
+        self._min_samples = max(1, int(min_samples))
+        self._log_path = log_path
+        self._lock = threading.RLock()
+
+    def add_sample(self, latency_ms: Any) -> bool:
+        value = _as_float(latency_ms)
+        if value is None or value < 0.0:
+            return False
+        with self._lock:
+            self._window.append(value)
+        return True
+
+    def samples(self) -> list:
+        with self._lock:
+            return list(self._window)
+
+    def is_measured(self) -> bool:
+        """True once enough REAL samples exist to trust the p95."""
+        return len(self.samples()) >= self._min_samples
+
+    def p95_ms(self) -> Optional[float]:
+        return percentile(self.samples(), 95.0)
+
+    def window_ms(self) -> float:
+        return compute_min_actionable_window_ms(self.samples())
+
+    def read_log(self, path: Optional[str] = None) -> int:
+        """Ingest `latency_ms` records from an execution-engine log file.
+        Returns the number of samples actually added."""
+        target = path or self._log_path or EXECUTION_LOG_PATH
+        try:
+            with open(target, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return 0
+        added = 0
+        for sample in parse_execution_log_latencies(text):
+            if self.add_sample(sample):
+                added += 1
+        return added
+
+    def refresh(self) -> int:
+        """Read the real log and sync the module-level ``MIN_ACTIONABLE_WINDOW_MS``
+        to the measured p95×1.5 once enough samples exist."""
+        global MIN_ACTIONABLE_WINDOW_MS
+        added = self.read_log()
+        if self.is_measured():
+            MIN_ACTIONABLE_WINDOW_MS = self.window_ms()
+        return added
+
+
+_execution_latency_tracker: Optional[ExecutionLatencyTracker] = None
+_execution_latency_lock = threading.Lock()
+
+
+def get_execution_latency_tracker() -> ExecutionLatencyTracker:
+    """Process-wide singleton tracker (thread-safe)."""
+    global _execution_latency_tracker
+    if _execution_latency_tracker is None:
+        with _execution_latency_lock:
+            if _execution_latency_tracker is None:
+                _execution_latency_tracker = ExecutionLatencyTracker()
+    return _execution_latency_tracker
+
+
+def refresh_execution_latency() -> int:
+    """Re-measure ``MIN_ACTIONABLE_WINDOW_MS`` from the REAL execution-engine
+    log. Returns the number of latency samples ingested this call."""
+    return get_execution_latency_tracker().refresh()
+
+
+def min_actionable_window_ms() -> float:
+    """The ACTIVE actionable window: the measured p95×1.5 once real samples
+    exist, otherwise the honest bootstrap default."""
+    tracker = get_execution_latency_tracker()
+    if tracker.is_measured():
+        return tracker.window_ms()
+    return float(MIN_ACTIONABLE_WINDOW_MS)
+
+
+def suppress_if_too_late(
+    remaining_to_bucket_close_ms: Any,
+    window_ms: Optional[float] = None,
+    suppress_unknown: bool = True,
+) -> bool:
+    """True ⇔ the signal is too close to bucket-close to be actionable.
+
+    ``remaining < window`` suppresses. An UNKNOWN remaining is treated as
+    un-actionable (cannot confirm, so conservatively suppressed) unless the
+    caller explicitly opts out via ``suppress_unknown=False``."""
+    remaining = _as_float(remaining_to_bucket_close_ms)
+    window = _as_float(window_ms)
+    if window is None:
+        window = min_actionable_window_ms()
+    if remaining is None:
+        return bool(suppress_unknown)
+    return remaining < window
+
+
+def align_expiration_to_bucket(
+    expiration_seconds: Any,
+    timeframe_seconds: Any,
+    elapsed_in_bucket_ms: Any,
+    min_actionable_window_ms: Any,
+) -> int:
+    """Round an expiration UP to the next full bucket boundary that sits at
+    least ``min_actionable_window_ms`` after the signal instant.
+
+    Property contract (tested partially + property-based over random bucket
+    positions):
+      1. aligned_seconds % timeframe_seconds == 0      (bucket-aligned)
+      2. aligned_seconds >= timeframe_seconds          (never inside the
+                                                        forming bucket)
+      3. aligned_ms >= elapsed_ms + min_window         (actionable)
+    """
+    timeframe = _as_float(timeframe_seconds)
+    exp = _as_float(expiration_seconds)
+    if timeframe is None or timeframe <= 0:
+        base = _as_float(expiration_seconds)
+        return int(round(base)) if base is not None else 60
+    timeframe_ms = timeframe * 1000.0
+    window = _as_float(min_actionable_window_ms)
+    window_f = max(0.0, window if window is not None else 0.0)
+    elapsed_f = _as_float(elapsed_in_bucket_ms)
+    elapsed = max(0.0, elapsed_f if elapsed_f is not None else 0.0)
+    base_exp = exp if exp is not None and exp > 0 else float(timeframe)
+    k = max(1, int(math.ceil((base_exp * 1000.0) / timeframe_ms)))
+    while k * timeframe_ms < elapsed + window_f:
+        k += 1
+    return int(k * timeframe)
+
+
+def apply_time_gate(
+    signal: Any,
+    confidence: Any,
+    remaining_to_bucket_close_ms: Any,
+    min_tier: str = MIN_EXECUTABLE_TIER,
+    window_ms: Optional[float] = None,
+    expiration_seconds: Any = None,
+    timeframe_seconds: Any = None,
+) -> Dict[str, Any]:
+    """Emission resolver with the execution-latency time gate (PART 9).
+
+    Baseline contract == :func:`apply_gate` PLUS:
+      * ``suppressed`` — bool
+      * ``suppressed_reason`` — None | "too_late"
+      * ``remaining_to_bucket_close_ms`` — float | None
+      * ``min_actionable_window_ms`` — float
+      * ``aligned_expiration_seconds`` — int | None (when exp + tf supplied)
+
+    A too-late verdict is demoted to ``SUPPRESSED_TIER`` ("T5") and never
+    dispatched — BUT never dropped silently: the direction is kept
+    (``market_waiting=True``), the reason is attached to the payload, and the
+    demotion is logged with the exact numbers for the audit trail."""
+    result = apply_gate(signal, confidence, min_tier=min_tier)
+    window = _as_float(window_ms)
+    if window is None:
+        window = min_actionable_window_ms()
+    remaining = _as_float(remaining_to_bucket_close_ms)
+    suppressed = suppress_if_too_late(remaining, window)
+    result["suppressed"] = suppressed
+    result["suppressed_reason"] = (
+        SUPPRESSED_REASON_TOO_LATE if suppressed else None
+    )
+    result["remaining_to_bucket_close_ms"] = remaining
+    result["min_actionable_window_ms"] = round(window, 2)
+    if suppressed:
+        result["tier"] = SUPPRESSED_TIER
+        result["executable"] = False
+        result["market_waiting"] = True
+        result["gate"] = SUPPRESSED_TIER
+        _logger.warning(
+            "SIGNAL_SUPPRESSED_TOO_LATE",
+            signal=result["signal"],
+            confidence=result["confidence"],
+            remaining_ms=remaining,
+            min_actionable_window_ms=round(window, 2),
+            reason=SUPPRESSED_REASON_TOO_LATE,
+        )
+    if expiration_seconds is not None and timeframe_seconds is not None:
+        timeframe = _as_float(timeframe_seconds)
+        exp = _as_float(expiration_seconds)
+        if timeframe is not None and timeframe > 0 and exp is not None and exp > 0:
+            elapsed = max(
+                0.0,
+                timeframe * 1000.0 - (remaining if remaining is not None else 0.0),
+            )
+            result["aligned_expiration_seconds"] = align_expiration_to_bucket(
+                exp, timeframe, elapsed, window
+            )
+        else:
+            result["aligned_expiration_seconds"] = None
+    else:
+        result["aligned_expiration_seconds"] = None
+    return result

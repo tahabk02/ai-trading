@@ -37,6 +37,7 @@ import {
   targetProjectionKey,
   TargetProjectionEngine,
   SignalHoldBuffer,
+  tierTargetStyle,
   RealtimeCandleAggregator,
 } from "@/lib/realtimeCandleAggregator";
 import {
@@ -1842,5 +1843,134 @@ describe("PART 6 — tier-gated target candles (T1–T3 overlay)", () => {
     });
     expect(t5.candles.length).toBe(0);
     expect(t5.key).toContain("tier|off");
+  });
+});
+
+describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
+  const TIP = 1_700_000;
+  const baseInputs = {
+    liveTipBucketMs: TIP * 1000,
+    liveClose: 100,
+    targetPrice: 104,
+    atr: 1,
+    signal: "BUY" as const,
+    expirationSeconds: 60,
+    timeframeSeconds: 60,
+  };
+
+  function alphaOf(rgba: string): number {
+    const last = rgba.slice(rgba.lastIndexOf(",") + 1).replace(")", "").trim();
+    const a = Number(last);
+    return Number.isFinite(a) ? a : -1;
+  }
+
+  it("per-tier body opacity: T1 ~full, T2 0.70, T3 0.45", () => {
+    const t1 = buildTargetCandles({ ...baseInputs, tier: "T1" });
+    const t2 = buildTargetCandles({ ...baseInputs, tier: "T2" });
+    const t3 = buildTargetCandles({ ...baseInputs, tier: "T3" });
+    expect(t1[0].color).toMatch(/^rgba\(/);
+    expect(alphaOf(t1[0].color)).toBeCloseTo(0.95, 3);
+    expect(alphaOf(t2[0].color)).toBeCloseTo(0.7, 3);
+    expect(alphaOf(t3[0].color)).toBeCloseTo(0.45, 3);
+  });
+
+  it("outline/wick alpha is 0.60 for every tier — the thin 2px outline at 60%", () => {
+    for (const tier of ["T1", "T2", "T3"]) {
+      const c = buildTargetCandles({ ...baseInputs, tier });
+      expect(alphaOf(c[0].borderColor)).toBeCloseTo(0.6, 3);
+      expect(alphaOf(c[0].wickColor)).toBeCloseTo(0.6, 3);
+    }
+  });
+
+  it("direction colour stays green/red — the tier only changes opacity", () => {
+    const buy = buildTargetCandles({ ...baseInputs, tier: "T1" });
+    expect(buy[0].color.startsWith("rgba(38,166,154,")).toBe(true); // BUY green
+    const sell = buildTargetCandles({
+      ...baseInputs,
+      signal: "SELL",
+      tier: "T3",
+    });
+    expect(sell[0].borderColor.startsWith("rgba(239,83,80,")).toBe(true); // SELL red
+  });
+
+  it(`T3 marks a "?" above the wick; T1/T2 carry NO marker`, () => {
+    const t1 = buildTargetCandles({ ...baseInputs, tier: "T1" });
+    const t2 = buildTargetCandles({ ...baseInputs, tier: "T2" });
+    const t3 = buildTargetCandles({ ...baseInputs, tier: "T3" });
+    expect(t1.every((c) => c.marker == null)).toBe(true);
+    expect(t2.every((c) => c.marker == null)).toBe(true);
+    expect(t3.length).toBeGreaterThan(0);
+    expect(t3.every((c) => c.marker === "?")).toBe(true);
+  });
+
+  it("tierTargetStyle is stable & finite for unknown/absent tiers (legacy hollow)", () => {
+    expect(tierTargetStyle(undefined).tierStyled).toBe(false);
+    expect(tierTargetStyle("T9").marker).toBeNull();
+    expect(tierTargetStyle("").tierStyled).toBe(false);
+    expect(tierTargetStyle("t3").marker).toBe("?");
+  });
+
+  it("absent tier keeps the LEGACY hollow visual (fill 0.08, solid border)", () => {
+    const legacy = buildTargetCandles({ ...baseInputs, tier: undefined });
+    expect(alphaOf(legacy[0].color)).toBeCloseTo(HOLLOW_FILL_ALPHA, 3);
+    expect(legacy[0].borderColor).toBe(targetColorFor("BUY"));
+    expect(legacy[0].marker).toBeNull();
+  });
+
+  it("PART 8 regression — T4/T5 NEVER produce a renderable target-candle track", () => {
+    const eng = new TargetProjectionEngine();
+    const t4 = eng.present({
+      liveTipBucketSec: TIP,
+      timeframeSec: 60,
+      expirationSec: 60,
+      liveClose: 100,
+      targetPrice: 104,
+      atr: 1,
+      signal: "BUY",
+      tier: "T4",
+    });
+    expect(t4.candles.length).toBe(0);
+    const t5 = eng.present({
+      liveTipBucketSec: TIP,
+      timeframeSec: 60,
+      expirationSec: 60,
+      liveClose: 100,
+      targetPrice: 104,
+      atr: 1,
+      signal: "BUY",
+      tier: "T5",
+    });
+    expect(t5.candles.length).toBe(0);
+    expect(t5.key).toContain("tier|off");
+    // A later identical T5 read yields NO change → no repaint can schedule.
+    const again = eng.present({
+      liveTipBucketSec: TIP,
+      timeframeSec: 60,
+      expirationSec: 60,
+      liveClose: 100,
+      targetPrice: 104,
+      atr: 1,
+      signal: "BUY",
+      tier: "T5",
+    });
+    expect(again.changed).toBe(false);
+    expect(again.candles.length).toBe(0);
+  });
+
+  it("SignalHoldBuffer surfaces suppressedReason: frozen + too_late, resets", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    expect(buf.evaluate("BUY", 0, 60)).toBe("BUY");
+    expect(buf.reason).toBeNull();
+    // A fresh CONTRARY candidate within the freeze window is withheld → frozen.
+    expect(buf.evaluate("SELL", 30, 60)).toBe("BUY");
+    expect(buf.reason).toBe("frozen");
+    // Engine time-gate: too_late blanks the label AND surfaces the reason.
+    expect(buf.evaluate("SELL", 30, 60, "too_late")).toBeNull();
+    expect(buf.reason).toBe("too_late");
+    // A bucket-elapsed agreeing read resumes normally (no lingering reason).
+    expect(buf.evaluate("SELL", 70, 60)).toBe("SELL");
+    expect(buf.reason).toBeNull();
+    buf.reset();
+    expect(buf.reason).toBeNull();
   });
 });

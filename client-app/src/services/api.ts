@@ -122,6 +122,17 @@ export interface PredictionResponse {
   tier?: string;
   /** Human label for the tier (PREMIUM / HIGH / MEDIUM / LOW / WEAK). */
   tier_label?: string;
+  /**
+   * PART 9 — time-gated emission. True when the engine suppressed this very
+   * verdict because there was not enough real time left in the bucket to act
+   * on it. Never fabricated client-side.
+   */
+  suppressed?: boolean;
+  /**
+   * PART 9 — suppression reason ("too_late") when the emission was time-gated;
+   * null otherwise. The client renders this honestly instead of a stale signal.
+   */
+  suppressed_reason?: string | null;
   diagnostics?: {
     confidence_gated?: boolean;
     gated_direction?: string;
