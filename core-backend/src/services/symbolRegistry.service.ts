@@ -794,6 +794,23 @@ export class SymbolRegistryService {
   async refreshCache(): Promise<SymbolEntry[]> {
     return [...this.entries];
   }
+
+  /**
+   * BOOT TICK-STREAM SEED (PART 15.1 [61] — closes the [52] boot-seed gap).
+   *
+   * Returns exactly the entries whose live-tick streams must be auto-started
+   * at boot so the market terminal grid has live prices for every card the
+   * moment it connects — WITHOUT a client having to subscribe per-symbol.
+   *
+   * The two asset-type calls are kept EXPLICIT (getAll("otc") +
+   * getAll("forex")); a bare getAll() would accidentally sweep crypto (BTC/ETH)
+   * into the seed, whose boot behavior must stay unchanged.
+   */
+  async getBootStreamSeed(): Promise<SymbolEntry[]> {
+    const otc = await this.getAll("otc");
+    const forex = await this.getAll("forex");
+    return [...otc, ...forex];
+  }
 }
 
 // ── Singleton export ──

@@ -632,19 +632,24 @@ httpServer.listen(PORT, () => {
 
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  STRICT LIVE TICK AUTO-START â€” 100% REAL DATA, 0% DEMO
-  // Auto-start live tick streams for all whitelisted OTC pairs on boot.
-  // Candle buffers are populated ONLY by real observed data (PO bridge
-  // snapshot/ticks and genuine HTTP live ticks) â€” NO skeleton-bar fabrication.
+  // Auto-start live tick streams for all whitelisted OTC pairs AND the 10
+  // real non-OTC forex pairs (PART 14/15) at boot, so the market terminal
+  // grid has live prices for every card the moment it connects — no
+  // per-symbol Pro-chart subscription required. Crypto boot behavior stays
+  // untouched (explicit getAll("otc") + getAll("forex"), never a bare
+  // getAll()). Candle buffers are populated ONLY by real observed data (PO
+  // bridge snapshot/ticks and genuine HTTP live ticks) — NO skeleton-bar
+  // fabrication.
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   symbolRegistry
-    .getAll("otc")
-    .then(async (pairs) => {
-      pairs.forEach((entry) => {
+    .getBootStreamSeed()
+    .then(async (entries) => {
+      for (const entry of entries) {
         tickIngestionService.startSymbolStream(entry.symbol);
-      });
+      }
       logger.info("[Startup] Strict live tick streams ready", {
-        count: pairs.length,
-        symbols: pairs.map((p) => p.symbol),
+        count: entries.length,
+        symbols: entries.map((p) => p.symbol),
       });
     })
     .catch((err) => {
