@@ -133,6 +133,12 @@ export interface PredictionResponse {
    * null otherwise. The client renders this honestly instead of a stale signal.
    */
   suppressed_reason?: string | null;
+  /**
+   * PART 14 — regime gate from financial_analysis.py ("scored_only" |
+   * "tradable"). "scored_only" = random_walk classification: the emission is
+   * never tradable regardless of confidence.
+   */
+  regime_gate?: string | null;
   diagnostics?: {
     confidence_gated?: boolean;
     gated_direction?: string;

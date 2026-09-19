@@ -14,6 +14,7 @@ import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { HorizonSelector } from "./horizon-selector";
 import { useMarketTerminalStore, type HorizonMinutes } from "@/store/useMarketTerminalStore";
 import { buildProHref, suppressCardNav } from "@/lib/pro-deep-link";
+import { realForexCardBehavior } from "@/lib/realForexRegime";
 
 interface AssetCardProps {
   symbol: string;
@@ -26,7 +27,14 @@ interface AssetCardProps {
  * a card paints a LIVE CALL/PUT almost immediately. The heavier /multi-predict
  * refresh on horizon change upgrades that with the per-horizon confidence.
  *
- * DEEP-LINK: the whole card navigates to
+ * PART 15 [51] REAL-FOREX REGIME GATE: the 10 REAL_FOREX_PAIRS cards resolve
+ * their display through resolveRealForexRegimeDisplay(). Until [47]/[48] are
+ * explicitly confirmed, EVERY real pair renders SCORED-ONLY: price + REAL badge
+ * only, no CALL/PUT badge, no target candle, and the card is NON-INTERACTIVE
+ * (no card-wide navigation, no PRO button) — the UI must never visually invite
+ * a trade action while the underlying regime classification is under review.
+ *
+ * DEEP-LINK: a tradable card navigates to
  * /dashboard/pro?symbol=<CANONICAL>&tf=<HORIZON_IN_SECONDS> so the Pro chart
  * opens on the SAME expiration the card is displaying. The nested horizon pills
  * and the PRO button call `e.stopPropagation()` so they never trigger that
@@ -39,12 +47,22 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
   const verdict = useMarketTerminalStore((s) => s.verdicts[symbol]);
   const prediction = useMarketTerminalStore((s) => s.predictions[symbol]);
   const horizon = useMarketTerminalStore((s) => s.resolveHorizon(symbol));
+
+  // PART 15 [51] — real-forex regime display (payload regime_gate + the
+  // [47]/[48] confirmation gate). Scored-only unless explicitly confirmed.
+  const regime = realForexCardBehavior(
+    symbol,
+    (prediction?.data as { regime_gate?: string | null } | null)?.regime_gate,
+  );
+  const scoredOnly = regime.scoredOnly;
+
   const proHref = React.useMemo(
     () => buildProHref(symbol, horizon * 60),
     [symbol, horizon],
   );
 
   const handleHorizonChange = (h: HorizonMinutes) => {
+    if (scoredOnly) return; // real scored-only cards never re-aim an expiration
     if (onHorizonChange) {
       onHorizonChange(symbol, h);
       return;
@@ -53,10 +71,12 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
   };
 
   const openPro = React.useCallback(() => {
+    if (scoredOnly) return; // non-interactive — no trade action from this card
     router.push(proHref);
-  }, [router, proHref]);
+  }, [router, proHref, scoredOnly]);
 
   const handleCardKeyDown = (e: React.KeyboardEvent) => {
+    if (scoredOnly) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       openPro();
@@ -133,12 +153,18 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
 
   return (
     <div
-      role="link"
-      tabIndex={0}
-      aria-label={`Open Pro Terminal for ${symbol}`}
+      role={scoredOnly ? undefined : "link"}
+      tabIndex={scoredOnly ? -1 : 0}
+      aria-label={regime.ariaLabel}
+      aria-disabled={scoredOnly ? true : undefined}
       onClick={openPro}
       onKeyDown={handleCardKeyDown}
-      className="flex flex-col bg-obsidian-900/70 border border-slate-800 rounded-xl p-2.5 shadow-sm hover:border-blue-500/40 hover:shadow-card-lift hover:-translate-y-0.5 transition-all duration-150 min-w-0 cursor-pointer select-none"
+      className={cn(
+        "flex flex-col bg-obsidian-900/70 border border-slate-800 rounded-xl p-2.5 shadow-sm min-w-0 select-none",
+        scoredOnly
+          ? "border-violet-500/20 opacity-90 cursor-default"
+          : "hover:border-blue-500/40 hover:shadow-card-lift hover:-translate-y-0.5 transition-all duration-150 cursor-pointer",
+      )}
     >
       {/* ── Header: pair + live price ── */}
       <div className="flex items-start justify-between gap-2">
@@ -168,57 +194,76 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
         </div>
       </div>
 
-      {/* ── Signal row: LIVE + HORIZON verdicts ── */}
-      <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-        {liveBadge}
-        {horizonBadge}
-        <span className="ml-auto text-slate-500 text-[8px] font-mono whitespace-nowrap">
-          {hasAnySignal ? confText : "LIVE <0.5m"}
-        </span>
-      </div>
-
-      {/* ── Confidence meter ── */}
-      {hasAnySignal && (
-        <div className="mt-1.5 h-1 w-full bg-slate-800/80 rounded-full overflow-hidden">
-          <div
-            className={cn(
-              "h-full rounded-full transition-all duration-500",
-              liveDir === "SELL"
-                ? "bg-rose-500/80"
-                : liveDir === "BUY"
-                  ? "bg-emerald-500/80"
-                  : horizonDir === "SELL"
-                    ? "bg-rose-500/60"
-                    : horizonDir === "BUY"
-                      ? "bg-emerald-500/60"
-                      : "bg-slate-600",
-            )}
-            style={{ width: `${confBarWidth}%` }}
-          />
+      {scoredOnly ? (
+        // ── PART 15 [51] — scored-only real pair: price shown, NO signal,
+        //    NO BUY/SELL action, NO target candle. Same SCORED-ONLY pattern
+        //    the PART 9/14 suppression HUD already uses for random_walk. ──
+        <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-black text-violet-300 text-[9px] tracking-wider bg-violet-500/10 border border-violet-500/30">
+            <Activity size={10} />
+            SCORED-ONLY
+          </span>
+          <span className="ml-auto text-slate-500 text-[8px] font-mono whitespace-nowrap">
+            {regime.reason === "regime_scored_only"
+              ? "RANDOM WALK"
+              : "REGIME REVIEW"}
+          </span>
         </div>
+      ) : (
+        <>
+          {/* ── Signal row: LIVE + HORIZON verdicts ── */}
+          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+            {liveBadge}
+            {horizonBadge}
+            <span className="ml-auto text-slate-500 text-[8px] font-mono whitespace-nowrap">
+              {hasAnySignal ? confText : "LIVE <0.5m"}
+            </span>
+          </div>
+
+          {/* ── Confidence meter ── */}
+          {hasAnySignal && (
+            <div className="mt-1.5 h-1 w-full bg-slate-800/80 rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all duration-500",
+                  liveDir === "SELL"
+                    ? "bg-rose-500/80"
+                    : liveDir === "BUY"
+                      ? "bg-emerald-500/80"
+                      : horizonDir === "SELL"
+                        ? "bg-rose-500/60"
+                        : horizonDir === "BUY"
+                          ? "bg-emerald-500/60"
+                          : "bg-slate-600",
+                )}
+                style={{ width: `${confBarWidth}%` }}
+              />
+            </div>
+          )}
+
+          {/* ── Footer: per-card horizon + pro deep-dive ── */}
+          <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center justify-between gap-1">
+            {/* stopPropagation: horizon pills must never trigger card navigation */}
+            <div onClickCapture={(e) => suppressCardNav(e)}>
+              <HorizonSelector
+                value={horizon}
+                onChange={handleHorizonChange}
+              />
+            </div>
+            <button
+              type="button"
+              aria-label={`Open Pro Terminal for ${symbol}`}
+              onClick={(e) => {
+                suppressCardNav(e);
+                openPro();
+              }}
+              className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 hover:text-emerald-400 transition-colors shrink-0 cursor-pointer"
+            >
+              PRO <ChevronDown size={9} />
+            </button>
+          </div>
+        </>
       )}
-
-      {/* ── Footer: per-card horizon + pro deep-dive ── */}
-      <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center justify-between gap-1">
-        {/* stopPropagation: horizon pills must never trigger card navigation */}
-        <div onClickCapture={(e) => suppressCardNav(e)}>
-          <HorizonSelector
-            value={horizon}
-            onChange={handleHorizonChange}
-          />
-        </div>
-        <button
-          type="button"
-          aria-label={`Open Pro Terminal for ${symbol}`}
-          onClick={(e) => {
-            suppressCardNav(e);
-            openPro();
-          }}
-          className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 hover:text-emerald-400 transition-colors shrink-0 cursor-pointer"
-        >
-          PRO <ChevronDown size={9} />
-        </button>
-      </div>
     </div>
   );
 };

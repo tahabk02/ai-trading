@@ -5,6 +5,7 @@ import { useMarketTerminal } from "@/hooks/useMarketTerminal";
 import {
   useMarketTerminalStore,
   ALL_MARKET_SYMBOLS,
+  REAL_MARKET_SYMBOLS,
   selectTerminalConnected,
   selectTerminalFilter,
   selectGlobalHorizon,
@@ -16,7 +17,7 @@ import { AssetCard } from "./asset-card";
 /**
  * MARKET TERMINAL — the all-pairs grid (Alpha.5 Pro main dashboard).
  *
- * Streaming topology (single joined WS channel, no 34× replays):
+ * Streaming topology (single joined WS channel, no 44× replays):
  *   • `market_quotes`     — 1Hz all-pair price / spread / tick-count snapshots
  *   • `live_quant_signal` — 1Hz micro-quant CALL/PUT verdicts for every pair
  *   • /multi-predict      — heavier per-horizon refresh (debounced) when the
@@ -24,6 +25,10 @@ import { AssetCard } from "./asset-card";
  *
  * GLOBAL horizon selector applies to every card; each card can also override
  * its own horizon (that override is cleared the moment the global changes).
+ *
+ * ALL_44_LAYOUT — PART 15: the grid renders the full 44-instrument universe
+ * (32 OTC + 10 REAL + 2 crypto). REAL pairs carry the REAL badge and are
+ * scored-only until [47]/[48] regime verification is explicitly confirmed.
  */
 export const MarketTerminal: React.FC = () => {
   const { connected, setGlobalHorizon, setCardHorizon, refreshNow } =
@@ -44,11 +49,14 @@ export const MarketTerminal: React.FC = () => {
     return byQuote.length > 0
       ? byQuote
       : // Quotes may not have landed yet — fall back to the static registry so a
-        // brand-new grid still renders every OTC/crypto pair immediately.
+        // brand-new grid still renders every pair immediately.
         ALL_MARKET_SYMBOLS.filter((sym) => {
           // Registry-driven filter: OTC pairs have label "… OTC"; crypto majors
-          // are BTC/USD + ETH/USD.
+          // are BTC/USD + ETH/USD; the 10 real pairs (PART 14/15) live in their
+          // own REAL_FOREX_PAIRS group (assetSubType "forex").
           if (filter === "crypto") return /^BTC\/USD$|^ETH\/USD$/.test(sym);
+          if (filter === "real") return REAL_MARKET_SYMBOLS.has(sym);
+          if (filter === "otc") return !REAL_MARKET_SYMBOLS.has(sym) && !/^BTC\/USD$|^ETH\/USD$/.test(sym);
           return true;
         });
   }, [filter]);
@@ -70,7 +78,9 @@ export const MarketTerminal: React.FC = () => {
                 }`}
               />
               <span className="text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-tighter">
-                {live ? "STREAMING 34 PAIRS" : "CONNECTING…"}
+                {live
+                  ? `STREAMING ${ALL_MARKET_SYMBOLS.length} PAIRS`
+                  : "CONNECTING…"}
               </span>
             </div>
           </div>
@@ -107,8 +117,8 @@ export const MarketTerminal: React.FC = () => {
           ))}
         </div>
         <p className="mt-4 text-center text-[8px] text-slate-600 font-mono uppercase tracking-widest">
-          Live micro-quant verdicts · 60% definitive gate · {symbols.length} of{" "}
-          {ALL_MARKET_SYMBOLS.length} instruments
+          All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 — live
+          micro-quant verdicts · 60% definitive gate · {symbols.length} shown
         </p>
       </main>
     </div>

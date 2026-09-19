@@ -49,8 +49,113 @@ export interface SymbolDefinition {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// FULL POCKET OPTION / BROKER UNIVERSE — 34 REAL ASSETS, 0 DEMO
-// 32 OTC forex (assetSubType "otc") + BTC/USD + ETH/USD (crypto).
+// REAL FOREX (10) — standard wholesale NON-OTC pairs (PART 14/15).
+// Backed by REAL ECB reference rates via Frankfurter + open.er-api — the
+// same integrated feed already used for the OTC book. Classified
+// assetSubType "forex" (NOT "otc") — a wholly different venue/pricing
+// model that must never be mixed with the Pocket Option OTC book.
+// Declared FIRST so OTC_FOREX_PAIRS can spread it and the terminal grid
+// can render the REAL pair group as its own distinct class.
+// ════════════════════════════════════════════════════════════════════
+export const REAL_FOREX_PAIRS: SymbolDefinition[] = [
+  {
+    symbol: "EUR/SEK",
+    name: "Euro / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/SEK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/NOK",
+    name: "Euro / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/NOK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/DKK",
+    name: "Euro / Danish Krone",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/DKK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/PLN",
+    name: "Euro / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/PLN",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/CZK",
+    name: "Euro / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/CZK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/HUF",
+    name: "Euro / Hungarian Forint",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/HUF",
+    digits: 5,
+  },
+  {
+    symbol: "USD/SEK",
+    name: "US Dollar / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/SEK",
+    digits: 5,
+  },
+  {
+    symbol: "USD/NOK",
+    name: "US Dollar / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/NOK",
+    digits: 5,
+  },
+  {
+    symbol: "USD/PLN",
+    name: "US Dollar / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/PLN",
+    digits: 5,
+  },
+  {
+    symbol: "USD/CZK",
+    name: "US Dollar / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/CZK",
+    digits: 5,
+  },
+];
+
+// ════════════════════════════════════════════════════════════════════
+// FULL POCKET OPTION / BROKER UNIVERSE — 44 REAL ASSETS, 0 DEMO
+// 32 OTC forex (assetSubType "otc") + BTC/USD + ETH/USD (crypto)
+// + the 10 REAL_FOREX_PAIRS above (assetSubType "forex"). The OTC array
+// deliberately spreads REAL_FOREX_PAIRS so whitelist / lookup / trading
+// consumers keep the full 44-instrument universe.
 // ════════════════════════════════════════════════════════════════════
 export const OTC_FOREX_PAIRS: SymbolDefinition[] = [
   // ── Forex Majors (7) ────────────────────────────────────────────────
@@ -374,101 +479,10 @@ export const OTC_FOREX_PAIRS: SymbolDefinition[] = [
     digits: 5,
   },
 
-  // ── REAL FOREX (10) — standard wholesale NON-OTC pairs (PART 14).
-  // Backed by REAL ECB reference rates via Frankfurter + open.er-api — the
-  // same integrated feed already used for the OTC book. Classified
-  // assetSubType "forex" (NOT "otc") — a wholly different venue/pricing
-  // model that must never be mixed with the Pocket Option OTC book.
-  {
-    symbol: "EUR/SEK",
-    name: "Euro / Swedish Krona",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "EUR/SEK",
-    digits: 5,
-  },
-  {
-    symbol: "EUR/NOK",
-    name: "Euro / Norwegian Krone",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "EUR/NOK",
-    digits: 5,
-  },
-  {
-    symbol: "EUR/DKK",
-    name: "Euro / Danish Krone",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "EUR/DKK",
-    digits: 5,
-  },
-  {
-    symbol: "EUR/PLN",
-    name: "Euro / Polish Zloty",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "EUR/PLN",
-    digits: 5,
-  },
-  {
-    symbol: "EUR/CZK",
-    name: "Euro / Czech Koruna",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "EUR/CZK",
-    digits: 5,
-  },
-  {
-    symbol: "EUR/HUF",
-    name: "Euro / Hungarian Forint",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "EUR/HUF",
-    digits: 5,
-  },
-  {
-    symbol: "USD/SEK",
-    name: "US Dollar / Swedish Krona",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "USD/SEK",
-    digits: 5,
-  },
-  {
-    symbol: "USD/NOK",
-    name: "US Dollar / Norwegian Krone",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "USD/NOK",
-    digits: 5,
-  },
-  {
-    symbol: "USD/PLN",
-    name: "US Dollar / Polish Zloty",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "USD/PLN",
-    digits: 5,
-  },
-  {
-    symbol: "USD/CZK",
-    name: "US Dollar / Czech Koruna",
-    type: "forex",
-    assetSubType: "forex",
-    payout: 92,
-    label: "USD/CZK",
-    digits: 5,
-  },
+  // ── REAL FOREX (10) — PART 14/15. Standard wholesale NON-OTC pairs,
+  //     spread from REAL_FOREX_PAIRS so every consumer of OTC_FOREX_PAIRS
+  //     still resolves the full 44-instrument universe. ───────────────
+  ...REAL_FOREX_PAIRS,
 ];
 
 /**
@@ -479,10 +493,25 @@ export const OTC_WHITELIST: Set<string> = new Set(
   OTC_FOREX_PAIRS.map((p) => p.symbol),
 );
 
+/**
+ * Set of the REAL_FOREX_PAIRS symbols only (assetSubType "forex") for
+ * O(1) "is this a real-market pair" checks — used by the terminal grid to
+ * render the REAL badge and regime-gate (scored-only) display.
+ */
+export const REAL_FOREX_SET: Set<string> = new Set(
+  REAL_FOREX_PAIRS.map((p) => p.symbol),
+);
+
 /** Symbol strings only (e.g. "AUD/USD", "CAD/JPY") — shown in dropdowns */
 export const ALL_SYMBOL_TICKERS: string[] = OTC_FOREX_PAIRS.map(
   (s) => s.symbol,
 );
+
+/** Full 44-asset symbol list — OTC/crypto preamble + the 10 real pairs. */
+export const ALL_UNIVERSE_TICKERS: string[] = [
+  ...ALL_SYMBOL_TICKERS,
+  ...REAL_FOREX_PAIRS.map((p) => p.symbol),
+];
 
 /**
  * Strict validation — the ONLY symbol validation used in the frontend.

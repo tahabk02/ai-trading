@@ -1,17 +1,17 @@
 import { create } from "zustand";
-import { OTC_FOREX_PAIRS } from "@/constants/symbols";
+import { OTC_FOREX_PAIRS, REAL_FOREX_PAIRS } from "@/constants/symbols";
 import type { PredictionResponse, MarketQuote } from "@/services/api";
 
 /**
  * MARKET TERMINAL STORE — Alpha.5 Pro all-pairs grid.
  *
- * Owns the full 34-instrument universe card state:
+ * Owns the full 44-instrument universe card state:
  *   • quotes      — live price / bid / ask / spread / tick count / freshness
  *                   (fed by the 1Hz `market_quotes` WS snapshots + REST bootstrap)
  *   • verdicts    — the AI engine's 1Hz micro-quant verdicts (`live_quant_signal`)
  *   • predictions — heavier per-horizon `/multi-predict` results
  *   • horizon     — GLOBAL target horizon (1/2/3/5/10 min) with per-card overrides
- *   • filter      — asset-class filter (all | otc | crypto)
+ *   • filter      — asset-class filter (all | otc | real | crypto)
  *
  * Verdicts and predictions are kept SEPARATE so the grid always renders the
  * freshest live 1Hz CALL/PUT instantly while the heavier horizon refresh lands.
@@ -22,7 +22,7 @@ import type { PredictionResponse, MarketQuote } from "@/services/api";
 export const HORIZON_MINUTES = [1, 2, 3, 5, 10] as const;
 export type HorizonMinutes = (typeof HORIZON_MINUTES)[number];
 
-export type AssetClassFilter = "all" | "otc" | "crypto";
+export type AssetClassFilter = "all" | "otc" | "real" | "crypto";
 
 /** Market-quote snapshot (GET /api/v1/quotes + `market_quotes` WS). */
 // MarketQuote is defined in services/api.ts (single source of truth shared
@@ -80,7 +80,21 @@ interface MarketTerminalState {
   setFeedStatus: (s: string) => void;
 }
 
-export const ALL_MARKET_SYMBOLS: string[] = OTC_FOREX_PAIRS.map((p) => p.symbol);
+export const ALL_MARKET_SYMBOLS: string[] = [
+  ...new Set([
+    ...OTC_FOREX_PAIRS.map((p) => p.symbol),
+    ...REAL_FOREX_PAIRS.map((p) => p.symbol),
+  ]),
+];
+
+/**
+ * The 10 REAL_FOREX_PAIRS symbols only (assetSubType "forex") — used by the
+ * grid to render the REAL badge and the PART 14/15 regime-gate ("scored_only")
+ * non-tradable display for real-market pairs.
+ */
+export const REAL_MARKET_SYMBOLS: Set<string> = new Set(
+  REAL_FOREX_PAIRS.map((p) => p.symbol),
+);
 
 export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) => ({
   quotes: {},

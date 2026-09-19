@@ -2,17 +2,19 @@
 
 import React from "react";
 import type { AssetClassFilter } from "@/store/useMarketTerminalStore";
-import { OTC_FOREX_PAIRS } from "@/constants/symbols";
+import { OTC_FOREX_PAIRS, REAL_FOREX_PAIRS } from "@/constants/symbols";
 import { cn } from "@/utils/cn";
 
 const FILTERS: { key: AssetClassFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "otc", label: "OTC" },
+  { key: "real", label: "Real" },
   { key: "crypto", label: "Crypto" },
 ];
 
 function countByFilter(f: AssetClassFilter): number {
-  if (f === "all") return OTC_FOREX_PAIRS.length;
+  if (f === "all") return OTC_FOREX_PAIRS.length; // 44 (incl. 10 real)
+  if (f === "real") return REAL_FOREX_PAIRS.length; // 10
   return OTC_FOREX_PAIRS.filter((p) => p.assetSubType === f).length;
 }
 
