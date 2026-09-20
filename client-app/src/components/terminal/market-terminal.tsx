@@ -13,6 +13,7 @@ import {
 import { HorizonSelector } from "./horizon-selector";
 import { AssetClassFilterPills } from "./asset-class-filter";
 import { AssetCard } from "./asset-card";
+import { cn } from "@/utils/cn";
 
 /**
  * MARKET TERMINAL — the all-pairs grid (Alpha.5 Pro main dashboard).
@@ -62,25 +63,26 @@ export const MarketTerminal: React.FC = () => {
   }, [filter]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col h-full min-h-0 bg-term-canvas text-term-ink">
       {/* ── TERMINAL TOOLBAR ── */}
-      <nav className="border-b border-[var(--tp-border)] bg-header-sheen backdrop-blur-md sticky top-0 z-30 shrink-0">
+      <nav className="border-b border-term-line bg-term-canvas/85 backdrop-blur-md sticky top-0 z-30 shrink-0">
         <div className="max-w-full mx-auto px-3 sm:px-4 md:px-6 min-h-14 py-2 flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-slate-100 font-bold text-[11px] sm:text-xs tracking-widest uppercase whitespace-nowrap">
-              Market Terminal
+            <h2 className="text-term-ink font-bold text-[11px] sm:text-xs tracking-tight whitespace-nowrap">
+              Market terminal
             </h2>
-            <div className="w-px h-4 bg-slate-800 hidden sm:block" />
+            <div className="w-px h-4 bg-term-line hidden sm:block" />
             <div className="flex items-center gap-1.5">
               <div
-                className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${
-                  live ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
-                }`}
+                className={cn(
+                  "w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full",
+                  live ? "bg-bull animate-pulse" : "bg-bear",
+                )}
               />
-              <span className="text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-tighter">
+              <span className="num-fig text-[9px] sm:text-[10px] text-term-ink-dim uppercase tracking-tighter">
                 {live
-                  ? `STREAMING ${ALL_MARKET_SYMBOLS.length} PAIRS`
-                  : "CONNECTING…"}
+                  ? `Streaming ${ALL_MARKET_SYMBOLS.length} pairs`
+                  : "Connecting…"}
               </span>
             </div>
           </div>
@@ -97,7 +99,7 @@ export const MarketTerminal: React.FC = () => {
             />
             <button
               onClick={() => refreshNow()}
-              className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border border-slate-700 text-slate-400 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors whitespace-nowrap"
+              className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-chip border border-term-line text-term-ink-dim hover:text-term-ink hover:border-term-ink-faint transition-colors whitespace-nowrap cursor-pointer"
             >
               Refresh
             </button>
@@ -107,7 +109,7 @@ export const MarketTerminal: React.FC = () => {
 
       {/* ── Grid ── */}
       <main className="flex-1 p-3 sm:p-4 md:p-5 overflow-y-auto custom-scrollbar min-h-0">
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 sm:gap-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
           {symbols.map((sym) => (
             <AssetCard
               key={sym}
@@ -116,7 +118,7 @@ export const MarketTerminal: React.FC = () => {
             />
           ))}
         </div>
-        <p className="mt-4 text-center text-[8px] text-slate-600 font-mono uppercase tracking-widest">
+        <p className="mt-4 text-center text-[8px] text-term-ink-faint num-fig uppercase tracking-widest">
           All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 — live
           micro-quant verdicts · 60% definitive gate · {symbols.length} shown
         </p>

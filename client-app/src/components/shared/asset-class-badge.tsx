@@ -43,7 +43,7 @@ export function AssetClassBadge({
 
   if (variant === "compact") {
     return (
-      <span className="text-[9px] font-mono uppercase tracking-widest font-black">
+      <span className="text-[9px] font-mono uppercase tracking-widest font-bold text-term-ink-faint">
         {label}
       </span>
     );
@@ -51,14 +51,14 @@ export function AssetClassBadge({
 
   const styles =
     label === "REAL"
-      ? "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/40"
+      ? "bg-gold/10 text-gold border-gold/40"
       : label === "CRYPTO"
-        ? "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/30"
-        : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30";
+        ? "bg-crypto/10 text-crypto border-crypto/40"
+        : "bg-transparent text-term-ink-dim border-term-line";
 
   return (
     <span
-      className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[9px] font-black leading-none uppercase tracking-widest ${styles}`}
+      className={`inline-flex items-center px-1.5 py-0.5 rounded-chip border text-[9px] font-bold leading-none uppercase tracking-widest ${styles}`}
     >
       {label}
     </span>

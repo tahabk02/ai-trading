@@ -55,6 +55,23 @@
     --tp-crosshair: rgba(148, 163, 184, 0.35);
     --tp-price-line: rgba(148, 163, 184, 0.85);
 
+    /* ── PART 16 TERMINAL BLOTTER (channel triplets, dark only) ──
+       Flat-obsidian matrix: canvas = page air, panel = cell bed, line =
+       hairline, ink scales = text. Gold = real-market / hold, crypto =
+       digital channel. Consumed by tailwind.config.js via
+       rgb(var(--x) / <alpha-value>) so `/opacity` modifiers keep working. */
+    --term-canvas: 6 7 11;       /* #06070B */
+    --term-panel: 12 15 24;      /* #0C0F18 */
+    --term-line: 30 36 52;       /* #1E2434 */
+    --term-ink: 232 237 246;     /* #E8EDF6 */
+    --term-ink-dim: 129 140 160; /* #818CA0 */
+    --term-ink-faint: 82 92 112; /* #525C70 */
+    --term-gold: 216 160 72;     /* #D8A048 */
+    --term-crypto: 0 179 201;    /* #00B3C9 */
+
+    --bull: 34 171 148;          /* #22ab94 — direction UP (candles match) */
+    --bear: 242 54 69;           /* #f23645 — direction DOWN (candles match) */
+
     /* ── 8px SPACING GRID (4 / 8 / 12 / 16 / 24 / 32 / 48) ──
        The terminal lays out exclusively on this scale. Tailwind's numeric
        spacing utilities map 1:1 (p-1=4 · p-2=8 · p-3=12 · p-4=16 · p-6=24 ·
@@ -383,6 +400,76 @@
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  /* ── PART 16 NUMERIC READOUT ──
+     Prices, deltas, ticks, confidence, timestamps. Tabular + Lining figures
+     so digits NEVER jitter as values tick (functional requirement, not a
+     stylistic choice). Applied to VALUES ONLY — never to labels or symbols
+     (that would be mono-for-everything-data-shaped). */
+  .num-fig {
+    font-family:
+      ui-monospace,
+      "Cascadia Mono",
+      "SF Mono",
+      "SFMono-Regular",
+      "Segoe UI Mono",
+      Consolas,
+      "Liberation Mono",
+      monospace;
+    font-feature-settings:
+      "tnum" 1,
+      "lnum" 1;
+    font-variant-numeric: tabular-nums lining-nums;
+    letter-spacing: 0;
+  }
+
+  /* ── PART 16 PRICE-TICK FLASH (the ONE motion moment) ──
+     Driven by a React `key` on the price string: a changed price restates the
+     element, re-triggering the ~450ms flash. The flash colours are the SAME
+     institutional candle hues as the direction chips — no new colours. */
+  @keyframes tick-flash-up {
+    0% {
+      color: rgb(var(--bull));
+    }
+    100% {
+      color: rgb(var(--term-ink));
+    }
+  }
+  @keyframes tick-flash-down {
+    0% {
+      color: rgb(var(--bear));
+    }
+    100% {
+      color: rgb(var(--term-ink));
+    }
+  }
+  .price-flash-up {
+    animation: tick-flash-up 450ms ease-out;
+  }
+  .price-flash-down {
+    animation: tick-flash-down 450ms ease-out;
+  }
+
+  /* ── PREFERS-REDUCED-MOTION: the flash degrades to a STATIC colour
+     change (the colour swap still communicates direction; only the
+     tween is removed) and no grid/pulse animation runs. ── */
+  @media (prefers-reduced-motion: reduce) {
+    .price-flash-up {
+      animation: none;
+      color: rgb(var(--bull));
+    }
+    .price-flash-down {
+      animation: none;
+      color: rgb(var(--bear));
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 
   /* ── Custom thin scrollbar for terminal aesthetic (theme-aware) ── */

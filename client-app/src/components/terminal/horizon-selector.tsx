@@ -32,7 +32,7 @@ export const HorizonSelector: React.FC<HorizonSelectorProps> = ({
 
   return (
     <div className="flex items-center gap-0.5">
-      <span className="text-slate-500 text-[8px] font-bold uppercase tracking-wider mr-0.5 whitespace-nowrap hidden sm:inline">
+      <span className="text-term-ink-faint text-[8px] font-bold uppercase tracking-wider mr-0.5 whitespace-nowrap hidden sm:inline">
         H
       </span>
       {HORIZON_MINUTES.map((h) => (
@@ -40,12 +40,13 @@ export const HorizonSelector: React.FC<HorizonSelectorProps> = ({
           key={h}
           disabled={disabled}
           onClick={() => onChange(h)}
+          aria-pressed={h === value}
           className={cn(
-            "rounded font-bold tracking-wider transition-colors border",
+            "rounded-chip font-bold tracking-wider transition-colors border",
             pillClass,
             h === value
-              ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
-              : "bg-slate-800/30 text-slate-400 border-transparent hover:text-white hover:bg-slate-700/50",
+              ? "bg-term-ink text-term-canvas border-term-ink"
+              : "bg-transparent text-term-ink-faint border-transparent hover:text-term-ink-dim hover:bg-term-panel",
             disabled && "opacity-40 cursor-not-allowed",
           )}
         >

@@ -2,12 +2,7 @@
 
 import React from "react";
 import { useRouter } from "next/navigation";
-import {
-  TrendingUp,
-  TrendingDown,
-  Activity,
-  ChevronDown,
-} from "lucide-react";
+import { TrendingUp, TrendingDown, Activity, ChevronDown } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { getPairLabel, getQuoteCurrency } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
@@ -22,24 +17,35 @@ interface AssetCardProps {
 }
 
 /**
- * The terminal never shows "MARKET WAITING" once minimum bars are met: the 60%
- * gate + micro-quant fast-path stream directional verdicts from 2 real bars, so
- * a card paints a LIVE CALL/PUT almost immediately. The heavier /multi-predict
- * refresh on horizon change upgrades that with the per-horizon confidence.
+ * MARKET TERMINAL CELL — PART 16 flat-obsidian blotter matrix redesign.
  *
- * PART 15 [51] REAL-FOREX REGIME GATE: the 10 REAL_FOREX_PAIRS cards resolve
- * their display through resolveRealForexRegimeDisplay(). Until [47]/[48] are
- * explicitly confirmed, EVERY real pair renders SCORED-ONLY: price + REAL badge
- * only, no CALL/PUT badge, no target candle, and the card is NON-INTERACTIVE
- * (no card-wide navigation, no PRO button) — the UI must never visually invite
- * a trade action while the underlying regime classification is under review.
+ * Four ruled rows, hairline-separated, one flat panel tone, NO card shadow
+ * and NO hover-lift anywhere in the grid:
  *
- * DEEP-LINK: a tradable card navigates to
- * /dashboard/pro?symbol=<CANONICAL>&tf=<HORIZON_IN_SECONDS> so the Pro chart
- * opens on the SAME expiration the card is displaying. The nested horizon pills
- * and the PRO button call `e.stopPropagation()` so they never trigger that
- * card-wide navigation (a whole-card <Link> was not viable — the nested
- * controls would swallow every click).
+ *   ┌─────────────────────────────────────┐
+ *   │ EUR/USD OTC                [OTC]    │  row 1 — symbol + class chip
+ *   │ 1.08452              ▲ +0.00012 s   │  row 2 — tabular PRICE (flash on
+ *   │                                        tick) + delta / spread / ticks
+ *   │ [CALL 62.4%]  [H5m SYNC]            │  row 3 — verdict strip (LIVE +
+ *   │ ███████████▌ (confidence bar)       │          horizon) + confidence bar
+ *   │ ─────────────────────────────────── │
+ *   │ 1m 2m 3m 5m 10m          PRO ▾      │  row 4 — expiry pills + Pro deep-link
+ *   └─────────────────────────────────────┘
+ *
+ * Everything a trader needs stays on the card — live + horizon verdicts,
+ * confidence bar + %, spread, delta, tick-pressure count, expiry selector and
+ * the Pro deep-link are all preserved. What changed is the container: flat
+ * panel, hairline rules, 4px terminal radius, one deliberate palette, and the
+ * ONE motion moment = price-tick flash (tabular figures, so digits never
+ * jitter and columns hold steady).
+ *
+ * PART 15 [51] REAL-FOREX REGIME GATE is untouched (HARD RULE):
+ *   • scored-only cards keep role=undefined, tabIndex=-1, aria-disabled,
+ *     NO PRO button, NO horizon pills, NO confidence bar, NO hover strip;
+ *   • the card reads price + SCORED-ONLY/REGIME status only.
+ *   • realForexCardBehavior / resolveRealForexRegimeDisplay drive it exactly
+ *     as before — the redesign must not silently re-introduce an interactive
+ *     affordance on a scored-only card.
  */
 export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) => {
   const router = useRouter();
@@ -101,21 +107,40 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
   const priceText = price != null ? price.toFixed(digits) : "--";
   const spreadText = quote?.spread != null ? quote.spread.toFixed(digits) : "--";
   const quoteCcy = getQuoteCurrency(symbol);
+  const tickCount = quote?.tickCount ?? 0;
+  const ticksText = tickCount >= 1000 ? `${(tickCount / 1000).toFixed(1)}k` : String(tickCount);
+
+  // ── PART 16 [58] PRICE-TICK FLASH (the ONE motion moment) ──
+  // A ref holds the PREVIOUS price; when the new price differs we stamp a
+  // direction and key the rendered <span> on the price string so React
+  // restates the element → the 450ms CSS flash replays per tick. The flash
+  // colours ARE the candle hues (bull/bear). prefers-reduced-motion degrades
+  // it to a static colour change (see the .price-flash-* guards in globals).
+  const prevPriceRef = React.useRef<number | null>(null);
+  const prevPrice = prevPriceRef.current;
+  let flashDir: "up" | "down" | null = null;
+  if (price != null) {
+    if (prevPrice != null && prevPrice !== price) {
+      flashDir = prevPrice < price ? "up" : "down";
+    }
+    prevPriceRef.current = price;
+  }
+  const delta = price != null && prevPrice != null ? price - prevPrice : null;
 
   const hasAnySignal = Boolean(liveDir) || Boolean(horizonDir);
 
   const liveBadge = liveDir ? (
     <span
       className={cn(
-        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-black text-white text-[9px] tracking-wider",
-        liveDir === "BUY" ? "bg-emerald-500/90" : "bg-rose-500/90",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none",
+        liveDir === "BUY" ? "bg-bull/15 text-bull border border-bull/40" : "bg-bear/15 text-bear border border-bear/40",
       )}
     >
       {liveDir === "BUY" ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
       {liveDir === "BUY" ? "CALL" : "PUT"}
     </span>
   ) : liveWaiting ? (
-    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold text-amber-400/90 text-[9px] tracking-wider bg-amber-500/10 border border-amber-500/30">
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-gold bg-gold/10 border border-gold/40">
       <Activity size={10} />
       WAITING
     </span>
@@ -123,33 +148,35 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
 
   const horizonBadge =
     horizonPending ? (
-      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold text-slate-300 text-[9px] tracking-wider bg-slate-700/40">
-        <span className="w-2.5 h-2.5 border border-slate-300 border-t-transparent rounded-full animate-spin" />
-        {horizon}m&nbsp;SYNC
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-semibold text-[9px] leading-none text-term-ink-dim border border-term-line bg-term-panel">
+        <span className="w-2.5 h-2.5 border border-term-ink-dim border-t-transparent rounded-full animate-spin" />
+        H{horizon}m SYNC
       </span>
     ) : horizonDir ? (
       <span
         className={cn(
-          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-black text-white text-[9px] tracking-wider",
-          horizonDir === "BUY" ? "bg-emerald-500/80" : "bg-rose-500/80",
+          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none",
+          horizonDir === "BUY" ? "bg-bull/12 text-bull border border-bull/35" : "bg-bear/12 text-bear border border-bear/35",
         )}
       >
         {horizonDir === "BUY" ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
         H{horizon}m {horizonDir === "BUY" ? "CALL" : "PUT"}
       </span>
     ) : horizonWaiting ? (
-      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold text-amber-400/90 text-[9px] tracking-wider bg-amber-500/10 border border-amber-500/30">
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-semibold text-[9px] leading-none text-gold bg-gold/10 border border-gold/40">
+        <Activity size={10} />
         H{horizon}m WAITING
       </span>
     ) : null;
 
-  const confBarWidth = Math.max(0, Math.min(100, liveConf));
-  const confText =
-    (liveDir && liveConf > 0
-      ? `${liveConf.toFixed(1)}%`
-      : hasAnySignal
-        ? "--"
-        : "--");
+  const confPct = liveDir && liveConf > 0 ? liveConf.toFixed(1) : null;
+  const confBarWidth = confPct != null ? Math.max(0, Math.min(100, liveConf)) : 0;
+
+  const spreadLine = !scoredOnly ? (
+    <span className="num-fig text-[8px] leading-tight text-term-ink-faint">
+      {spreadText} spr · {ticksText}
+    </span>
+  ) : null;
 
   return (
     <div
@@ -160,67 +187,96 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
       onClick={openPro}
       onKeyDown={handleCardKeyDown}
       className={cn(
-        "flex flex-col bg-obsidian-900/70 border border-slate-800 rounded-xl p-2.5 shadow-sm min-w-0 select-none",
+        "group relative flex flex-col rounded-cell px-2 py-1.5 min-w-0 select-none",
         scoredOnly
-          ? "border-violet-500/20 opacity-90 cursor-default"
-          : "hover:border-blue-500/40 hover:shadow-card-lift hover:-translate-y-0.5 transition-all duration-150 cursor-pointer",
+          ? "border border-term-line bg-term-panel/80 cursor-default"
+          : "border border-term-line bg-term-panel cursor-pointer transition-colors duration-150 hover:border-bull/40",
       )}
     >
-      {/* ── Header: pair + live price ── */}
-      <div className="flex items-start justify-between gap-2">
+      {/* ── PART 16 [66] 2px left-lead ALIGN STRIP — hover only, tradable only ── */}
+      {!scoredOnly && (
+        <span
+          aria-hidden
+          className="absolute left-0 top-0 bottom-0 w-[2px] bg-bull opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+        />
+      )}
+
+      {/* ── ROW 1 — pair + class chip ── */}
+      <div className="flex items-center justify-between gap-1 min-w-0">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <h4 className="text-slate-100 font-bold text-[11px] tracking-tight truncate">
+            <h4 className={cn("font-sans font-semibold text-[11px] tracking-tight truncate", scoredOnly ? "text-term-ink-dim" : "text-term-ink")}>
               {symbol}
             </h4>
             <AssetClassBadge symbol={symbol} />
           </div>
-          <p className="text-slate-600 text-[8px] uppercase font-semibold truncate">
+          <p className="font-sans text-[8px] text-term-ink-faint truncate">
             {getPairLabel(symbol)}
-          </p>
-        </div>
-        <div className="text-right shrink-0">
-          <p
-            className={cn(
-              "font-mono text-sm font-bold tabular-nums leading-tight",
-              price != null ? "text-emerald-400" : "text-slate-600",
-            )}
-          >
-            {priceText}
-          </p>
-          <p className="text-slate-600 text-[8px] font-mono tabular-nums">
-            {quoteCcy} · {spreadText} spr · {quote?.tickCount ?? 0} ticks
           </p>
         </div>
       </div>
 
+      {/* ── ROW 2 — price (star) + delta + spread/ticks —─ */}
+      <div className="mt-1 flex items-end justify-between gap-1 min-w-0">
+        <span
+          key={scoredOnly ? undefined : `${symbol}::${priceText}`}
+          className={cn(
+            "num-fig text-[16px] font-bold leading-tight truncate",
+            scoredOnly ? "text-term-ink-faint" : "text-term-ink",
+            !scoredOnly && flashDir === "up" && "price-flash-up",
+            !scoredOnly && flashDir === "down" && "price-flash-down",
+          )}
+        >
+          {priceText}
+        </span>
+        <div className="shrink-0 text-right min-w-0">
+          {!scoredOnly && (
+            <p
+              className={cn(
+                "num-fig text-[9px] font-semibold leading-tight",
+                delta == null ? "text-term-ink-faint" : delta >= 0 ? "text-bull" : "text-bear",
+              )}
+            >
+              {delta == null ? "" : `${delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(5)}`}
+            </p>
+          )}
+          {spreadLine}
+        </div>
+      </div>
+
+      {/* ── ROW 3 — verdict strip (LIVE + horizon) ── */}
       {scoredOnly ? (
-        // ── PART 15 [51] — scored-only real pair: price shown, NO signal,
-        //    NO BUY/SELL action, NO target candle. Same SCORED-ONLY pattern
-        //    the PART 9/14 suppression HUD already uses for random_walk. ──
         <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-black text-violet-300 text-[9px] tracking-wider bg-violet-500/10 border border-violet-500/30">
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-gold bg-gold/10 border border-gold/40">
             <Activity size={10} />
             SCORED-ONLY
           </span>
-          <span className="ml-auto text-slate-500 text-[8px] font-mono whitespace-nowrap">
-            {regime.reason === "regime_scored_only"
-              ? "RANDOM WALK"
-              : "REGIME REVIEW"}
+          <span className="num-fig ml-auto text-[8px] uppercase tracking-tight text-term-ink-faint whitespace-nowrap">
+            {regime.reason === "regime_scored_only" ? "RANDOM WALK" : "REGIME REVIEW"}
           </span>
         </div>
       ) : (
         <>
-          {/* ── Signal row: LIVE + HORIZON verdicts ── */}
-          <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
             {liveBadge}
+            {confPct != null && (
+              <span className="num-fig text-[9px] font-semibold text-term-ink-dim">
+                {confPct}%
+              </span>
+            )}
             {horizonBadge}
-            <span className="ml-auto text-slate-500 text-[8px] font-mono whitespace-nowrap">
-              {hasAnySignal ? confText : "LIVE <0.5m"}
+            <span className="num-fig ml-auto text-[8px] text-term-ink-faint whitespace-nowrap">
+              {hasAnySignal
+                ? ""
+                : horizonPending
+                  ? "SYNC"
+                  : liveWaiting
+                    ? "WAITING FOR TAPE"
+                    : "LIVE <0.5m"}
             </span>
           </div>
 
-          {/* ── Confidence meter ── */}
+          {/* Confidence meter */}
           {hasAnySignal && (
             <div className="mt-1.5 h-1 w-full bg-slate-800/80 rounded-full overflow-hidden">
               <div
@@ -240,29 +296,28 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
               />
             </div>
           )}
-
-          {/* ── Footer: per-card horizon + pro deep-dive ── */}
-          <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center justify-between gap-1">
-            {/* stopPropagation: horizon pills must never trigger card navigation */}
-            <div onClickCapture={(e) => suppressCardNav(e)}>
-              <HorizonSelector
-                value={horizon}
-                onChange={handleHorizonChange}
-              />
-            </div>
-            <button
-              type="button"
-              aria-label={`Open Pro Terminal for ${symbol}`}
-              onClick={(e) => {
-                suppressCardNav(e);
-                openPro();
-              }}
-              className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-wider text-slate-500 hover:text-emerald-400 transition-colors shrink-0 cursor-pointer"
-            >
-              PRO <ChevronDown size={9} />
-            </button>
-          </div>
         </>
+      )}
+
+      {/* ── ROW 4 — expiry pills + Pro deep-link (tradable only) ── */}
+      {!scoredOnly && (
+        <div className="mt-1.5 pt-1.5 border-t border-term-line flex items-center justify-between gap-1">
+          {/* stopPropagation: horizon pills must never trigger card navigation */}
+          <div onClickCapture={(e) => suppressCardNav(e)}>
+            <HorizonSelector size="sm" value={horizon} onChange={handleHorizonChange} />
+          </div>
+          <button
+            type="button"
+            aria-label={`Open Pro Terminal for ${symbol}`}
+            onClick={(e) => {
+              suppressCardNav(e);
+              openPro();
+            }}
+            className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-tight text-term-ink-dim hover:text-bull transition-colors shrink-0 cursor-pointer"
+          >
+            PRO <ChevronDown size={9} />
+          </button>
+        </div>
       )}
     </div>
   );

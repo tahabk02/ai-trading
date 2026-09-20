@@ -35,9 +35,12 @@ module.exports = {
         ],
         mono: [
           "ui-monospace",
+          "Cascadia Mono",
+          "SF Mono",
           "SFMono-Regular",
-          "Menlo",
+          "Segoe UI Mono",
           "Consolas",
+          "Liberation Mono",
           "monospace",
         ],
       },
@@ -90,11 +93,35 @@ module.exports = {
         // are deliberately IDENTICAL in both themes (teal / coral).
         "bull-green": "#22ab94",
         "bear-red": "#f23645",
+        // ── PART 16 TERMINAL BLOTTER PALETTE (dark-only, channel triplets) ──
+        // Flat-obsidian matrix system: one canvas tone, one cell tone, one
+        // hairline; every saturated pixel is functional. Resolution via rgb()
+        // keeps `/opacity` modifiers working (bg-term-panel/10 …).
+        term: {
+          canvas: "rgb(var(--term-canvas) / <alpha-value>)",
+          panel: "rgb(var(--term-panel) / <alpha-value>)",
+          line: "rgb(var(--term-line) / <alpha-value>)",
+          ink: "rgb(var(--term-ink) / <alpha-value>)",
+          "ink-dim": "rgb(var(--term-ink-dim) / <alpha-value>)",
+          "ink-faint": "rgb(var(--term-ink-faint) / <alpha-value>)",
+        },
+        // PART 16 SEMANTIC HUES — the two non-directional classification
+        // channels: gold = real-market / institutional-hold, cyan = crypto.
+        // (Keep the values distinct from bull/bear so direction is un-missable.)
+        gold: "rgb(var(--term-gold) / <alpha-value>)",
+        crypto: "rgb(var(--term-crypto) / <alpha-value>)",
+        // Direction channels — SAME values as the candle colours (bull/bear)
+        // via channel triplets so `/alpha` modifiers keep working, while the
+        // plain `bull-green`/`bear-red` hex tokens above stay untouched.
+        bull: "rgb(var(--bull) / <alpha-value>)",
+        bear: "rgb(var(--bear) / <alpha-value>)",
       },
       borderRadius: {
         card: "8px",
         control: "6px",
         chip: "4px",
+        // PART 16: instrument cells use a near-square terminal radius.
+        cell: "4px",
       },
       boxShadow: {
         card: "0 1px 2px rgba(0,0,0,0.05)",

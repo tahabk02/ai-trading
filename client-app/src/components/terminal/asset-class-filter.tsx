@@ -34,15 +34,16 @@ export const AssetClassFilterPills: React.FC<AssetClassFilterProps> = ({
         <button
           key={f.key}
           onClick={() => onChange(f.key)}
+          aria-pressed={f.key === value}
           className={cn(
-            "text-[9px] sm:text-[10px] px-2 py-0.5 rounded font-bold tracking-wider transition-colors border",
+            "text-[9px] sm:text-[10px] px-2 py-0.5 rounded-chip font-bold tracking-wider transition-colors border",
             f.key === value
-              ? "bg-slate-800/80 text-slate-100 border-slate-700"
-              : "bg-transparent text-slate-500 border-transparent hover:text-slate-300",
+              ? "bg-term-ink text-term-canvas border-term-ink"
+              : "bg-transparent text-term-ink-faint border-transparent hover:text-term-ink-dim",
           )}
         >
           {f.label}
-          <span className="ml-1 opacity-60">{count}</span>
+          <span className="num-fig ml-1 opacity-70">{count}</span>
         </button>
       );
     })}
