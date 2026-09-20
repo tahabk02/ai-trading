@@ -135,6 +135,23 @@ def test_analyze_to_dict_contract():
     assert payload["executable"] is not None
     assert payload["indicators"]["adx"] >= 0.0
     assert "book_confluence" in payload
+    # PART 19.2 [117] — the exposed schema is HONESTLY NAMED "book_agreement";
+    # the old "confidence" key is never silently kept on the same number.
+    assert "confidence" not in payload
+    assert payload["book_agreement"] == round(72.0, 4)
+    assert set(payload["book_agreement_detail"]) >= {
+        "convergence_index",
+        "alignment",
+        "magnitude",
+        "aligned_count",
+        "active_count",
+        "label",
+    }
+    assert isinstance(payload["book_agreement_detail"]["aligned_count"], int)
+    assert (
+        "books aligned"
+        in payload["book_agreement_detail"]["label"]
+    )
 
 
 def test_tier_boundaries():

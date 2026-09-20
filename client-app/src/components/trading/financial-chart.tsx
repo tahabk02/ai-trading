@@ -75,6 +75,18 @@ interface FinancialChartProps {
   expirationSeconds?: number;
   signal?: "BUY" | "SELL" | null;
   confidence?: number;
+  /**
+   * PART 19.2 [118] — book agreement internals; the 0-100 HUD number is a
+   * confluence score (n/n strategy books aligned), never a probability.
+   */
+  book_agreement_detail?: {
+    convergence_index?: number;
+    alignment?: number;
+    magnitude?: number;
+    aligned_count?: number;
+    active_count?: number;
+    label?: string;
+  } | null;
   lookaheadHorizon?: number;
   streamStalled?: boolean;
   stalePrice?: boolean;
@@ -532,16 +544,16 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           )?.suppressed_reason?.trim().toLowerCase() === "regime_scored_only"
           ? ("regime_scored_only" as const)
           : null;
+    // PART 11 — REAL elapsed clock for the neutral-clears hysteresis.
+    // wallSec is the broker-grid bucket floor (constant between prints), so
+    // without this the "sustained neutral" was measured in consecutive
+    // render frames — milliseconds apart — and a 2-frame null at the
+    // freeze-release instant blanked the label on every bucket rollover.
     return signalHoldRef.current.evaluate(
       rawGated,
       wallSec,
       tfSec,
       engineSuppress,
-      // PART 11 — REAL elapsed clock for the neutral-clears hysteresis.
-      // wallSec is the broker-grid bucket floor (constant between prints), so
-      // without this the "sustained neutral" was measured in consecutive
-      // render frames — milliseconds apart — and a 2-frame null at the
-      // freeze-release instant blanked the label on every bucket rollover.
       Date.now(),
     );
   }, []);
@@ -1271,6 +1283,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       ? Number(hudPred.target_price)
       : Number(targetRef.current) || 0;
   const hudConf = Number(hudPred?.confidence);
+  const hudBooks = hudPred?.book_agreement_detail ?? null;
   // The 96.5% confidence gate IMMUTABLY controls this label (stabilized, so
   // confidence jitter can never shimmer it) — completely isolated from the
   // target-candle rendering which runs off the projection matrix.
@@ -1427,10 +1440,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       ) : null}
 
       {/* PREDICTION HUD — floating micro-cards above the Future Prediction
-          Zone: AI confidence %, exact target price with live delta, the exact
-          target-candle count & chart timeframe (always shown once candles
-          exist), and the countdown to target expiry aligned to PO candle
-          closures. */}
+          Zone: book-agreement % with exact n/n books aligned, exact target
+          price with live delta, the exact target-candle count & chart
+          timeframe (always shown once candles exist), and the countdown to
+          target expiry aligned to PO candle closures. */}
       {hasCandles && !feedOffline ? (
         <div className="pointer-events-none absolute top-10 right-2 z-10 flex flex-col items-end gap-1">
           {hudSignal != null || (Number.isFinite(hudConf) && hudConf > 0) ? (
@@ -1447,6 +1460,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               {Number.isFinite(hudConf) && hudConf > 0 ? (
                 <span className="font-mono text-[10px] font-bold tabular-nums text-slate-200">
                   {hudConf.toFixed(1)}%
+                  {hudBooks && hudBooks.active_count
+                    ? ` (${hudBooks.aligned_count}/${hudBooks.active_count})`
+                    : ""}
                 </span>
               ) : null}
             </div>

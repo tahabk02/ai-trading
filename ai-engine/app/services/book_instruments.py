@@ -1024,6 +1024,26 @@ def compute_multiplicative_confluence(
     }
 
 
+def book_agreement_detail(confluence: Dict[str, Any]) -> Dict[str, Any]:
+    """PART 19.2 — HONEST LABELING. Render the confluence internals behind a
+    0-100 ``score`` so a reader sees book AGREEMENT (n/n books aligned), NOT
+    a calibrated probability. ``confluence`` is the compute_multiplicative_
+    confluence return dict ({convergence_index, alignment, magnitude,
+    aligned_count, active_count, ...}). Missing/empty input yields a zeroed
+    detail with a truthful "0/0 books aligned" label instead of fabricating."""
+    confluence = confluence or {}
+    aligned = int(confluence.get("aligned_count", 0) or 0)
+    active = int(confluence.get("active_count", 0) or 0)
+    return {
+        "convergence_index": round(float(confluence.get("convergence_index", 0.0)), 4),
+        "alignment": round(float(confluence.get("alignment", 0.0)), 4),
+        "magnitude": round(float(confluence.get("magnitude", 0.0)), 4),
+        "aligned_count": aligned,
+        "active_count": active,
+        "label": f"{aligned}/{active} books aligned",
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 # THE BOOK CONFLUENCE COMPOSITOR
 # ════════════════════════════════════════════════════════════════════

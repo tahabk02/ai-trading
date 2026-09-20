@@ -71,7 +71,23 @@ export interface CandleDataPoint {
 export interface PredictionResponse {
   symbol: string;
   signal: "BUY" | "SELL";
+  /**
+   * PART 19.2 — the 0-100 number is BOOK AGREEMENT (a 10-book confluence
+   * score), NOT a calibrated probability. This numeric pipeline identifier
+   * is kept for compatibility; see `book_agreement` / `book_agreement_detail`
+   * for the HONESTLY LABELED surface the UI renders.
+   */
   confidence: number;
+  book_agreement?: number;
+  /** PART 19.2 [118] — raw confluence internals + "n/n books aligned" label. */
+  book_agreement_detail?: {
+    convergence_index?: number;
+    alignment?: number;
+    magnitude?: number;
+    aligned_count?: number;
+    active_count?: number;
+    label?: string;
+  };
   target_price: number;
   current_price: number;
   ml_probability: number;

@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional
 from .technical_analysis import TechnicalAnalysisService
 from .quant_matrix import evaluate_quant_matrix, QuantVerdict
 from .book_instruments import (
+    book_agreement_detail,
     evaluate_book_confluence,
     microstructure_queue,
 )
@@ -378,6 +379,7 @@ class FinancialAnalysisService:
             window=ROLLING_WINDOW,
         )
         diagnostics["rolling_window"] = window_features
+        _book_confluence_raw = {}
         try:
             book = evaluate_book_confluence(
                 closes=closes,
@@ -394,12 +396,25 @@ class FinancialAnalysisService:
             )
             book_gate = str((book.confluence or {}).get("gate", "INSUFFICIENT"))
             book_score = float((book.confluence or {}).get("score", 0.0))
+            _book_confluence_raw = dict(book.confluence or {})
         except Exception:  # noqa: BLE001 — book tier is additive, never fatal
             book_gate = "INSUFFICIENT"
             book_score = 0.0
-        diagnostics.setdefault("book_confluence", {})
-        diagnostics["book_confluence"].setdefault("gate", book_gate)
-        diagnostics["book_confluence"].setdefault("score", round(book_score, 4))
+            _book_confluence_raw = {}
+        diagnostics["book_confluence"] = {
+            "gate": book_gate,
+            "score": round(book_score, 4),
+            # PART 19.2 [118] — the full confluence internals (convergence_index
+            # / alignment / magnitude / aligned_count / active_count) used to
+            # render the honest "n/n books aligned" label next to the score.
+            # The QUANT-stage book detail is authoritative (it produced the
+            # dispatched score); the Stage-3 re-evaluation above is only a
+            # fallback for callers that supplied direction/confidence directly.
+            "confluence": dict(
+                (diagnostics.get("book") or {}).get("confluence", {})
+                or _book_confluence_raw
+            ),
+        }
 
         # ── Stage 4: QUALITY — five-factor ensemble watershed ──
         quality = None
@@ -527,11 +542,22 @@ class FinancialAnalysisService:
         return report
 
     def to_dict(self, report: FinancialAnalysisReport) -> Dict[str, Any]:
-        """Serialize a report to the shared API payload contract."""
+        """Serialize a report to the shared API payload contract.
+
+        PART 19.2 [117] — the 0-100 number is honestly named BOOK AGREEMENT
+        (a confluence score), never a calibrated probability. The internal
+        numeric field on the report keeps the ``confidence`` identifier for
+        pipeline compatibility; the exposed schema uses ``book_agreement``.
+        """
         return {
             "symbol": report.symbol,
             "direction": report.direction,
-            "confidence": round(report.confidence, 4),
+            "book_agreement": round(report.confidence, 4),
+            "book_agreement_detail": book_agreement_detail(
+                (report.diagnostics or {})
+                .get("book_confluence", {})
+                .get("confluence", {})
+            ),
             "tier": report.tier,
             "tier_label": report.tier_label,
             "executable": report.executable,

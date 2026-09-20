@@ -276,21 +276,18 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
             </span>
           </div>
 
-          {/* Confidence meter */}
-          {hasAnySignal && (
-            <div className="mt-1.5 h-1 w-full bg-slate-800/80 rounded-full overflow-hidden">
+          {/* Book agreement bar (PART 19.2) — functional, thin, flat. The 0-100
+              number is a confluence score (agreement among the strategy
+              books on the same tape), never a calibrated probability. */}
+          {confPct != null && (
+            <div
+              className="mt-1 h-[3px] w-full bg-term-line/60 overflow-hidden rounded-full"
+              title={`Book Agreement ${confPct}%`}
+            >
               <div
                 className={cn(
-                  "h-full rounded-full transition-all duration-500",
-                  liveDir === "SELL"
-                    ? "bg-rose-500/80"
-                    : liveDir === "BUY"
-                      ? "bg-emerald-500/80"
-                      : horizonDir === "SELL"
-                        ? "bg-rose-500/60"
-                        : horizonDir === "BUY"
-                          ? "bg-emerald-500/60"
-                          : "bg-slate-600",
+                  "h-full rounded-full",
+                  liveDir === "BUY" ? "bg-bull" : "bg-bear",
                 )}
                 style={{ width: `${confBarWidth}%` }}
               />

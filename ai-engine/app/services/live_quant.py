@@ -91,6 +91,7 @@ from .quant_matrix import (
     THERMAL_GATE_CEILING,
 )
 from .book_instruments import (
+    book_agreement_detail,
     evaluate_book_confluence,
     DEFINITIVE_CONFIDENCE_MIN,
 )
@@ -616,6 +617,10 @@ def build_tick_signal_payload(
         "barCount": 0,
         "book_confluence": float(
             verdict.diagnostics.get("confluence_score", 0.0)
+        ),
+        "book_agreement": round(verdict.confidence, 2),
+        "book_agreement_detail": book_agreement_detail(
+            verdict.diagnostics.get("book", {}).get("confluence", {})
         ),
         "market_waiting": verdict.market_waiting,
         "waiting_reason": verdict.waiting_reason,

@@ -73,6 +73,10 @@ export const AIExplanation: React.FC = () => {
     [predictionData?.confidence],
   );
   const confidenceNum = parseFloat(confidenceStr);
+  // PART 19.2 [118] — the 0-100 number is BOOK AGREEMENT (confluence among
+  // the ten strategy books on the same tape), not a calibrated probability.
+  const booksA = predictionData?.book_agreement_detail?.aligned_count ?? null;
+  const booksN = predictionData?.book_agreement_detail?.active_count ?? null;
 
   // Generate reasoning text based on technical indicators
   const reasoning = useMemo(() => {
@@ -143,20 +147,21 @@ export const AIExplanation: React.FC = () => {
       reasons.push(`Volatility: ${volLevel} (ATR: ${atrDisplay})`);
     }
 
-    // Confidence level statement
+    // Book-agreement level statement (PART 19.2 — a confluence score, not a
+    // probability; the wording says what the number IS).
     if (confidenceNum >= 96.5)
-      reasons.push("High-confidence prediction — strong signal alignment");
+      reasons.push("Strong book agreement — all strategy books aligned");
     else if (confidenceNum >= 80)
-      reasons.push("Moderate confidence — partial signal confirmation");
+      reasons.push("Partial book agreement — most strategy books aligned");
     else
-      reasons.push("Low confidence — divergent indicators, trade with caution");
+      reasons.push("Weak book agreement — divergent indicators, trade with caution");
 
     // ── GATED-DIRECTION NOTICE ──
     // When the engine emitted a raw BUY/SELL below the 96.5% gate, say so
     // explicitly instead of quietly showing nothing.
     if (signalView.gated && confidenceNum > 0) {
       reasons.push(
-        `Signal gate: confidence ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
+        `Signal gate: book agreement ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
       );
     }
 
@@ -291,11 +296,11 @@ export const AIExplanation: React.FC = () => {
         />
       </div>
 
-      {/* ── Signal + Confidence Bar ── */}
+      {/* ── Signal + Book Agreement Bar ── */}
       <div className="mb-4">
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
-            Signal Confidence
+            Book Agreement
           </span>
           <span
             className={cn(
@@ -306,6 +311,7 @@ export const AIExplanation: React.FC = () => {
             )}
           >
             {confidenceStr}%
+            {booksN && booksN > 0 ? ` (${booksA}/${booksN})` : ""}
           </span>
         </div>
         <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">

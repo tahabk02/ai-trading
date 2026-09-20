@@ -104,7 +104,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "AI Analysis",
     awaitingPrediction: "Awaiting prediction data for analysis...",
-    signalConfidence: "Signal Confidence",
+    signalConfidence: "Book Agreement",
     technicalReasoning: "Technical Reasoning",
     trendDuration: "Trend Duration",
     volatility: "Volatility",
@@ -139,11 +139,14 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Projected downside: -{pct}% to target {price}",
     volatilityLevel: "Volatility: {level} (ATR: {atr})",
     highConfidenceNote:
-      "High-confidence prediction — strong signal alignment",
+      "Strong book agreement — all strategy books aligned",
     moderateConfidenceNote:
-      "Moderate confidence — partial signal confirmation",
+      "Partial book agreement — most strategy books aligned",
     lowConfidenceNote:
-      "Low confidence — divergent indicators, trade with caution",
+      "Weak book agreement — divergent indicators, trade with caution",
+    // High-confidence toast (PART 19.2 — the number is BOOK AGREEMENT now)
+    highConfidenceTitle: "BOOK AGREEMENT SIGNAL",
+    highConfidenceBody: "strong confluence — actionable setup",
     buySignal: "BUY",
     sellSignal: "SELL",
     holdSignal: "HOLD",
@@ -163,7 +166,8 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Execution Price",
-    aiConfidence: "AI Confidence",
+    aiConfidence: "Book Agreement",
+    bookAgreementBooks: "{aligned}/{active} books aligned",
     highFrequencyAnalysis: "High Frequency Analysis",
     viewChart: "View Chart",
 
@@ -229,7 +233,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     noHistoryYet: "No history yet",
     historyEmptyHint: "Trading signals will appear here once generated.",
     noTradesMatch: "No trades match the current filters.",
-    confidence: "Confidence",
+    confidence: "Book Agreement",
 
     // Risk rules page
     riskRules: "Risk Rules",
@@ -420,7 +424,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "Analyse IA",
     awaitingPrediction: "En attente des données de prédiction...",
-    signalConfidence: "Confiance du signal",
+    signalConfidence: "Accord des signaux",
     technicalReasoning: "Raisonnement technique",
     trendDuration: "Durée de la tendance",
     volatility: "Volatilité",
@@ -455,11 +459,11 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Baisse projetée : -{pct}% vers l'objectif {price}",
     volatilityLevel: "Volatilité : {level} (ATR : {atr})",
     highConfidenceNote:
-      "Prédiction à haute confiance — forte convergence du signal",
+      "Fort accord des signaux — tous les signaux alignés",
     moderateConfidenceNote:
-      "Confiance modérée — confirmation partielle du signal",
+      "Accord partiel des signaux",
     lowConfidenceNote:
-      "Confiance faible — indicateurs divergents, négociez avec prudence",
+      "Faible accord des signaux — indicateurs divergents, négociez avec prudence",
     buySignal: "ACHAT",
     sellSignal: "VENTE",
     holdSignal: "CONSERVER",
@@ -519,7 +523,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "SIGNAL HAUTE CONFIANCE",
+    highConfidenceTitle: "SIGNAL — ACCORD DES SIGNAUX",
     highConfidenceBody: "confluence détectée — configuration exploitable",
     dismiss: "Fermer",
 
@@ -551,7 +555,8 @@ export const translations: Record<Lang, Record<string, string>> = {
     historyEmptyHint:
       "Les signaux de trading apparaîtront ici une fois générés.",
     noTradesMatch: "Aucune transaction ne correspond aux filtres actuels.",
-    confidence: "Confiance",
+    confidence: "Accord des signaux",
+    bookAgreementBooks: "{aligned}/{active} signaux alignés",
 
     // Risk rules page
     riskRules: "Règles de risque",
@@ -745,7 +750,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "تحليل الذكاء الاصطناعي",
     awaitingPrediction: "بانتظار بيانات التنبؤ للتحليل...",
-    signalConfidence: "ثقة الإشارة",
+    signalConfidence: "اتفاق الإشارات",
     technicalReasoning: "التحليل الفني",
     trendDuration: "مدة الاتجاه",
     volatility: "التقلب",
@@ -777,9 +782,9 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedUpside: "الارتفاع المتوقع: +{pct}% نحو الهدف {price}",
     projectedDownside: "الانخفاض المتوقع: -{pct}% نحو الهدف {price}",
     volatilityLevel: "التقلب: {level} (ATR: {atr})",
-    highConfidenceNote: "تنبؤ عالي الثقة — توافق قوي للإشارة",
-    moderateConfidenceNote: "ثقة متوسطة — تأكيد جزئي للإشارة",
-    lowConfidenceNote: "ثقة منخفضة — مؤشرات متباينة، تداول بحذر",
+    highConfidenceNote: "اتفاق إشارات قوي — جميع الإشارات متوافقة",
+    moderateConfidenceNote: "اتفاق جزئي للإشارات",
+    lowConfidenceNote: "اتفاق إشارات ضعيف — مؤشرات متباينة، تداول بحذر",
     buySignal: "شراء",
     sellSignal: "بيع",
     holdSignal: "انتظار",
@@ -839,7 +844,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "إشارة عالية الثقة",
+    highConfidenceTitle: "إشارة — اتفاق الإشارات",
     highConfidenceBody: "تم رصد تقارب — فرصة قابلة للتنفيذ",
     dismiss: "إغلاق",
 
@@ -870,7 +875,8 @@ export const translations: Record<Lang, Record<string, string>> = {
     noHistoryYet: "لا يوجد سجل بعد",
     historyEmptyHint: "ستظهر إشارات التداول هنا بمجرد إنشائها.",
     noTradesMatch: "لا توجد صفقات تطابق عوامل التصفية الحالية.",
-    confidence: "الثقة",
+    confidence: "اتفاق الإشارات",
+    bookAgreementBooks: "{aligned}/{active} إشارات متوافقة",
 
     // Risk rules page
     riskRules: "قواعد المخاطر",
@@ -1059,7 +1065,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "Análisis IA",
     awaitingPrediction: "Esperando datos de predicción para el análisis...",
-    signalConfidence: "Confianza de la señal",
+    signalConfidence: "Acuerdo de Señales",
     technicalReasoning: "Razonamiento técnico",
     trendDuration: "Duración de la tendencia",
     volatility: "Volatilidad",
@@ -1094,11 +1100,11 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Baja proyectada: -{pct}% hacia el objetivo {price}",
     volatilityLevel: "Volatilidad: {level} (ATR: {atr})",
     highConfidenceNote:
-      "Predicción de alta confianza — fuerte alineación de señales",
+      "Fuerte acuerdo de señales — todas las señales alineadas",
     moderateConfidenceNote:
-      "Confianza moderada — confirmación parcial de señales",
+      "Acuerdo parcial de señales",
     lowConfidenceNote:
-      "Confianza baja — indicadores divergentes, opere con precaución",
+      "Acuerdo débil de señales — indicadores divergentes, opere con precaución",
     buySignal: "COMPRA",
     sellSignal: "VENTA",
     holdSignal: "MANTENER",
@@ -1158,7 +1164,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "SEÑAL DE ALTA CONFIANZA",
+    highConfidenceTitle: "SEÑAL — ACUERDO DE SEÑALES",
     highConfidenceBody: "confluencia detectada — configuración accionable",
     dismiss: "Cerrar",
 
@@ -1190,7 +1196,8 @@ export const translations: Record<Lang, Record<string, string>> = {
     historyEmptyHint:
       "Las señales de trading aparecerán aquí una vez generadas.",
     noTradesMatch: "Ninguna operación coincide con los filtros actuales.",
-    confidence: "Confianza",
+    confidence: "Acuerdo de Señales",
+    bookAgreementBooks: "{aligned}/{active} señales alineadas",
 
     // Risk rules page
     riskRules: "Reglas de riesgo",

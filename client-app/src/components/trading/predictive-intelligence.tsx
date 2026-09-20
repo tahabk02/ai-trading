@@ -111,6 +111,10 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
   }
 
   const displayConfidence = sanitizeConfidence(predictionData?.confidence);
+  // PART 19.2 [118] — the gauge is a BOOK AGREEMENT confluence score, never a
+  // probability; the n/n books-aligned label sits under the % (when known).
+  const bookA = predictionData?.book_agreement_detail?.aligned_count ?? null;
+  const bookN = predictionData?.book_agreement_detail?.active_count ?? null;
 
   // ── THERMAL-QUARANTINE STATE (96.5% hard floor) ──
   // When the engine demotes a sub-thermal directional verdict to market-waiting
@@ -299,6 +303,11 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                     >
                       {displayConfidence}%
                     </span>
+                    {bookN && bookN > 0 ? (
+                      <span className="text-[8px] font-mono text-slate-500 uppercase font-semibold">
+                        {bookA}/{bookN} books
+                      </span>
+                    ) : null}
                     <span
                       className={
                         "text-[9px] font-mono tracking-wider uppercase font-bold " +

@@ -71,6 +71,7 @@ from app.services.quant_matrix import (
     project_target,
     symbol_price_digits,
 )
+from app.services.book_instruments import book_agreement_detail
 from app.services.live_quant import (
     evaluate_live_tick_signal,
     build_tick_signal_payload,
@@ -671,6 +672,10 @@ async def predict_signal(data: PredictRequest):
             "symbol": symbol,
             "signal": emitted_signal,
             "confidence": verdict.confidence,
+            "book_agreement": round(verdict.confidence, 2),
+            "book_agreement_detail": book_agreement_detail(
+                getattr(verdict, "diagnostics", {}).get("book", {}).get("confluence", {})
+            ),
             "high_confidence_alert": verdict.high_confidence_alert and emitted_signal is not None,
             "target_price": target_price,
             "current_price": round(current_price, digits),
@@ -897,6 +902,16 @@ async def predict_signal(data: PredictRequest):
         "waiting_reason": verdict.waiting_reason,
         "waiting_detail": verdict.waiting_detail,
         "book_confluence": verdict.diagnostics.get("book", {}),
+        # PART 19.2 — HONEST LABEL CONTRACT: the dispatched 0-100 number is
+        # BOOK AGREEMENT (confluence), not a calibrated probability. These
+        # keys are the labeled surface; `confidence` remains the numeric
+        # pipeline identifier that feeds the sanitizer / store unmutated.
+        "book_agreement": round(
+            qq_confidence if qq_active else verdict.confidence, 2
+        ),
+        "book_agreement_detail": book_agreement_detail(
+            verdict.diagnostics.get("book", {}).get("confluence", {})
+        ),
         "timestamp": datetime.utcnow().isoformat(),
     }
 

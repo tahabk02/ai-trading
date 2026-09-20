@@ -28,6 +28,18 @@ interface SignalProps {
     signalType?: "BUY" | "SELL";
     price?: number | null;
     confidence?: number | null;
+    /**
+     * PART 19.2 [118] — raw confluence internals + "n/n books aligned" label.
+     * The 0-100 number is BOOK AGREEMENT, not a calibrated probability.
+     */
+    book_agreement_detail?: {
+      convergence_index?: number;
+      alignment?: number;
+      magnitude?: number;
+      aligned_count?: number;
+      active_count?: number;
+      label?: string;
+    } | null;
     /** AI Engine dispatch tier T1…T5 (PART 6). */
     tier?: string | null;
     createdAt?: string | null;
@@ -66,6 +78,11 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
     Math.max(normalizedConf > 1 ? normalizedConf : normalizedConf * 100, 0),
     100,
   );
+  // PART 19.2 [118] — book agreement internals: how many of the ten strategy
+  // books actually aligned with the dispatched direction. Rendered next to the
+  // % so the number reads as AGREEMENT, never as a probability.
+  const booksA = signal?.book_agreement_detail?.aligned_count ?? null;
+  const booksN = signal?.book_agreement_detail?.active_count ?? null;
   // ── PART 6 TIER-COLORED CONFIDENCE — palette mirrors the engine ladder ──
   // T1 emerald (>=96.5), T2 teal (>=90), T3 amber (>=80), T4 orange (>=70),
   // T5 gray. Replaces the old ad-hoc >90/>80/>72 bands with the canonical
@@ -141,10 +158,12 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
         </div>
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
           <p className="text-slate-500 text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
-            AI Confidence
+            Book Agreement
           </p>
-          {/* ── REAL DYNAMIC CONFIDENCE — tier colors reflect the exact ──
-              ── floating-point value returned by the unbiased engine. ── */}
+          {/* ── REAL DYNAMIC BOOK AGREEMENT — tier colors reflect the exact ──
+              ── floating-point value returned by the unbiased engine. This  ──
+              ── number is a CONFLUENCE SCORE (agreement among ten strategy  ──
+              ── books on the same tape), NOT a calibrated probability.     ── */}
           <p
             className={cn(
               "text-sm sm:text-lg font-bold truncate tabular-nums",
@@ -153,6 +172,11 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           >
             {displayConfidence.toFixed(1)}%
           </p>
+          {booksN && booksN > 0 ? (
+            <p className="text-slate-500 text-[8px] sm:text-[9px] uppercase font-semibold truncate tabular-nums mt-0.5">
+              {booksA}/{booksN} books
+            </p>
+          ) : null}
         </div>
       </div>
 
