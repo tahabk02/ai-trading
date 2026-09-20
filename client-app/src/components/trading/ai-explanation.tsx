@@ -375,10 +375,10 @@ export const AIExplanation: React.FC = () => {
         />
         <MetricItem
           icon={<Shield className="w-3 h-3" />}
-          label="Accuracy"
+          label="RF Holdout Acc"
           value={
-            predictionData.model_accuracy != null
-              ? `${(predictionData.model_accuracy * 100).toFixed(1)}%`
+            predictionData.rf_holdout_accuracy != null
+              ? `${(predictionData.rf_holdout_accuracy * 100).toFixed(1)}%`
               : "—"
           }
         />

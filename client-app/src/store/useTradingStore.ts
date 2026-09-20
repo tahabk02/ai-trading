@@ -1924,8 +1924,11 @@ export const useTradingStore = create<TradingState>((set, get) => {
                 current_price: hasPrice ? price : 0,
                 target_price:
                   Number.isFinite(target) && target > 0 ? target : 0,
-                ml_probability: 0,
-                model_accuracy: 0,
+                rf_probability: null,
+                rf_holdout_accuracy: null,
+                corroborator_unavailable: true,
+                ml_probability: null,
+                model_accuracy: null,
                 timeframe: s.selectedTimeframe || "1d",
                 proxyLatencyMs: null,
                 indicators: { rsi_14: 0, sma_20: 0, sma_50: 0 },

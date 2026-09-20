@@ -608,10 +608,14 @@ def build_tick_signal_payload(
         "volatility_pct": round((atr / eval_price) * 100.0, 4)
         if eval_price > 0 and atr > 0
         else 0.0,
-        "ml_probability": round(verdict.confidence / 100.0, 4),
-        "model_accuracy": round(
-            max(0.0, min(float(verdict.diagnostics.get("agreement", 0.0)), 1.0)), 4
-        ),
+        # PART 22.1 — /tick-signal never runs the RF classifier: honest nulls
+        # + corroborator_unavailable flag, never confluence numbers under
+        # RF-labeled keys.
+        "rf_probability": None,
+        "rf_holdout_accuracy": None,
+        "corroborator_unavailable": True,
+        "ml_probability": None,
+        "model_accuracy": None,
         "timeframe": timeframe,
         "dataSource": "live_tick_quant",
         "barCount": 0,

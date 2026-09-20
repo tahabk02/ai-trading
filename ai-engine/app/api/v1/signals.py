@@ -264,8 +264,12 @@ async def _get_symbol_lock(symbol: str) -> asyncio.Lock:
 
 def _validate_response_finite(response: Dict[str, Any]) -> Dict[str, Any]:
     numeric_keys = [
+        # NOTE (PART 22.1): ml_probability / model_accuracy were REMOVED from
+        # this sanitizer — they are now Optional RF aliases (null until the
+        # corroborator runs) and must NEVER be force-zeroed here; the rf_*
+        # nulls survive via the non-finite guard below.
         "confidence", "target_price", "target_distance", "current_price",
-        "ml_probability", "model_accuracy", "atr", "volatility_pct",
+        "atr", "volatility_pct",
     ]
     for key in numeric_keys:
         val = response.get(key)
@@ -281,6 +285,13 @@ def _validate_response_finite(response: Dict[str, Any]) -> Dict[str, Any]:
                 response[key] = 0.0
             else:
                 response[key] = 0.0
+
+    # PART 22.1 — rf_* are Optional floats: keep null null, but guard against
+    # any non-finite value arriving here (the sources already clamp to [0,1]).
+    for rf_key in ("rf_probability", "rf_holdout_accuracy"):
+        rf_val = response.get(rf_key)
+        if rf_val is not None and not np.isfinite(float(rf_val)):
+            response[rf_key] = None
 
     # `book_confluence` is a FLOAT on /tick-signal (the live confluence score)
     # but a DICT {score,gate,blockers,...} on /predict — guard both shapes so a
@@ -683,8 +694,12 @@ async def predict_signal(data: PredictRequest):
             "target_distance": distance,
             "future_candles": future_candles,
             "volatility_pct": round((atr_now / current_price) * 100.0, 4),
-            "ml_probability": 0.0,
-            "model_accuracy": 0.0,
+            # PART 22.1 — fast path never trains the RF: honest nulls + flag.
+            "rf_probability": None,
+            "rf_holdout_accuracy": None,
+            "corroborator_unavailable": True,
+            "ml_probability": None,
+            "model_accuracy": None,
             "timeframe": timeframe,
             "proxyLatencyMs": round(total_ms, 2),
             "dataSource": f"{data_source}_live_tick_quant_fallback",
@@ -868,14 +883,22 @@ async def predict_signal(data: PredictRequest):
         "target_distance": distance,
         "future_candles": future_candles,
         "volatility_pct": round((atr_now / current_price) * 100.0, 4),
-        "ml_probability": round(verdict.confidence / 100.0, 4),
+        # PART 22.1 [150] — RF CORROBORATION SPLIT SCHEMA. The old
+        # `ml_probability = confidence/100` and `model_accuracy = agreement`
+        # fallbacks silently renamed confluence numbers under RF-labeled keys
+        # (the silent swap PART 22 found). That dual meaning is REMOVED:
+        # rf_probability / rf_holdout_accuracy are null unless the RandomForest
+        # actually ran for this tape, and the legacy ml_probability /
+        # model_accuracy keys are NEVER populated with confluence-derived
+        # values (null here; set to the real RF numbers in the merge block
+        # when the corroborator runs).
+        "rf_probability": None,
+        "rf_holdout_accuracy": None,
+        "corroborator_unavailable": True,
+        "ml_probability": None,
+        "model_accuracy": None,
         "tier": verdict.diagnostics.get("tier"),
         "tier_label": verdict.diagnostics.get("tier_label"),
-        # GENUINE factor agreement (real alignment fraction 0..1). The old
-        # clamped band [0.55, 0.95] (default 0.6) is PURGED.
-        "model_accuracy": round(
-            max(0.0, min(float(verdict.diagnostics.get("agreement", 0.0)), 1.0)), 4
-        ),
         "timeframe": timeframe,
         "proxyLatencyMs": round(total_ms, 2),
         "dataSource": f"{data_source}_unbiased_quant",
@@ -919,10 +942,17 @@ async def predict_signal(data: PredictRequest):
     # confluence confidence so the honesty law — confidence == confluence — is
     # never violated for the emitted signal).
     if ml_extras is not None:
+        # PART 22.1 — RF corroborator RAN on this definitive tape: surface its
+        # real numbers under the split rf_* names and flip the flag. Legacy
+        # ml_probability / model_accuracy are kept only as EXACT aliases of
+        # those RF numbers — never confluence-derived.
         if ml_extras.get("ml_probability") is not None:
             response["ml_probability"] = ml_extras["ml_probability"]
+            response["rf_probability"] = ml_extras["ml_probability"]
         if ml_extras.get("model_accuracy") is not None:
             response["model_accuracy"] = ml_extras["model_accuracy"]
+            response["rf_holdout_accuracy"] = ml_extras["model_accuracy"]
+        response["corroborator_unavailable"] = False
         for k in ("scalping_indicators", "micro_confluence", "micro_factors", "indicators"):
             if k in ml_extras:
                 response[k] = ml_extras[k]

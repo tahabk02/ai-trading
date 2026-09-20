@@ -392,13 +392,14 @@ def generate_unbiased_prediction(
         "volatility_pct": round((atr_now / current_price) * 100.0, 4)
         if current_price > 0
         else 0.0,
-        "ml_probability": round(verdict.confidence / 100.0, 4),
-        # GENUINE signal agreement (real factor alignment fraction 0..1).
-        # The old clamped band [0.55, 0.95] (default 0.6) is PURGED — a
-        # weakly-aligned signal now honestly reports its true low agreement.
-        "model_accuracy": round(
-            max(0.0, min(float(verdict.diagnostics.get("agreement", 0.0)), 1.0)), 4
-        ),
+        # PART 22.1 — /analyze's generator never runs the RF classifier: honest
+        # nulls + corroborator_unavailable flag, never confluence numbers
+        # under RF-labeled keys.
+        "rf_probability": None,
+        "rf_holdout_accuracy": None,
+        "corroborator_unavailable": True,
+        "ml_probability": None,
+        "model_accuracy": None,
         "quality": quality,
         "factors": quality_factors,
         "quality_reason": quality_reason,

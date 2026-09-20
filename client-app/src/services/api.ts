@@ -90,8 +90,19 @@ export interface PredictionResponse {
   };
   target_price: number;
   current_price: number;
-  ml_probability: number;
-  model_accuracy: number;
+  /**
+   * PART 22.1 [150] — RF corroboration split schema. `rf_probability` /
+   * `rf_holdout_accuracy` are the RandomForest's real numbers ONLY, null when
+   * the corroborator did not run for this tape; `corroborator_unavailable`
+   * flags exactly that state. Legacy ml_probability / model_accuracy stay as
+   * EXACT aliases of those RF numbers — null on the fallback path, never
+   * confluence-derived values.
+   */
+  rf_probability: number | null;
+  rf_holdout_accuracy: number | null;
+  corroborator_unavailable: boolean;
+  ml_probability: number | null;
+  model_accuracy: number | null;
   timeframe: string;
   proxyLatencyMs: number | null;
   indicators?: {

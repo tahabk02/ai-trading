@@ -189,6 +189,13 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Updated",
     enterSymbolPrompt: "Enter a symbol above to trigger real-time ML inference.",
     runningInference: "Running high-speed ML inference...",
+    // PART 22.1 — RF corroboration split labels (distinct from signal precision)
+    rfProbability: "RF Prob",
+    rfHoldoutAccuracy: "RF Holdout Acc",
+    rfHoldoutAccuracyTitle: "RF Holdout Accuracy (last 20% of candles, this symbol)",
+    rfCorroboratorUnavailable: "RF corroborator unavailable for this tape",
+    rfCorroboratorUnavailableTitle:
+      "The RandomForest did not run on this tape (fast path or sub-thermal); RF numbers are null, never confluence-derived.",
 
 // Timeframes (PO canonical)
     tfS5: "S5",
@@ -505,6 +512,13 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Mis à jour",
     enterSymbolPrompt: "Entrez un symbole ci-dessus pour déclencher l'inférence ML.",
     runningInference: "Exécution de l'inférence ML haute vitesse...",
+    // PART 22.1 — libellés de corroboration RF séparés (distincts de la précision du signal)
+    rfProbability: "Prob RF",
+    rfHoldoutAccuracy: "Préc RF (holdout)",
+    rfHoldoutAccuracyTitle: "Précision RF sur holdout (20% dernières bougies, ce symbole)",
+    rfCorroboratorUnavailable: "Corroborateur RF indisponible pour cet actif",
+    rfCorroboratorUnavailableTitle:
+      "Le RandomForest n'a pas tourné sur cet actif (chemin rapide ou sous-seuil) : les valeurs RF sont nulles, jamais dérivées de la confluence.",
 
     // Timeframes (PO canonical)
     tfS5: "S5",
@@ -826,6 +840,13 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "تم التحديث",
     enterSymbolPrompt: "أدخل رمزاً أعلاه لتشغيل استدلال تعلم الآلة المباشر.",
     runningInference: "جارٍ تشغيل استدلال تعلم الآلة فائق السرعة...",
+    // PART 22.1 — تسميات توثيق RF منفصلة (مختلفة عن دقة الإشارة)
+    rfProbability: "احتمال RF",
+    rfHoldoutAccuracy: "دقة RF (holdout)",
+    rfHoldoutAccuracyTitle: "دقة RF على مجموعة الإمساك (آخر 20% من الشموع، هذا الرمز)",
+    rfCorroboratorUnavailable: "المدقق RF غير متاح لهذا الرمز",
+    rfCorroboratorUnavailableTitle:
+      "لم يعمل RandomForest على هذا الرمز (مسار سريع أو دون العتبة) : قيم RF فارغة، لا مشتقة من التقارب.",
 
     // Timeframes (PO canonical)
     tfS5: "S5",
@@ -1146,6 +1167,13 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Actualizado",
     enterSymbolPrompt: "Introduce un símbolo arriba para ejecutar inferencia ML.",
     runningInference: "Ejecutando inferencia ML de alta velocidad...",
+    // PART 22.1 — etiquetas de corroboración RF separadas (distintas de la precisión de la señal)
+    rfProbability: "Prob. RF",
+    rfHoldoutAccuracy: "Prec RF (holdout)",
+    rfHoldoutAccuracyTitle: "Precisión RF en holdout (último 20% de velas, este símbolo)",
+    rfCorroboratorUnavailable: "Corroborador RF no disponible para este símbolo",
+    rfCorroboratorUnavailableTitle:
+      "El RandomForest no corrió en este símbolo (ruta rápida o sub-umbral); los valores RF son nulos, nunca derivados de la confluencia.",
 
     // Timeframes (PO canonical)
     tfS5: "S5",

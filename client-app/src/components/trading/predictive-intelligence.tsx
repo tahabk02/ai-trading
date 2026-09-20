@@ -319,19 +319,36 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between w-full mt-4 text-[9px] font-mono text-slate-400 border-t border-slate-800 pt-2">
-                  <span>
-                    {t("mlProb")}:{" "}
-                    {predictionData.ml_probability != null
-                      ? (predictionData.ml_probability * 100).toFixed(1) + "%"
-                      : "--"}
-                  </span>
-                  <span>
-                    {t("acc")}:{" "}
-                    {predictionData.model_accuracy != null
-                      ? formatPercent(predictionData.model_accuracy, 1)
-                      : "--"}
-                  </span>
+                <div className="w-full mt-4 border-t border-slate-800 pt-2 text-[9px] font-mono text-slate-400">
+                  {/* PART 22.1 [151] — when the RF corroborator did not run for
+                      this tape, say so explicitly; never quietly show
+                      confluence-derived numbers under RF-labeled fields. */}
+                  {predictionData.corroborator_unavailable ? (
+                    <p
+                      className="uppercase font-bold text-amber-400"
+                      title={t("rfCorroboratorUnavailableTitle")}
+                    >
+                      {t("rfCorroboratorUnavailable")}
+                    </p>
+                  ) : (
+                    <div className="flex items-center justify-between gap-2">
+                      {/* PART 22.1 [152] — `rfHoldoutAccuracy` reads as what it
+                          actually is (RF holdout accuracy, last 20% of candles,
+                          this symbol), not as the shipped signal's precision. */}
+                      <span title={t("rfHoldoutAccuracyTitle")}>
+                        {t("rfHoldoutAccuracy")}:{" "}
+                        {predictionData.rf_holdout_accuracy != null
+                          ? formatPercent(predictionData.rf_holdout_accuracy, 1)
+                          : "--"}
+                      </span>
+                      <span>
+                        {t("rfProbability")}:{" "}
+                        {predictionData.rf_probability != null
+                          ? (predictionData.rf_probability * 100).toFixed(1) + "%"
+                          : "--"}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 

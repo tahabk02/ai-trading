@@ -267,8 +267,15 @@ class PredictResponse(BaseModel):
     confidence: float = Field(..., ge=0.0, le=100.0)
     target_price: float = Field(..., ge=0)
     current_price: float = Field(..., gt=0)
-    ml_probability: float = Field(..., ge=0.0, le=1.0)
-    model_accuracy: float = Field(..., ge=0.0, le=1.0)
+    # PART 22.1 [150] — RF corroboration split schema: rf_* are the
+    # RandomForest's real numbers, null when the corroborator did not run on
+    # this tape; legacy ml_probability / model_accuracy are EXACT aliases of
+    # the RF numbers (never confluence-derived, null on the fallback path).
+    ml_probability: Optional[float] = Field(None, ge=0.0, le=1.0)
+    model_accuracy: Optional[float] = Field(None, ge=0.0, le=1.0)
+    rf_probability: Optional[float] = Field(None, ge=0.0, le=1.0)
+    rf_holdout_accuracy: Optional[float] = Field(None, ge=0.0, le=1.0)
+    corroborator_unavailable: bool = True
     timeframe: str
     proxyLatencyMs: Optional[float] = None
     indicators: IndicatorModel = Field(default_factory=IndicatorModel)
