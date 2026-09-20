@@ -322,6 +322,11 @@ function ProTerminalInner() {
                     targetPrice={predictionData?.target_price}
                     signal={predictionData?.signal ?? null}
                     live={engineLive}
+                    tier={predictionData?.tier ?? null}
+                    regimeScoredOnly={
+                      (predictionData?.suppressed_reason ?? null) ===
+                      "regime_scored_only"
+                    }
                   />
                 </div>
                 <div className="w-full">

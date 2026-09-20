@@ -1,5 +1,6 @@
 import type { CandlestickData } from "lightweight-charts";
 import type { SignalHoldView } from "./realtimeCandleAggregator";
+import { targetCandlesEnabled } from "./signalTiers";
 
 /**
  * PART 11 — BAR TINT MUST CONSUME THE BUFFERED SIGNAL, NEVER THE RAW STORE
@@ -60,4 +61,31 @@ export function barTintForBufferedSignal(
     return { ...base, color: c, borderColor: c, wickColor: c };
   }
   return base;
+}
+
+/**
+ * PART 24 [158] — the "TARGET CANDLES N candles" HUD text must render EXACTLY
+ * when the target-candle SHAPE renders. Pre-PART 24 the text was a THIRD
+ * independent read (`targetCandlesLabelFor` count derived from
+ * expirationSeconds/timeframeSeconds in financial-chart, never routed through
+ * view.tier) — so a WEAK/T5 tape showed "TARGET CANDLES N" beside an empty
+ * projection, the same independent-drift class as PART 20/22. The count now
+ * flows through the SAME SignalHoldView the shape gate consumes.
+ */
+export function targetCandlesLabelFor(
+  view: Pick<SignalHoldView, "tier">,
+  intervals: number,
+): { enabled: boolean; count: number | null } {
+  const enabled = targetCandlesEnabled(view.tier);
+  return {
+    enabled,
+    count: enabled && Number.isFinite(intervals) && intervals > 0 ? intervals : null,
+  };
+}
+
+/** Renderable value of the label — null means the text must not be drawn. */
+export function formatTargetCandlesLabel(
+  label: { enabled: boolean; count: number | null },
+): string | null {
+  return label.enabled && label.count != null ? `${label.count} candles` : null;
 }

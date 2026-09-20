@@ -31,6 +31,8 @@ import {
   buildSignalView,
   SIGNAL_CONFIDENCE_THRESHOLD,
 } from "@/lib/realtimeCandleAggregator";
+import { expirySelectorState } from "@/lib/expirySelection";
+import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
 // Mirrors the backend PO expiration whitelist exactly (seconds). The chart
@@ -207,6 +209,25 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
   const streamLive =
     socketConnected && currentPrice > 0 && !stalePrice;
 
+  // PART 24 [161]/[162] — the expiry grid honors the gate the same way the
+  // chart does. Honest floor here is the ENGINE's MIN_EXECUTABLE_TIER (T4):
+  // a random_walk scored-only symbol or a sub-executable tier dims EVERY
+  // option (with the reason said out loud), and a choice whose bucket-aligned
+  // landing is closer than MIN_ACTIONABLE_WINDOW_MS is too_late for that
+  // option — never silently accepted.
+  const expirySel = expirySelectorState(
+    (predictionData as { tier?: string | null } | null)?.tier ?? null,
+    (predictionData as { suppressed_reason?: string | null } | null)
+      ?.suppressed_reason ?? null,
+    chartWindowSeconds,
+    Date.now(),
+    TIMER_OPTIONS,
+    MIN_EXECUTABLE_TIER,
+  );
+  const expiryBySeconds = new Map(
+    expirySel.options.map((o) => [o.seconds, o]),
+  );
+
   const handleCall = useCallback(() => executeTrade("CALL"), [executeTrade]);
   const handlePut = useCallback(() => executeTrade("PUT"), [executeTrade]);
 
@@ -298,27 +319,51 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
           </span>
         </div>
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 max-h-[120px] sm:max-h-[104px] overflow-y-auto custom-scrollbar pr-0.5">
-          {TIMER_OPTIONS.map((opt) => (
-            <button
-              key={opt.seconds}
-              onClick={() => {
-                setExpirationSeconds(opt.seconds);
-                setSelectedExpirationSeconds(opt.seconds);
-              }}
-              disabled={isTradeActive}
-              title={`Projection horizon: ${opt.label}`}
-              className={cn(
-                "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-all duration-200 active:scale-95 min-h-[36px] sm:min-h-[32px]",
-                expirationSeconds === opt.seconds
-                  ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
-                  : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40",
-                isTradeActive && "opacity-50 cursor-not-allowed",
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
+          {TIMER_OPTIONS.map((opt) => {
+            const st = expiryBySeconds.get(opt.seconds);
+            const suppressed = st?.suppressed ?? false;
+            return (
+              <button
+                key={opt.seconds}
+                onClick={() => {
+                  setExpirationSeconds(opt.seconds);
+                  setSelectedExpirationSeconds(opt.seconds);
+                }}
+                disabled={isTradeActive || suppressed}
+                title={
+                  suppressed
+                    ? st?.reason === "too_late"
+                      ? `TOO LATE — aligns to ${st.alignedSeconds}s wait for the next bucket`
+                      : expirySel.blockedReason === "regime_scored_only"
+                        ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable"
+                        : "No actionable signal at any expiry for this symbol right now"
+                    : `Projection horizon: ${opt.label}`
+                }
+                className={cn(
+                  "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-all duration-200 active:scale-95 min-h-[36px] sm:min-h-[32px]",
+                  !suppressed && expirationSeconds === opt.seconds
+                    ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                    : suppressed
+                      ? "bg-obsidian-950/60 text-slate-600 border border-slate-800/40 cursor-not-allowed"
+                      : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40",
+                  isTradeActive && "opacity-50 cursor-not-allowed",
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
         </div>
+        {/* PART 24 [162] — the expiry grid never stays silently interactive next
+            to a WEAK / SCORED-ONLY state: the reason is said out loud. */}
+        {!expirySel.anyActionable ? (
+          <p className="mt-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-300/90 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+            {expirySel.blockedReason === "regime_scored_only"
+              ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable"
+              : "No actionable signal at any expiry for this symbol right now"}
+          </p>
+        ) : null}
       </div>
 
       {/* Live Candle-Close Countdown Bar */}

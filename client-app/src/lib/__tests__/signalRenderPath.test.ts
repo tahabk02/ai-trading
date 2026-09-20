@@ -6,7 +6,12 @@ import {
   type SignalHoldView,
 } from "@/lib/realtimeCandleAggregator";
 import { targetCandlesEnabled } from "@/lib/signalTiers";
-import { barTintForBufferedSignal, signalBadgeFor } from "@/lib/signalRender";
+import {
+  barTintForBufferedSignal,
+  signalBadgeFor,
+  targetCandlesLabelFor,
+  formatTargetCandlesLabel,
+} from "@/lib/signalRender";
 
 // ── PART 11 — THE SIGNAL RENDER PATH ──
 // The production flicker: two store writers (`fetchPrediction` REST at
@@ -145,13 +150,21 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
       timeframeSeconds: 60,
     });
 
-  // ONE assertion for ALL three render consumers: badge↔HUD, gate↔view tier.
+  // ONE assertion for ALL the render consumers: badge↔HUD, gate↔view tier, and
+  // PART 24 [158] — the "TARGET CANDLES N candles" HUD TEXT follows the SAME
+  // view.tier as the shape (a label that drifted independently of the shape is
+  // exactly the PART 20/22 drift class, so it belongs in this coherence block).
   const assertCoherent = (v: SignalHoldView) => {
     const badge = signalBadgeFor(v);
     const candles = candlesFor(v);
+    const label = targetCandlesLabelFor(v, 5);
+    const labelText = formatTargetCandlesLabel(label);
     expect(badge.direction).toBe(v.gatedSignal); // (c) card badge == HUD view
     expect(candles.length > 0).toBe(targetCandlesEnabled(v.tier)); // (b) candle gate == view tier
-    return { badge, candles };
+    expect(label.enabled).toBe(targetCandlesEnabled(v.tier)); // (d) PART 24 label gate == view tier
+    expect(label.count != null).toBe(label.enabled); // count only when enabled
+    expect(labelText !== null).toBe(label.enabled);
+    return { badge, candles, label, labelText };
   };
 
   it("T2 BUY commits with candles; a mid-freeze T5 drop cannot tear label and candles apart", () => {
@@ -211,5 +224,46 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
     v = tick(buf, null, 160, 163_100, "T5");
     expect(v.gatedSignal).toBeNull();
     assertCoherent(v);
+  });
+
+  it("PART 24 [160] — at T5/WEAK the 'TARGET CANDLES N candles' TEXT does not render (not just the shape)", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    tick(buf, "BUY", 100, 100_000, "T2");
+    // Sustained neutral clears the hold into T5 — the exact screenshot state:
+    // a WEAK badge, an empty projection, and a label that pre-PART 24 STILL said
+    // "1 candles".
+    tick(buf, null, 160, 160_050, "T5");
+    const v = tick(buf, null, 160, 163_100, "T5");
+    expect(v.tier).toBe("T5");
+    expect(targetCandlesEnabled(v.tier)).toBe(false);
+    const label = targetCandlesLabelFor(v, 1); // 1 candle would have been claimed
+    expect(label.enabled).toBe(false);
+    expect(label.count).toBeNull();
+    expect(formatTargetCandlesLabel(label)).toBeNull(); // string never assembled
+  });
+
+  it("PART 24 [160] — at T2 the label renders the genuine count (positive control)", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    const v = tick(buf, "BUY", 100, 100_000, "T2");
+    const label = targetCandlesLabelFor(v, 5);
+    expect(label.enabled).toBe(true);
+    expect(label.count).toBe(5);
+    expect(formatTargetCandlesLabel(label)).toBe("5 candles");
+    assertCoherent(v);
+  });
+
+  it("PART 24 [164] — every surface agrees at T5 in one tick: blank label, empty candles, NO SIGNAL badge, no label text", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    const v = tick(buf, null, 160, 163_100, "T5");
+    const { badge, candles, label, labelText } = assertCoherent(v);
+    // (a) HUD direction — blank.
+    expect(v.gatedSignal).toBeNull();
+    // (b) candle shape — empty overlay, nothing routes into syncMarkers T-HI/T-LO.
+    expect(candles.length).toBe(0);
+    // (c) card badge — honest neutral.
+    expect(badge.badgeText).toBe("NO SIGNAL");
+    // (d) PART 24 label — count and string both absent.
+    expect(label.count).toBeNull();
+    expect(labelText).toBeNull();
   });
 });

@@ -39,7 +39,12 @@ import {
   type SignalHoldView,
   type TargetCandleData,
 } from "@/lib/realtimeCandleAggregator";
-import { barTintForBufferedSignal } from "@/lib/signalRender";
+import {
+  barTintForBufferedSignal,
+  formatTargetCandlesLabel,
+  targetCandlesLabelFor,
+} from "@/lib/signalRender";
+import { targetCandlesEnabled } from "@/lib/signalTiers";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import {
@@ -598,63 +603,71 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       targetPrice: number,
       anchorPrice: number,
       stopPrice: number,
+      /* PART 24 [159] — projection price lines (TGT/ANC/STOP/T-HI/T-LO) draw
+         ONLY inside the target zone (T1–T3). At T4/T5 the main tape must not
+         show a dashed TGT line next to an empty projection — the same honesty
+         gate as the candle shape. The LIVE price line stays in both cases. */
+      zoneActive: boolean,
     ): void => {
       const series = candleSeriesRef.current;
       if (!series) return;
       const bag = linesRef.current;
       const live = Number(currentPriceRef.current);
-      // ── PROJECTION PRICE LINES on the MAIN series ──
-      // TGT dashed teal, ANC dotted gray, STOP dashed coral (if provided);
-      // last projected target candle renders T-HI / T-LO. All instances are
-      // reused in `bag` (removed via setPriceLine when price <= 0), so the
-      // overlay never leaks duplicate line objects across re-renders.
-      setPriceLine(
-        bag,
-        "target",
-        series,
-        targetPrice,
-        TGT_LINE,
-        LineStyle.Dashed,
-        "TGT",
-      );
-      setPriceLine(
-        bag,
-        "anchor",
-        series,
-        anchorPrice,
-        ANC_LINE,
-        LineStyle.Dotted,
-        "ANC",
-      );
-      setPriceLine(
-        bag,
-        "stop",
-        series,
-        stopPrice,
-        STOP_LINE,
-        LineStyle.Dashed,
-        "STOP",
-      );
-      if (last) {
+      if (zoneActive) {
         setPriceLine(
           bag,
-          "hi",
+          "target",
           series,
-          last.high,
+          targetPrice,
           TGT_LINE,
-          LineStyle.Dotted,
-          "T-HI",
+          LineStyle.Dashed,
+          "TGT",
         );
         setPriceLine(
           bag,
-          "lo",
+          "anchor",
           series,
-          last.low,
-          TGT_LINE,
+          anchorPrice,
+          ANC_LINE,
           LineStyle.Dotted,
-          "T-LO",
+          "ANC",
         );
+        setPriceLine(
+          bag,
+          "stop",
+          series,
+          stopPrice,
+          STOP_LINE,
+          LineStyle.Dashed,
+          "STOP",
+        );
+        if (last) {
+          setPriceLine(
+            bag,
+            "hi",
+            series,
+            last.high,
+            TGT_LINE,
+            LineStyle.Dotted,
+            "T-HI",
+          );
+          setPriceLine(
+            bag,
+            "lo",
+            series,
+            last.low,
+            TGT_LINE,
+            LineStyle.Dotted,
+            "T-LO",
+          );
+        } else {
+          setPriceLine(bag, "hi", series, 0, TGT_LINE, LineStyle.Dotted, "T-HI");
+          setPriceLine(bag, "lo", series, 0, TGT_LINE, LineStyle.Dotted, "T-LO");
+        }
       } else {
+        setPriceLine(bag, "target", series, 0, TGT_LINE, LineStyle.Dashed, "TGT");
+        setPriceLine(bag, "anchor", series, 0, ANC_LINE, LineStyle.Dotted, "ANC");
+        setPriceLine(bag, "stop", series, 0, STOP_LINE, LineStyle.Dashed, "STOP");
         setPriceLine(bag, "hi", series, 0, TGT_LINE, LineStyle.Dotted, "T-HI");
         setPriceLine(bag, "lo", series, 0, TGT_LINE, LineStyle.Dotted, "T-LO");
       }
@@ -813,7 +826,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           try { series.setMarkers([]); } catch {}
         }
         setTargetLayerActive(false);
-        syncMarkers(dirColor, null, 0, 0, 0);
+        syncMarkers(dirColor, null, 0, 0, 0, targetCandlesEnabled(tierForGate));
         syncChartDebug(rows, bw, tipSec, intervals, [], signalValue);
         return;
       }
@@ -875,7 +888,14 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           snap.candles.length > 0
             ? snap.candles[snap.candles.length - 1]
             : null;
-        syncMarkers(dirColor, last, targetPrice, anchorPrice, stopPrice);
+        syncMarkers(
+          dirColor,
+          last,
+          targetPrice,
+          anchorPrice,
+          stopPrice,
+          targetCandlesEnabled(tierForGate),
+        );
         syncChartDebug(rows, bw, tipSec, intervals, snap.candles, signalValue);
       }
     },
@@ -1314,7 +1334,15 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // The 96.5% confidence gate IMMUTABLY controls this label (stabilized, so
   // confidence jitter can never shimmer it) — completely isolated from the
   // target-candle rendering which runs off the projection matrix.
-  const hudSignal = effectiveSignal();
+  // PART 24 [158] — the HUD consumes ONE SignalHoldView per render (identical
+  // call count to the pre-PART 24 effectiveSignal()); direction is hudView.
+  // gatedSignal and every target-adjacent card reads hudView.tier through
+  // hudZone, so the TGT / TARGET CANDLES / EXPIRY cards can never disagree
+  // with the candle shape's own tier gate.
+  const hudView = currentSignalView();
+  const hudSignal = hudView.gatedSignal;
+  const hudTargetCandles = targetCandlesLabelFor(hudView, targetCandleCount);
+  const hudZone = hudTargetCandles.enabled;
   const hudDigits = getPriceDigits(activeSymbol);
   const hudLive = Number(currentPriceRef.current) || 0;
   const hudDeltaPct =
@@ -1514,7 +1542,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               )}
             </div>
           ) : null}
-          {hudTarget > 0 ? (
+          {hudZone && hudTarget > 0 ? (
             <div className="flex items-center gap-2 rounded-md border border-white/10 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
               <span className="uppercase tracking-widest text-slate-400">TGT</span>
               <span className="font-bold tabular-nums text-slate-200">
@@ -1536,15 +1564,17 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             <span className="uppercase tracking-widest text-slate-400">TIME</span>
             <span className="font-bold tabular-nums text-slate-200">{tf}</span>
           </div>
-          <div className="flex items-center gap-2 rounded-md border border-sky-500/25 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
-            <span className="uppercase tracking-widest text-slate-400">
-              TARGET CANDLES
-            </span>
-            <span className="font-black tabular-nums text-sky-300">
-              {targetCandleCount} candles
-            </span>
-          </div>
-          {hudCountdown ? (
+          {formatTargetCandlesLabel(hudTargetCandles) !== null ? (
+            <div className="flex items-center gap-2 rounded-md border border-sky-500/25 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
+              <span className="uppercase tracking-widest text-slate-400">
+                TARGET CANDLES
+              </span>
+              <span className="font-black tabular-nums text-sky-300">
+                {formatTargetCandlesLabel(hudTargetCandles)}
+              </span>
+            </div>
+          ) : null}
+          {hudZone && hudCountdown ? (
             <div className="flex items-center gap-2 rounded-md border border-white/10 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
               <span className="uppercase tracking-widest text-slate-400">EXPIRY</span>
               <span className="font-black tabular-nums text-sky-300">{hudCountdown}</span>

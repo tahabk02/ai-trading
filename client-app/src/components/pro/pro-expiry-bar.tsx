@@ -1,7 +1,13 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { useTradingStore, selectSelectedExpiration } from "@/store/useTradingStore";
+import {
+  useTradingStore,
+  selectSelectedExpiration,
+  selectSelectedTimeframe,
+} from "@/store/useTradingStore";
+import { expirySelectorState } from "@/lib/expirySelection";
+import { timeframeToSeconds } from "@/lib/realtimeCandleAggregator";
 
 export const PRO_EXPIRY_OPTIONS = [
   { label: "1m", seconds: 60 },
@@ -25,6 +31,11 @@ interface ProExpiryBarProps {
   targetPrice?: number | null;
   signal?: "BUY" | "SELL" | null;
   live: boolean;
+  /* PART 24 [162] — the selector itself must reflect the gate: a scored_only
+     or sub-zone symbol dims every expiry instead of staying fully interactive
+     next to a WEAK/SCORED-ONLY badge. */
+  tier?: string | null;
+  regimeScoredOnly?: boolean;
 }
 
 export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
@@ -34,14 +45,18 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   targetPrice,
   signal,
   live,
+  tier = null,
+  regimeScoredOnly = false,
 }) => {
   const expirationSeconds = useTradingStore(selectSelectedExpiration);
   const setSelectedExpirationSeconds = useTradingStore(
     (s) => s.setSelectedExpirationSeconds,
   );
+  const selectedTimeframe = useTradingStore(selectSelectedTimeframe);
 
   const [isMounted, setIsMounted] = useState(false);
   const [remainingS, setRemainingS] = useState<number>(expirationSeconds);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
     setIsMounted(true);
@@ -52,6 +67,10 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
     setRemainingS(Math.max(1, expirationSeconds));
     const iv = setInterval(() => {
       setRemainingS(Math.max(0, (deadline - Date.now()) / 1000));
+      // PART 24 [161] — every 250ms tick re-evaluates the per-expiry action
+      // window against the SAME wall clock the countdown runs on, so the
+      // selector reflects the live "too late to act" boundary as it sweeps.
+      setNowMs(Date.now());
     }, 250);
     return () => clearInterval(iv);
   }, [expirationSeconds]);
@@ -66,6 +85,23 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
         : "text-slate-400";
   const dirArrow = signal === "BUY" ? "▲" : signal === "SELL" ? "▼" : "·";
 
+  // PART 24 [162] — the selector's own gate. The projection horizon only
+  // exists inside the T1-T3 zone; a random_walk scored-only symbol or a sub-z
+  // tier dims EVERY option rather than staying interactive next to the honest
+  // badge. Per-option too_late ([161]) dims only the choices that can't clear
+  // the action window before their bucket-aligned landing.
+  const tfSeconds = timeframeToSeconds(selectedTimeframe) || 60;
+  const selector = expirySelectorState(
+    regimeScoredOnly ? "T5" : tier,
+    regimeScoredOnly ? "regime_scored_only" : null,
+    tfSeconds,
+    nowMs,
+    PRO_EXPIRY_OPTIONS,
+  );
+  const bySeconds = new Map(
+    selector.options.map((o) => [o.seconds as number, o]),
+  );
+
   return (
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 bg-obsidian-950/60 border border-slate-800 rounded-xl w-full">
       <div className="flex items-center flex-wrap gap-2 sm:gap-3">
@@ -79,24 +115,51 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
           {isMounted ? formatProCountdown(remainingS) : "--:--"}
         </span>
         <div className="flex items-center gap-1">
-          {PRO_EXPIRY_OPTIONS.map((opt) => (
-            <button
-              key={opt.seconds}
-              type="button"
-              data-testid={`pro-expiry-${opt.label}`}
-              onClick={() => setSelectedExpirationSeconds(opt.seconds)}
-              title={`Projection horizon: ${opt.label}`}
-              className={`text-[10px] font-bold font-mono rounded-lg px-2 py-1 min-h-[30px] transition-all duration-200 active:scale-95 ${
-                expirationSeconds === opt.seconds
-                  ? "bg-accent text-white shadow-sm"
-                  : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
+          {PRO_EXPIRY_OPTIONS.map((opt) => {
+            const st = bySeconds.get(opt.seconds);
+            const suppressed = st?.suppressed ?? false;
+            const tooLate = st?.tooLate ?? false;
+            const active =
+              !suppressed && expirationSeconds === opt.seconds;
+            return (
+              <button
+                key={opt.seconds}
+                type="button"
+                data-testid={`pro-expiry-${opt.label}`}
+                onClick={() => setSelectedExpirationSeconds(opt.seconds)}
+                disabled={suppressed}
+                title={
+                  tooLate
+                    ? `TOO LATE — aligns to ${st?.alignedSeconds ?? opt.seconds}s wait for the next bucket (only ${selector.options[0]?.remainingToBucketCloseMs ?? 0}ms left in this one)`
+                    : `Projection horizon: ${opt.label}`
+                }
+                className={`text-[10px] font-bold font-mono rounded-lg px-2 py-1 min-h-[30px] transition-all duration-200 active:scale-95 ${
+                  active
+                    ? "bg-accent text-white shadow-sm"
+                    : suppressed
+                      ? "bg-obsidian-950/50 text-slate-600 border border-slate-800/40 cursor-not-allowed"
+                      : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40"
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {/* PART 24 [162] — the selector never stays silently interactive when the
+          gate says no expiry is actionable: the state is said out loud. */}
+      {!selector.anyActionable && !selector.zoneActive ? (
+        <div className="w-full sm:w-auto flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-500/10 px-2 py-1 font-mono text-[9px] uppercase tracking-widest">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+          <span className="font-black text-amber-300">
+            {selector.blockedReason === "regime_scored_only"
+              ? "SCORED-ONLY — RANDOM WALK"
+              : "NO ACTIONABLE SIGNAL AT ANY EXPIRY NOW"}
+          </span>
+        </div>
+      ) : null}
 
       <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
         <span
