@@ -36,6 +36,8 @@ HOLD and never procedurally fabricated into an executable signal.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import structlog
@@ -44,9 +46,18 @@ from typing import Any, Dict, List, Optional
 
 from .technical_analysis import TechnicalAnalysisService
 from .quant_matrix import evaluate_quant_matrix, QuantVerdict
-from .book_instruments import evaluate_book_confluence
-from .quality_gate import apply_quality_gate, build_factor_inputs_from_candles
+from .book_instruments import (
+    evaluate_book_confluence,
+    microstructure_queue,
+)
+from .quality_gate import (
+    apply_quality_gate,
+    build_factor_inputs_from_candles,
+    _rsi as _quality_rsi,
+)
+from .math_engine import ewma_volatility, garch11_forecast
 from .regime_detector import classify_regime, MIN_CLOSES
+from ..knowledge.book_chan import half_life_ou
 from .signal_gatekeeper import (
     TIER_LABELS,
     MIN_EXECUTABLE_TIER,
@@ -62,6 +73,147 @@ from .signal_gatekeeper import (
 logger = structlog.get_logger(__name__)
 
 VALID_DIRECTIONS = ("BUY", "SELL")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART 19 [107] — NAMED 50-CANDLE ROLLING FEATURE WINDOW
+# A fixed, documented trailing window whose REAL sub-model inputs (ATR(14),
+# RSI(14), EWMA/GARCH(1,1) volatility, OU half-life, microstructure queue)
+# are computed over the window and fed into the existing regime-gated
+# ensemble factor surface. This is a FEATURE-INPUT window only — it never
+# relaxes the regime classification gate (classify_regime still runs on the
+# full >= MIN_CLOSES historical tape in Stage 6).
+# ═══════════════════════════════════════════════════════════════════════════
+ROLLING_WINDOW = 50
+
+# RiskMetrics GARCH(1,1) parametrization: alpha = 1 − lambda, beta = lambda,
+# omega = 0 — the same EWMA model family horizon_engine relies on.
+_GARCH_ALPHA = 0.06
+_GARCH_BETA = 0.93
+
+
+def compute_rolling_window_features(
+    closes: List[float],
+    opens: Optional[List[float]] = None,
+    highs: Optional[List[float]] = None,
+    lows: Optional[List[float]] = None,
+    volumes: Optional[List[float]] = None,
+    *,
+    live_price: Optional[float] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+    window: int = ROLLING_WINDOW,
+) -> Dict[str, Any]:
+    """Compute REAL sub-model inputs over the trailing `window` candles.
+
+    Every feature is derived strictly from the supplied candle history — no
+    fabricated values. Non-finite or unavailable inputs are reported as None
+    together with the count of real candidates, never invented.
+
+    Returns:
+      - window_len / candles_total       transparency
+      - atr14                            Wilder ATR(14) on the window
+      - rsi14                            Wilder RSI(14) via quality-gate helper
+      - ewma_volatility                  RiskMetrics EWMA vol (lambda=0.94)
+      - garch11_forecast_vol             1-step GARCH(1,1) RiskMetrics vol
+      - garch11_persistence              alpha+beta of the parametrization
+      - ou_half_life                     OU mean-reversion half-life (Chan)
+      - microstructure_queue             PART 3 queue position (real quotes)
+      - volume_surge                     last bar vs prior-20 mean (None flat)
+    """
+    closes_clean = [float(c) for c in closes if math.isfinite(float(c))]
+    win = min(window, len(closes_clean))
+    if win < 2:
+        return {"window_len": 0, "candles_total": len(closes_clean)}
+    w_closes = closes_clean[-win:]
+
+    def _finite(v):
+        if v is None or not math.isfinite(float(v)):
+            return None
+        return round(float(v), 6)
+
+    atr14 = None
+    try:
+        w_opens = [float(o) for o in (opens or closes)][-win:]
+        w_highs = [float(h) for h in (highs or closes)][-win:]
+        w_lows = [float(l) for l in (lows or closes)][-win:]
+        ta = TechnicalAnalysisService()
+        enriched = ta.calculate_indicators(
+            pd.DataFrame({"open": w_opens, "high": w_highs, "low": w_lows, "close": w_closes})
+        )
+        atr14 = _finite(float(enriched["atr"].iloc[-1]))
+    except Exception:
+        atr14 = None
+
+    rsi14 = None
+    try:
+        rsi_series = _quality_rsi(w_closes, 14)
+        if rsi_series and rsi_series[-1] is not None:
+            rsi14 = _finite(rsi_series[-1])
+    except Exception:
+        rsi14 = None
+
+    ewma_vol = None
+    garch_forecast_vol = None
+    garch_persistence = _GARCH_ALPHA + _GARCH_BETA
+    try:
+        returns = [
+            w_closes[i] / w_closes[i - 1] - 1.0
+            for i in range(1, len(w_closes))
+            if w_closes[i - 1] > 0
+        ]
+        if len(returns) >= 2:
+            ewma_raw = ewma_volatility(returns, lambda_=0.94)
+            ewma_vol = _finite(ewma_raw)
+            garch_forecast_vol = _finite(
+                garch11_forecast(
+                    omega=0.0,
+                    alpha=_GARCH_ALPHA,
+                    beta=_GARCH_BETA,
+                    last_variance=ewma_raw * ewma_raw,
+                    last_return=returns[-1],
+                    horizon=1,
+                )
+            )
+    except Exception:
+        ewma_vol = None
+        garch_forecast_vol = None
+
+    ou_half_life = None
+    try:
+        hl = half_life_ou(w_closes)
+        # Only a POSITIVE half-life is mean-reversion evidence. A non-positive
+        # or infinite value means the window shows no reversion — reported as
+        # None, never a fabricated number.
+        if math.isfinite(float(hl)) and float(hl) > 0:
+            ou_half_life = _finite(hl)
+    except Exception:
+        ou_half_life = None
+
+    micro_queue = 0.0
+    if live_price is not None and math.isfinite(float(live_price)):
+        micro_queue = microstructure_queue(float(live_price), bid, ask)
+
+    volume_surge = None
+    if volumes:
+        vols = [float(v) for v in volumes if math.isfinite(float(v))]
+        if len(vols) >= 21:
+            prior = vols[-21:-1]
+            mean_prior = sum(prior) / len(prior)
+            if mean_prior > 0:
+                volume_surge = _finite(vols[-1] / mean_prior)
+
+    return {
+        "window_len": win,
+        "candles_total": len(closes_clean),
+        "atr14": atr14,
+        "rsi14": rsi14,
+        "ewma_volatility": ewma_vol,
+        "garch11_forecast_vol": garch_forecast_vol,
+        "garch11_persistence": _finite(garch_persistence),
+        "ou_half_life": ou_half_life,
+        "microstructure_queue": round(micro_queue, 6),
+        "volume_surge": volume_surge,
+    }
 
 
 @dataclass
@@ -87,7 +239,8 @@ class FinancialAnalysisReport:
     quality_field: Dict[str, Any] = field(default_factory=dict)
     regime_gate: Optional[str] = None   # PART 14 [46] — "scored_only"|"tradable"|None
     suppressed_reason: Optional[str] = None  # "regime_scored_only" rides the payload
-    factors: Dict[str, float] = field(default_factory=dict)
+    regime_classification: Dict[str, Any] = field(default_factory=dict)  # PART 19 [108]
+    factors: Dict[str, Any] = field(default_factory=dict)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
 
@@ -208,6 +361,23 @@ class FinancialAnalysisService:
         volumes = np.array(
             [float(c.get("volume", 0.0) or 0.0) for c in candles], dtype=np.float64
         )
+
+        # ── PART 19 [107] — rolling 50-candle feature window ──
+        # Computed over the trailing ROLLING_WINDOW candles and fed into the
+        # Stage 4 factor surface below. Pure feature input: it never alters the
+        # candles handed to the books/quant stages or the regime gate.
+        window_features = compute_rolling_window_features(
+            closes.tolist(),
+            opens=opens.tolist(),
+            highs=highs.tolist(),
+            lows=lows.tolist(),
+            volumes=volumes.tolist(),
+            live_price=live_price,
+            bid=bid,
+            ask=ask,
+            window=ROLLING_WINDOW,
+        )
+        diagnostics["rolling_window"] = window_features
         try:
             book = evaluate_book_confluence(
                 closes=closes,
@@ -236,7 +406,12 @@ class FinancialAnalysisService:
         quality_reason = None
         quality_field: Dict[str, Any] = {}
         if factor_inputs:
-            qq = apply_quality_gate(direction, confidence, factor_inputs)
+            # PART 19 [107] — the rolling-window features ride into the
+            # five-factor ensemble's input surface (additive key; unknown keys
+            # are ignored by compute_factor_scores, None path untouched).
+            enriched_inputs = dict(factor_inputs)
+            enriched_inputs["rolling_window"] = window_features
+            qq = apply_quality_gate(direction, confidence, enriched_inputs)
             quality = qq.get("quality")
             quality_reason = qq.get("reason")
             quality_field = qq
@@ -274,9 +449,20 @@ class FinancialAnalysisService:
         # so the existing multi-tier gate keeps full authority.
         regime_gate: Optional[str] = None
         suppressed_reason: Optional[str] = None
+        # PART 19 [108] — the classification itself is surfaced (never relaxed)
+        # so downstream consumers/tables can show the REAL regime evidence.
+        regime_classification: Dict[str, Any] = {}
         if len(closes) >= MIN_CLOSES:
             try:
                 regime_result = classify_regime(closes.tolist())
+                regime_classification = {
+                    "regime": regime_result.regime,
+                    "hurst": regime_result.hurst,
+                    "adf_pvalue": regime_result.adf_pvalue,
+                    "confidence": regime_result.confidence,
+                    "closes": int(len(closes)),
+                    "window": ROLLING_WINDOW,
+                }
                 if regime_result.regime == "random_walk":
                     regime_gate = REGIME_GATE_SCORED_ONLY
                     suppressed_reason = SUPPRESSED_REASON_REGIME
@@ -321,7 +507,11 @@ class FinancialAnalysisService:
             quality_field=quality_field,
             regime_gate=regime_gate,
             suppressed_reason=suppressed_reason,
-            factors=dict(verdict_factors or {}),
+            regime_classification=regime_classification,
+            factors=dict(
+                verdict_factors or {},
+                rolling_window=window_features,
+            ),
             diagnostics=diagnostics,
             timestamp=pd.Timestamp.utcnow().isoformat(),
         )
@@ -358,6 +548,7 @@ class FinancialAnalysisService:
             "quality_reason": report.quality_reason,
             "regime_gate": report.regime_gate,
             "suppressed_reason": report.suppressed_reason,
+            "regime_classification": report.regime_classification,
             "factors": report.factors,
             "diagnostics": report.diagnostics,
             "timestamp": report.timestamp,
