@@ -1974,3 +1974,67 @@ describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
     expect(buf.reason).toBeNull();
   });
 });
+
+// ── PART 21 — SignalHoldBuffer freezes tier ATOMICALLY with the direction,
+// and view() is the single source of truth for every render consumer. ──
+describe("PART 21 — tier rides the hold buffer; view() is the ONE source of truth", () => {
+  it("commits tier with the direction; a free frozen contrary candidate cannot move it", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    expect(buf.evaluate("BUY", 100, 60, null, 100_000, "T2")).toBe("BUY");
+    expect(buf.view()).toMatchObject({
+      gatedSignal: "BUY",
+      tier: "T2",
+      suppressedReason: null,
+      bucketSec: 100,
+    });
+    // Fresh contrary candidate INSIDE the freeze window (new /predict: SELL T5).
+    expect(buf.evaluate("SELL", 130, 60, null, 130_200, "T5")).toBe("BUY");
+    expect(buf.view().gatedSignal).toBe("BUY");
+    expect(buf.view().tier).toBe("T2"); // frozen WITH the direction, not the new T5
+    expect(buf.view().suppressedReason).toBe("frozen");
+  });
+
+  it("after the freeze elapses a structural flip re-commits direction AND tier atomically", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    expect(buf.evaluate("SELL", 170, 60, null, 170_100, "T5")).toBe("SELL");
+    const v = buf.view();
+    expect(v.gatedSignal).toBe("SELL");
+    expect(v.tier).toBe("T5"); // both flipped at the SAME evaluate
+  });
+
+  it("a sustained neutral clears direction AND tier; the raw tier is only a fallback", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    expect(buf.evaluate(null, 160, 60, null, 160_050, "T4")).toBe("BUY");
+    expect(buf.evaluate(null, 160, 60, null, 163_100, "T4")).toBeNull();
+    const v = buf.view();
+    expect(v.gatedSignal).toBeNull();
+    // Neutral → tier falls back to the LATEST raw /predict tier for the
+    // target-candle gate (PART 8: T3 geometry with a gated-out label).
+    expect(v.tier).toBe("T4");
+  });
+
+  it("too_late/regime_suppressed keep the held tier (blank label, intact state)", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    expect(buf.evaluate("SELL", 120, 60, "too_late", 120_000, "T3")).toBeNull();
+    const v = buf.view();
+    expect(v.gatedSignal).toBeNull(); // HUD blanks
+    expect(v.tier).toBe("T2"); // held state (and its tier) intact for next bucket
+    expect(v.suppressedReason).toBe("too_late");
+    // And the NEXT bucket resumes the held BUY/T2 (PART 9 contract).
+    expect(buf.evaluate("BUY", 170, 60, null, 170_000, "T2")).toBe("BUY");
+  });
+
+  it("[136] the freeze window runs on bucketSec (wall clock), NOT realMs", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    // Same bucket floor (wallSec still 100) but 50s of REAL time later: the
+    // freeze must NOT release — the freeze comparator is the broker-grid
+    // bucketSec, identical to TargetProjectionEngine.liveTipBucketSec.
+    expect(buf.evaluate("SELL", 100, 60, null, 150_000, "T5")).toBe("BUY");
+    expect(buf.view().tier).toBe("T2");
+    expect(buf.view().suppressedReason).toBe("frozen");
+  });
+});

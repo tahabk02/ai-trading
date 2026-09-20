@@ -805,6 +805,22 @@ export interface SignalHoldBufferOptions {
   neutralHysteresisMs?: number;
 }
 
+/** PART 21 — the ONE current-view object every render consumer (HUD label,
+ *  bar tint, target-candle gate, card badge) reads. A single evaluate() call
+ *  produces it, so direction + tier are frozen/cleared ATOMICALLY — never two
+ *  independently fetched copies a future rename could pull apart (the PART 20
+ *  drift class). */
+export interface SignalHoldView {
+  /** Direction the HUD/label renders. Blanked by too_late / regime_scored_only. */
+  gatedSignal: "BUY" | "SELL" | null;
+  /** Frozen held tier while a direction is held; else the latest raw /predict
+   *  tier (PART 8: a T3 candle legitimately renders with a gated-out label). */
+  tier: string | null;
+  /** Broker-grid bucket floor (s) of the last evaluate — the freeze-window clock. */
+  bucketSec: number;
+  suppressedReason: SignalSuppressReason;
+}
+
 /** PART 9 — WHY the stabilized signal is not (or not yet) what raw says:
  *  - ``"frozen"``  a fresh directional candidate was withheld by the freeze
  *                  window (buffer stability — the held signal is immutable
@@ -822,12 +838,27 @@ export type SignalSuppressReason =
   | "regime_scored_only"
   | null;
 
+/** PART 21 — normalize an engine tier for the hold buffer; unknown → null. */
+function normalizeViewTier(tier: unknown): string | null {
+  if (typeof tier !== "string") return null;
+  const t = tier.trim().toUpperCase();
+  return t === "T1" || t === "T2" || t === "T3" || t === "T4" || t === "T5"
+    ? t
+    : null;
+}
+
 export class SignalHoldBuffer {
   private held: "BUY" | "SELL" | null = null;
   private committedSec = Number.MIN_SAFE_INTEGER;
   private nullStreak = 0;
   private lastNullMs = 0;
   private suppressedReason: SignalSuppressReason = null;
+  /** PART 21 — tier frozen atomically with the held direction; cleared with it. */
+  private heldTier: string | null = null;
+  /** Latest raw /predict tier — the target-candle fallback once neutral. */
+  private lastRawTier: string | null = null;
+  /** Broker-grid bucket floor (s) of the latest evaluate — the freeze clock. */
+  private lastBucketSec = 0;
   private readonly holdNeutralEvals: number;
   private readonly commitBucketSec: number;
   private readonly neutralHysteresisMs: number;
@@ -862,10 +893,14 @@ export class SignalHoldBuffer {
     bucketSec?: number,
     suppress: "too_late" | "regime_scored_only" | null = null,
     realMs?: number,
+    /* PART 21 — engine tier (T1…T5), committed ATOMICALLY with the direction. */
+    tier?: string | null,
   ): "BUY" | "SELL" | null {
     const freeze = Math.max(1, bucketSec ?? this.commitBucketSec);
     const nowMs =
       Number.isFinite(realMs) && (realMs ?? 0) > 0 ? realMs : wallSec * 1000;
+    this.lastRawTier = normalizeViewTier(tier);
+    this.lastBucketSec = wallSec;
     this.suppressedReason = null;
     // PART 9 — engine time-gate: signal too close to bucket close to act.
     if (suppress === "too_late") {
@@ -902,6 +937,7 @@ export class SignalHoldBuffer {
           this.lastNullMs = nowMs;
           if (this.nullStreak >= this.holdNeutralEvals) {
             this.held = null;
+            this.heldTier = null;
             this.nullStreak = 0;
             this.committedSec = wallSec;
           }
@@ -913,6 +949,7 @@ export class SignalHoldBuffer {
       }
       // Structural directional candidate arrives after the freeze → commit now
       this.held = raw;
+      this.heldTier = this.lastRawTier ?? this.heldTier;
       this.nullStreak = 0;
       this.lastNullMs = 0;
       this.committedSec = wallSec;
@@ -921,6 +958,7 @@ export class SignalHoldBuffer {
     // Currently neutral — directional commits immediately; neutral accumulates
     if (raw !== null) {
       this.held = raw;
+      this.heldTier = this.lastRawTier ?? this.heldTier;
       this.nullStreak = 0;
       this.lastNullMs = 0;
       this.committedSec = wallSec;
@@ -933,6 +971,9 @@ export class SignalHoldBuffer {
   /** Reset to neutral. */
   reset(): void {
     this.held = null;
+    this.heldTier = null;
+    this.lastRawTier = null;
+    this.lastBucketSec = 0;
     this.committedSec = Number.MIN_SAFE_INTEGER;
     this.nullStreak = 0;
     this.lastNullMs = 0;
@@ -941,6 +982,25 @@ export class SignalHoldBuffer {
 
   get current(): "BUY" | "SELL" | null {
     return this.held;
+  }
+
+  /** PART 21 — the ONE source of truth every render consumer reads. Built in
+   *  the SAME evaluate() call, so direction + tier are frozen/cleared
+   *  atomically. `tier` reports the frozen held tier while a direction is held;
+   *  once neutral it falls back to the latest raw tier so PART 8's
+   *  T3-candles-with-gated-out-label geometry still renders. `gatedSignal`
+   *  mirrors the evaluate() RETURN — suppressed reasons blank it. */
+  view(): SignalHoldView {
+    return {
+      gatedSignal:
+        this.suppressedReason === "too_late" ||
+        this.suppressedReason === "regime_scored_only"
+          ? null
+          : this.held,
+      tier: this.held !== null ? this.heldTier : this.lastRawTier,
+      bucketSec: this.lastBucketSec,
+      suppressedReason: this.suppressedReason,
+    };
   }
 
   /** PART 9/14 — why the signal is suppressed

@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { UTCTimestamp } from "lightweight-charts";
-import { SignalHoldBuffer } from "@/lib/realtimeCandleAggregator";
-import { barTintForBufferedSignal } from "@/lib/signalRender";
+import {
+  SignalHoldBuffer,
+  buildTargetCandles,
+  type SignalHoldView,
+} from "@/lib/realtimeCandleAggregator";
+import { targetCandlesEnabled } from "@/lib/signalTiers";
+import { barTintForBufferedSignal, signalBadgeFor } from "@/lib/signalRender";
 
 // ── PART 11 — THE SIGNAL RENDER PATH ──
 // The production flicker: two store writers (`fetchPrediction` REST at
@@ -104,5 +109,107 @@ describe("PART 11 — HUD/paint render path consumes effectiveSignal(), not the 
       "red",
     );
     expect(bars.color).toBe("green");
+  });
+});
+
+// ── PART 21 [137] — THE T2→T5 TRANSITION THROUGH THE REAL CHAIN ──
+// One evaluate() produces ONE SignalHoldView; HUD (a), target-candle gate (b)
+// and the card badge (c) all read THAT object. A drift bug in any single
+// consumer shows up as a single coherence assertion failure here — the
+// integration gap PART 20 slipped through (three unit tests passing while the
+// renderers disagreed).
+describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge read ONE view", () => {
+  // Pure seam mirroring financial-chart's currentSignalView(): bucket floor
+  // (wallSec), hysteresis real clock (realMs), raw gate output, raw tier — fed
+  // to the REAL SignalHoldBuffer, then ONE view() consumed by everyone.
+  const tick = (
+    buf: SignalHoldBuffer,
+    rawGated: "BUY" | "SELL" | null,
+    wallSec: number,
+    realMs: number,
+    rawTier: string | null,
+  ): SignalHoldView => {
+    buf.evaluate(rawGated, wallSec, 60, null, realMs, rawTier);
+    return buf.view();
+  };
+
+  const candlesFor = (v: SignalHoldView) =>
+    buildTargetCandles({
+      liveTipBucketMs: v.bucketSec * 1000,
+      liveClose: 100,
+      targetPrice: 105,
+      atr: 1,
+      signal: v.gatedSignal,
+      tier: v.tier,
+      expirationSeconds: 300,
+      timeframeSeconds: 60,
+    });
+
+  // ONE assertion for ALL three render consumers: badge↔HUD, gate↔view tier.
+  const assertCoherent = (v: SignalHoldView) => {
+    const badge = signalBadgeFor(v);
+    const candles = candlesFor(v);
+    expect(badge.direction).toBe(v.gatedSignal); // (c) card badge == HUD view
+    expect(candles.length > 0).toBe(targetCandlesEnabled(v.tier)); // (b) candle gate == view tier
+    return { badge, candles };
+  };
+
+  it("T2 BUY commits with candles; a mid-freeze T5 drop cannot tear label and candles apart", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    // Tick 1 — T2 BUY commits on bucket floor 100.
+    let v = tick(buf, "BUY", 100, 100_000, "T2");
+    expect(v.gatedSignal).toBe("BUY");
+    expect(v.tier).toBe("T2");
+    let { candles } = assertCoherent(v);
+    expect(candles.length).toBe(5); // T2 renders the trajectory
+
+    // Tick 2 — INSIDE the freeze window a fresh /predict lands T5 (sub-gate
+    // confidence → raw neutral). The HUD label AND the candles must stay
+    // coherent, not drift to a split dispatch.
+    v = tick(buf, null, 130, 130_100, "T5");
+    expect(v.gatedSignal).toBe("BUY"); // (a) hysteresis: still held
+    const t2 = assertCoherent(v);
+    expect(t2.candles.length).toBe(5); // (b) NOT ripped out mid-freeze
+    expect(v.tier).toBe("T2"); // frozen beside the held direction
+  });
+
+  it("the T2→T5 drop suppresses candles EXACTLY when the label clears — one tick, one flip", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    tick(buf, "BUY", 100, 100_000, "T2");
+    // Bucket rolls to 160; sustained neutral with REAL gaps clears the label.
+    tick(buf, null, 160, 160_050, "T5");
+    const v = tick(buf, null, 160, 163_100, "T5");
+    expect(v.gatedSignal).toBeNull(); // (a) HUD cleared by the hysteresis
+    expect(v.tier).toBe("T5");
+    const { candles, badge } = assertCoherent(v);
+    expect(targetCandlesEnabled(v.tier)).toBe(false);
+    expect(candles.length).toBe(0); // (b) suppressed at the SAME tick
+    expect(badge.badgeText).toBe("NO SIGNAL"); // (c) badge matches
+  });
+
+  it("a frozen contrary SELL keeps badge == label == candles (the T2 family)", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    tick(buf, "BUY", 100, 100_000, "T2");
+    const v = tick(buf, "SELL", 130, 130_200, "T5");
+    expect(v.suppressedReason).toBe("frozen");
+    assertCoherent(v); // badge BUY, candles ON, tier T2 — all from one view
+  });
+
+  it("[136] freeze follows bucketSec, hysteresis follows realMs — the SAME chain, provably", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    tick(buf, "BUY", 100, 100_000, "T2");
+    // SAME bucket floor, 50s of real time later: freeze MUST hold (bucket clock).
+    let v = tick(buf, "SELL", 100, 150_000, "T5");
+    expect(v.gatedSignal).toBe("BUY");
+    expect(v.tier).toBe("T2");
+    // Neutral hysteresis DOES follow realMs: bucket advanced to 160 but the two
+    // null reads were < 1.5s apart → still held.
+    tick(buf, null, 160, 160_050, "T5");
+    v = tick(buf, null, 160, 160_380, "T5");
+    expect(v.gatedSignal).toBe("BUY");
+    // Measured-gap reads (≥1.5s) clear it.
+    v = tick(buf, null, 160, 163_100, "T5");
+    expect(v.gatedSignal).toBeNull();
+    assertCoherent(v);
   });
 });

@@ -36,6 +36,7 @@ import {
   SignalHoldBuffer,
   type AggregatorDebug,
   type Candle,
+  type SignalHoldView,
   type TargetCandleData,
 } from "@/lib/realtimeCandleAggregator";
 import { barTintForBufferedSignal } from "@/lib/signalRender";
@@ -501,7 +502,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     selectedLeadOffsetMs ?? "auto"
   }|${data.length}|${serverCandleVersion}`;
 
-  const effectiveSignal = useCallback((): "BUY" | "SELL" | null => {
+  // PART 21 — the ONE current-view object produced per tick. `evaluate` commits
+  // direction + tier ATOMICALLY: while a direction is frozen the tier rides
+  // beside it, so the HUD label and the target-candle gate can never display
+  // two different dispatches (the PART 20 drift class).
+  const currentSignalView = useCallback((): SignalHoldView => {
     const propLike =
       signalRef.current || confPropRef.current !== undefined
         ? {
@@ -544,19 +549,35 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           )?.suppressed_reason?.trim().toLowerCase() === "regime_scored_only"
           ? ("regime_scored_only" as const)
           : null;
-    // PART 11 — REAL elapsed clock for the neutral-clears hysteresis.
-    // wallSec is the broker-grid bucket floor (constant between prints), so
-    // without this the "sustained neutral" was measured in consecutive
-    // render frames — milliseconds apart — and a 2-frame null at the
-    // freeze-release instant blanked the label on every bucket rollover.
-    return signalHoldRef.current.evaluate(
+    // PART 11 [25] + PART 21 [136] — realMs is a CONSTANT-OFFSET alias of the
+    // aggregator's timingNow(): clockOffsetMs only refreshes on a genuine
+    // upstream print, so between prints Date.now() advances 1:1 with
+    // timingNow(). Only the elapsed INTERVAL matters for neutral-hysteresis,
+    // so the two clocks are provably interchangeable here — the freeze decision
+    // itself runs on `wallSec` (the broker-grid bucket floor), identical to the
+    // `liveTipBucketSec` the projection engine consumes.
+    signalHoldRef.current.evaluate(
       rawGated,
       wallSec,
       tfSec,
       engineSuppress,
       Date.now(),
+      // PART 21 — raw /predict tier, committed with the direction. While a
+      // direction is held the buffer FREEZES this tier; when neutral it is the
+      // fallback for the target-candle gate (PART 8: a T3 candle legitimately
+      // renders with a gated-out label).
+      (
+        predictionDataRef.current as { tier?: string | null } | null
+      )?.tier ?? null,
     );
+    // The evaluate() return is the stabilized gated direction — consumers that
+    // need tier MUST read view(), never a second predictionDataRef fetch.
+    return signalHoldRef.current.view();
   }, []);
+
+  const effectiveSignal = useCallback((): "BUY" | "SELL" | null => {
+    return currentSignalView().gatedSignal;
+  }, [currentSignalView]);
 
   const reanchor = useCallback((mainCount: number, intervals: number): void => {
     const chart = chartRef.current;
@@ -738,12 +759,19 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   );
 
   const updateTargetLayer = useCallback(
-    (signalValue: "BUY" | "SELL" | null, liveClose: number): void => {
+    (liveClose: number): void => {
       const series = targetSeriesRef.current;
       const bw = timeframeToMs(timeframeRef.current);
       const rows = dataRef.current;
       const tfSec = tfSecondsRef.current;
       const expSec = expSecondsRef.current;
+      // PART 21 [135] — the target-candle gate reads the SAME currentSignalView
+      // the HUD label renders: buffered direction AND tier from ONE buffer, so
+      // candles can never render a different dispatch than the label shows
+      // (pre-PART 21 both read separate copies of predictionDataRef).
+      const view = currentSignalView();
+      const signalValue = view.gatedSignal;
+      const tierForGate = view.tier;
       const targetPrice =
         Number(targetRef.current) ||
         Number(predictionDataRef.current?.target_price) ||
@@ -802,8 +830,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         targetPrice,
         atr: Number(atrRef.current) || 0,
         signal: signalValue,
-        // PART 6 — engine tier gate: target candles render T1–T3 only.
-        tier: predictionDataRef.current?.tier ?? undefined,
+        // PART 21 [135] — engine tier gate: candles render T1–T3 ONLY off the
+        // buffered view's tier (frozen with the direction, never a second raw
+        // fetch of predictionDataRef). Closing the PART 20 drift.
+        tier: tierForGate,
       });
 
       if (snap.changed) {
@@ -849,7 +879,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         syncChartDebug(rows, bw, tipSec, intervals, snap.candles, signalValue);
       }
     },
-    [reanchor, syncMarkers, syncChartDebug],
+    [reanchor, syncMarkers, syncChartDebug, currentSignalView],
     );
 
   useEffect(() => {
@@ -1079,7 +1109,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       } catch {}
     }
     if (rows.length > 0) {
-      updateTargetLayer(effectiveSignal(), rows[rows.length - 1].close);
+      updateTargetLayer(rows[rows.length - 1].close);
     } else {
       try {
         targetSeriesRef.current?.setData([]);
@@ -1109,10 +1139,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
 
   useEffect(() => {
     if (dataRef.current.length > 0) {
-      updateTargetLayer(
-        effectiveSignal(),
-        dataRef.current[dataRef.current.length - 1].close,
-      );
+      updateTargetLayer(dataRef.current[dataRef.current.length - 1].close);
     }
   }, [
     expirationSeconds,
@@ -1242,7 +1269,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
                 });
               }
               if (count > 0) {
-                updateTargetLayer(effectiveSignal(), arr[count - 1].close);
+                updateTargetLayer(arr[count - 1].close);
               }
             }
           } else {
