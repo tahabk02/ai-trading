@@ -576,16 +576,34 @@ const OTC_SET = new Set(OTC_WHITELIST.map((e) => e.symbol));
 export class SymbolRegistryService {
   private entries: SymbolEntry[] = [...OTC_WHITELIST];
 
-  /** Replace the fallback registry with the broker's active asset universe. */
+  /**
+   * Merge the broker's active asset universe into the registry WITHOUT ever
+   * dropping the canonical 44.
+   *
+   * PART 27 regression guard: PO's asset list is a SUPERSET of what this app
+   * trades, but it does NOT contain the 10 standard ECB-sourced real pairs
+   * (EUR/SEK … USD/CZK) that are the strict-44 baseline — nor does it always
+   * classify symbols like Pocket Option does. Replacing `entries` outright
+   * silently purged those pairs from every registry-driven path (boot stream
+   * seed, GET /symbols, quotes snapshot), which is exactly why their daily
+   * rates stopped latching and the terminal showed "--".
+   *
+   * Contract:
+   *   • PO assets override the canonical entry for a symbol PO also lists
+   *     (PO is the live pricing venue for those instruments)…
+   *   • …but the strict whitelist entries are ALWAYS retained when PO does not
+   *     cover the symbol (the 10 real pairs + BTC/USD + ETH/USD never vanish).
+   */
   replaceFromBridgeAssets(assets: unknown[]): void {
-    const next: SymbolEntry[] = [];
+    const next = new Map<string, SymbolEntry>();
+
     for (const raw of assets) {
       if (!raw || typeof raw !== "object") continue;
       const item = raw as Record<string, unknown>;
       const symbol = String(item.symbol || "")
         .trim()
         .toUpperCase();
-      if (!symbol || next.some((entry) => entry.symbol === symbol)) continue;
+      if (!symbol || next.has(symbol)) continue;
       const subtype = String(
         item.assetSubType || item.type || "forex",
       ) as AssetSubType;
@@ -597,7 +615,7 @@ export class SymbolRegistryService {
       ].includes(subtype)
         ? subtype
         : "forex";
-      next.push({
+      next.set(symbol, {
         symbol,
         name: String(item.name || symbol),
         label: String(item.label || symbol),
@@ -616,8 +634,19 @@ export class SymbolRegistryService {
         digits: Number.isFinite(Number(item.digits)) ? Number(item.digits) : 5,
       });
     }
-    if (next.length > 0)
-      this.entries = next.sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+    // Retention pass — canonical whitelist entries that PO does NOT cover stay
+    // in the registry (real ECB pairs, crypto majors already present above).
+    for (const canonical of OTC_WHITELIST) {
+      if (!next.has(canonical.symbol)) {
+        next.set(canonical.symbol, canonical);
+      }
+    }
+
+    if (next.size > 0)
+      this.entries = [...next.values()].sort((a, b) =>
+        a.symbol.localeCompare(b.symbol),
+      );
   }
 
   /**
