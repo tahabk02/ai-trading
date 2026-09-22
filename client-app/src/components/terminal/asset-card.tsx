@@ -184,12 +184,14 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
       tabIndex={scoredOnly ? -1 : 0}
       aria-label={regime.ariaLabel}
       aria-disabled={scoredOnly ? true : undefined}
+      aria-description={scoredOnly ? regime.nonInteractiveTitle : undefined}
+      title={scoredOnly ? regime.nonInteractiveTitle : undefined}
       onClick={openPro}
       onKeyDown={handleCardKeyDown}
       className={cn(
-        "group relative flex flex-col rounded-cell px-2 py-1.5 min-w-0 select-none",
+        "group relative flex flex-col rounded-cell px-2 py-1 min-w-0 select-none",
         scoredOnly
-          ? "border border-term-line bg-term-panel/80 cursor-default"
+          ? "border border-term-line bg-term-panel/80 cursor-not-allowed"
           : "border border-term-line bg-term-panel cursor-pointer transition-colors duration-150 hover:border-bull/40",
       )}
     >
@@ -218,17 +220,19 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
 
       {/* ── ROW 2 — price (star) + delta + spread/ticks —─ */}
       <div className="mt-1 flex items-end justify-between gap-1 min-w-0">
-        <span
-          key={scoredOnly ? undefined : `${symbol}::${priceText}`}
-          className={cn(
-            "num-fig text-[16px] font-bold leading-tight truncate",
-            scoredOnly ? "text-term-ink-faint" : "text-term-ink",
-            !scoredOnly && flashDir === "up" && "price-flash-up",
-            !scoredOnly && flashDir === "down" && "price-flash-down",
-          )}
-        >
-          {priceText}
-        </span>
+        <div className="min-w-0">
+          <span
+            key={scoredOnly ? undefined : `${symbol}::${priceText}`}
+            className={cn(
+              "num-fig text-[16px] font-bold leading-tight truncate block",
+              scoredOnly ? "text-term-ink-faint" : "text-term-ink",
+              !scoredOnly && flashDir === "up" && "price-flash-up",
+              !scoredOnly && flashDir === "down" && "price-flash-down",
+            )}
+          >
+            {priceText}
+          </span>
+        </div>
         <div className="shrink-0 text-right min-w-0">
           {!scoredOnly && (
             <p
@@ -246,18 +250,26 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
 
       {/* ── ROW 3 — verdict strip (LIVE + horizon) ── */}
       {scoredOnly ? (
-        <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-gold bg-gold/10 border border-gold/40">
-            <Activity size={10} />
-            SCORED-ONLY
-          </span>
-          <span className="num-fig ml-auto text-[8px] uppercase tracking-tight text-term-ink-faint whitespace-nowrap">
-            {regime.reason === "regime_scored_only" ? "RANDOM WALK" : "REGIME REVIEW"}
+        <div className="mt-2 flex flex-col gap-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-gold bg-gold/10 border border-gold/40"
+              title={regime.nonInteractiveTitle}
+            >
+              <Activity size={10} />
+              SCORED-ONLY
+            </span>
+            <span className="num-fig ml-auto text-[8px] uppercase tracking-tight text-term-ink-faint whitespace-nowrap">
+              REGIME REVIEW
+            </span>
+          </div>
+          <span className="text-[8px] leading-tight text-term-ink-faint">
+            {regime.scoredOnlyCaption}
           </span>
         </div>
       ) : (
         <>
-          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
             {liveBadge}
             {confPct != null && (
               <span className="num-fig text-[9px] font-semibold text-term-ink-dim">
@@ -298,7 +310,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
 
       {/* ── ROW 4 — expiry pills + Pro deep-link (tradable only) ── */}
       {!scoredOnly && (
-        <div className="mt-1.5 pt-1.5 border-t border-term-line flex items-center justify-between gap-1">
+        <div className="mt-1 pt-1 border-t border-term-line flex items-center justify-between gap-1">
           {/* stopPropagation: horizon pills must never trigger card navigation */}
           <div onClickCapture={(e) => suppressCardNav(e)}>
             <HorizonSelector size="sm" value={horizon} onChange={handleHorizonChange} />

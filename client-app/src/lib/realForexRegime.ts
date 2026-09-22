@@ -23,6 +23,25 @@ import { REAL_FOREX_SET } from "@/constants/symbols";
  */
 export const REAL_FOREX_TRADABLE_CONFIRMED = false;
 
+/**
+ * How the card's price row is sourced. PART 28 switched the 10 real pairs to
+ * a genuinely intraday source (Yahoo Finance 1-minute chart API streamed via
+ * the core-backend tick engine at 1Hz), so for every instrument the card is
+ * a live tape — "daily_close" no longer exists in the wire.
+ */
+export type RealForexDataKind = "live" | "daily_close";
+
+/**
+ * Why a scored-only card is not tradable — surfaced on hover + on-card.
+ */
+export const REAL_FOREX_NONINTERACTIVE_COPY: Record<
+  NonNullable<RealForexRegimeDisplay["reason"]>,
+  string
+> = {
+  regime_pending_confirmation: "Regime review pending — not yet confirmed tradable",
+  regime_scored_only: "Random walk regime — scored only, not tradable",
+};
+
 export interface RealForexRegimeDisplay {
   /** True when the symbol is one of the 10 REAL_FOREX_PAIRS (assetSubType "forex"). */
   isReal: boolean;
@@ -35,6 +54,12 @@ export interface RealForexRegimeDisplay {
    *   null                             — tradable (real pair only after confirm)
    */
   reason: "regime_scored_only" | "regime_pending_confirmation" | null;
+  /** Data cadence: every instrument (incl. the 10 real pairs) is a live tape. */
+  dataKind: RealForexDataKind;
+  /** Cursor/tooltip copy surfaced when a scored-only card is hovered. */
+  nonInteractiveTitle: string;
+  /** Short visible caption for a scored-only card (the non-interactive why). */
+  scoredOnlyCaption: string;
 }
 
 /**
@@ -48,29 +73,51 @@ export function resolveRealForexRegimeDisplay(
 ): RealForexRegimeDisplay {
   const norm = String(symbol || "").trim().toUpperCase();
   const isReal = REAL_FOREX_SET.has(norm);
-  if (!isReal) return { isReal: false, scoredOnly: false, reason: null };
+  if (!isReal)
+    return {
+      isReal: false,
+      scoredOnly: false,
+      reason: null,
+      dataKind: "live",
+      nonInteractiveTitle: "",
+      scoredOnlyCaption: "",
+    };
 
   const gate = String(regimeGate || "").trim().toLowerCase();
 
   // Until [47]/[48] are confirmed, real pairs are ALWAYS scored-only —
   // regardless of what the payload currently says.
   if (!REAL_FOREX_TRADABLE_CONFIRMED) {
+    const reason =
+      gate === "scored_only"
+        ? "regime_scored_only"
+        : "regime_pending_confirmation";
     return {
       isReal: true,
       scoredOnly: true,
-      reason:
-        gate === "scored_only"
-          ? "regime_scored_only"
-          : "regime_pending_confirmation",
+      reason, dataKind: "live",
+      nonInteractiveTitle: REAL_FOREX_NONINTERACTIVE_COPY[reason],
+      scoredOnlyCaption: REAL_FOREX_NONINTERACTIVE_COPY[reason],
     };
   }
 
   // Post-confirmation: honor the backend gate exactly.
-  if (gate === "tradable") return { isReal: true, scoredOnly: false, reason: null };
+  if (gate === "tradable")
+    return {
+      isReal: true,
+      scoredOnly: false,
+      reason: null,
+      dataKind: "live", nonInteractiveTitle: "",
+      scoredOnlyCaption: "",
+    };
+  const reason =
+    gate === "scored_only" ? "regime_scored_only" : "regime_pending_confirmation";
   return {
     isReal: true,
     scoredOnly: true,
-    reason: gate === "scored_only" ? "regime_scored_only" : "regime_pending_confirmation",
+    reason, dataKind: "live",
+    nonInteractiveTitle: REAL_FOREX_NONINTERACTIVE_COPY[reason],
+    scoredOnlyCaption: REAL_FOREX_NONINTERACTIVE_COPY[reason],
   };
 }
 
@@ -88,6 +135,11 @@ export interface RealForexCardBehavior {
   /** ARIA label for the card (nav or scored-only description). */
   ariaLabel: string;
   reason: RealForexRegimeDisplay["reason"];
+  dataKind: RealForexRegimeDisplay["dataKind"];
+  /** Hover/cursor copy for a scored-only card (empty when interactive). */
+  nonInteractiveTitle: string;
+  /** Short visible caption for a scored-only card (the non-interactive why). */
+  scoredOnlyCaption: string;
 }
 
 export function realForexCardBehavior(
@@ -95,7 +147,8 @@ export function realForexCardBehavior(
   regimeGate?: string | null,
 ): RealForexCardBehavior {
   const display = resolveRealForexRegimeDisplay(symbol, regimeGate);
-  const { scoredOnly, reason } = display;
+  const { scoredOnly, reason, dataKind, nonInteractiveTitle, scoredOnlyCaption } =
+    display;
   return {
     scoredOnly,
     interactive: !scoredOnly,
@@ -103,5 +156,8 @@ export function realForexCardBehavior(
       ? `${symbol} — real-forex, scored-only (${reason === "regime_scored_only" ? "random walk" : "regime review"})`
       : `Open Pro Terminal for ${symbol}`,
     reason,
+    dataKind,
+    nonInteractiveTitle,
+    scoredOnlyCaption,
   };
 }

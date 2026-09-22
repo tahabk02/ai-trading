@@ -21,7 +21,12 @@ import httpx
 
 sys.path.insert(0, r"C:\Users\hp\trading-ai-platform\ai-engine")
 
-from app.data.collector import OTC_PAIRS, REAL_FOREX_PAIRS, MarketDataCollector
+from app.data.collector import (
+    OTC_PAIRS,
+    REAL_FOREX_PAIRS,
+    MarketDataCollector,
+    is_real_forex_pair,
+)
 from app.services.financial_analysis import (
     FinancialAnalysisService,
     ROLLING_WINDOW,
@@ -57,8 +62,12 @@ async def audit_one(collector, analyzer, sym: str) -> dict:
         # REAL daily history from CoinGecko market_chart (not Frankfurter).
         candles = await collector._fetch_crypto_history(sym, 160)
     else:
+        # PART 28 [208]: the 10 REAL non-OTC pairs are re-audited on REAL
+        # INTRADAY history (Yahoo Finance H1 bars via the collector) instead of
+        # the old daily-close tape. OTC pairs keep their daily closes.
+        tf = "1h" if is_real_forex_pair(sym) else "1d"
         candles = await collector.fetch_historical_candles(
-            symbol=sym, interval="1d", limit=160
+            symbol=sym, interval=tf, limit=160
         )
     if not candles:
         return {"symbol": sym, "status": "NO_DATA", "closes": 0}
@@ -67,7 +76,7 @@ async def audit_one(collector, analyzer, sym: str) -> dict:
         symbol=sym,
         candles=candles,
         live_price=closes[-1],
-        timeframe="1d",
+        timeframe="1h" if is_real_forex_pair(sym) else "1d",
         factor_inputs=build_factor_inputs_from_candles(candles),
     )
     rc = report.regime_classification or {}

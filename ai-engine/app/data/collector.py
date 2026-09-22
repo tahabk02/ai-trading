@@ -134,6 +134,11 @@ class MarketDataCollector:
 
     OPEN_ER_API = "https://open.er-api.com/v6/latest"
     FRANKFURTER_API = "https://api.frankfurter.dev/v1"
+    # PART 28 — Yahoo Finance chart API (keyless intraday forex source). The 10
+    # REAL_NON_OTC pairs stream from here (1-minute OHLC bars) instead of the
+    # ECB daily close repeated all day. Gentle polling: bars change once/minute.
+    YAHOO_CHART_API = "https://query1.finance.yahoo.com/v8/finance/chart"
+    YAHOO_HOLD_MS = 9.0  # per-symbol re-serve window (last REAL intraday print)
 
     def __init__(self, base_url: str = "https://api.binance.com/api/v3"):
         # base_url kept for API compatibility but unused — forex only.
@@ -141,6 +146,9 @@ class MarketDataCollector:
         self.client = httpx.AsyncClient(timeout=12.0)
         self._spot_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (price, ts)
         self._cache_ttl = 300.0  # 5 minutes — allows stale-cache hold during transient outages
+        # Yahoo per-symbol throttle cache — real N-OTC pairs only. Independent
+        # of _spot_cache (which is 5-min TTL and would freeze intraday motion).
+        self._yahoo_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (price, ts)
         # Held-price fallback: when ALL live sources fail, the last successfully
         # fetched price is retained for up to _held_price_ttl seconds so the
         # signal pipeline never enters a permanent LINGER failure loop. This is
@@ -173,7 +181,8 @@ class MarketDataCollector:
         now = float(asyncio.get_event_loop().time())
         cached = self._spot_cache.get(sym)
         if cached and (now - cached[1]) < self._cache_ttl:
-            return cached[0]
+            if not is_real_forex_pair(sym):
+                return cached[0]
 
         base, quote = spec["base"], spec["quote"]
 
@@ -194,6 +203,37 @@ class MarketDataCollector:
                     return price
             except Exception as e:
                 logger.warning("[OTC] coingecko crypto spot failed", symbol=sym, error=str(e))
+
+        # ── TIER 0.5 (PART 28): YAHOO intraday spot — REAL NON-OTC pairs ──
+        # Genuine 1-minute Forex prints run ahead of the ECB daily feed so the
+        # signal pipeline for these 10 pairs consumes live intraday motion, not
+        # a daily close frozen all day. Throttled per-symbol (9s hold re-serves
+        # the last real print; bars only change once a minute). OTC untouched.
+        if is_real_forex_pair(sym):
+            yahoo_held = self._yahoo_cache.get(sym)
+            if yahoo_held and (now - yahoo_held[1]) < self.YAHOO_HOLD_MS:
+                return yahoo_held[0]
+            try:
+                ticker = f"{base}{quote}=X"
+                url = (
+                    f"{self.YAHOO_CHART_API}/{ticker}"
+                    f"?interval=1m&range=1d&includePrePost=false"
+                )
+                resp = await self.client.get(
+                    url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+                )
+                resp.raise_for_status()
+                meta = ((resp.json().get("chart") or {}).get("result") or [{}])[0].get("meta") or {}
+                price = float(meta.get("regularMarketPrice") or 0)
+                if price > 0 and math.isfinite(price):
+                    price = round(price, 6)
+                    self._yahoo_cache[sym] = (price, now)
+                    self._spot_cache[sym] = (price, now)
+                    self._held_prices[sym] = (price, now)
+                    logger.info("[OTC][Yahoo] Live intraday forex spot fetched", symbol=sym, price=price, source="yahoo_finance")
+                    return price
+            except Exception as e:
+                logger.warning("[OTC][Yahoo] intraday forex spot failed", symbol=sym, error=str(e))
 
         try:
             url = f"{self.OPEN_ER_API}/{base}"
@@ -317,6 +357,24 @@ class MarketDataCollector:
         tf = (interval or "1d").lower()
         base, quote = spec["base"], spec["quote"]
 
+        # ── PART 28: REAL NON-OTC pairs route through Yahoo intraday bars ──
+        # M1/Hr candles for the 10 real pairs now come from Yahoo's 1-minute
+        # chart API (genuine intraday OHLC) instead of the ECB daily close.
+        # If Yahoo is unreachable we fall through to the Frankfurter daily
+        # path below — never fabricated either way.
+        if is_real_forex_pair(sym) and not spec.get("crypto_id"):
+            intraday = await self._fetch_yahoo_intraday_candles(sym, tf, limit)
+            if intraday:
+                logger.info(
+                    "[OTC][Yahoo] Intraday candles fetched",
+                    symbol=sym, count=len(intraday), timeframe=tf,
+                )
+                return intraday
+            logger.warning(
+                "[OTC][Yahoo] intraday candles unavailable — falling back to ECB daily",
+                symbol=sym, timeframe=tf,
+            )
+
         try:
             days = min(max(limit, 30), 365)
             # ── CALENDAR-WINDOW EXPANSION (zero-demo compliant) ──
@@ -399,6 +457,99 @@ class MarketDataCollector:
             return []
 
     # ── Strict fetch API (used by warmup / collector consumers) ──
+
+    async def _fetch_yahoo_intraday_candles(
+        self, symbol: str, interval: str = "1h", limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """Fetch REAL intraday OHLC candles for the 10 REAL non-OTC pairs from
+        Yahoo Finance's chart API (keyless, 1-minute base grid).
+
+        OHLC + volume are Yahoo's genuine intraday bars — no synthesis. The
+        interval is mapped to Yahoo's grid (1m/5m/15m/30m/60m/1d) and the range
+        is sized from the requested bar count.
+        """
+        sym = (symbol or "").strip().upper()
+        spec = self._spec(sym)
+        if not spec or spec.get("crypto_id") or not is_real_forex_pair(sym):
+            return []
+        base, quote = spec["base"], spec["quote"]
+        tf = (interval or "1h").lower()
+
+        interval_map = {
+            "1m": ("1m", 1),
+            "5m": ("5m", 5),
+            "15m": ("15m", 15),
+            "30m": ("30m", 30),
+            "1h": ("60m", 60),
+            "60m": ("60m", 60),
+            "1hr": ("60m", 60),
+            "1d": ("1d", 1440),
+        }
+        yahoo_interval, minutes = interval_map.get(tf, ("60m", 60))
+        days_needed = max(1, int(math.ceil(
+            (min(max(limit or 100, 10), 720) * minutes) / 1440.0
+        )))
+        if yahoo_interval == "1m":
+            yahoo_range = "1d"
+        elif days_needed <= 5:
+            yahoo_range = "5d"
+        elif days_needed <= 30:
+            yahoo_range = "1mo"
+        elif days_needed <= 90:
+            yahoo_range = "3mo"
+        else:
+            yahoo_range = "1y"
+
+        try:
+            ticker = f"{base}{quote}=X"
+            url = (
+                f"{self.YAHOO_CHART_API}/{ticker}"
+                f"?interval={yahoo_interval}&range={yahoo_range}&includePrePost=false"
+            )
+            resp = await self.client.get(
+                url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result = (data.get("chart") or {}).get("result") or []
+            if not result:
+                return []
+            ts = result[0].get("timestamp") or []
+            q = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+            opens, highs, lows, closes, vols = (
+                q.get("open") or [], q.get("high") or [], q.get("low") or [],
+                q.get("close") or [], q.get("volume") or [],
+            )
+            candles: List[Dict[str, Any]] = []
+            for i in range(len(ts)):
+                close = float(closes[i]) if i < len(closes) and closes[i] is not None else 0.0
+                open_v = float(opens[i]) if i < len(opens) and opens[i] is not None else close
+                high = float(highs[i]) if i < len(highs) and highs[i] is not None else close
+                low = float(lows[i]) if i < len(lows) and lows[i] is not None else close
+                if close <= 0 or not math.isfinite(close):
+                    continue
+                if open_v <= 0 or not math.isfinite(open_v):
+                    open_v = close
+                if high <= 0 or not math.isfinite(high):
+                    high = max(open_v, close)
+                if low <= 0 or not math.isfinite(low):
+                    low = min(open_v, close)
+                volume = float(vols[i]) if i < len(vols) and vols[i] is not None else 0.0
+                candles.append({
+                    "timestamp": int(int(ts[i]) * 1000),
+                    "open": round(open_v, 6),
+                    "high": round(high, 6),
+                    "low": round(low, 6),
+                    "close": round(close, 6),
+                    "volume": round(volume, 0),
+                })
+            return candles[-limit:]
+        except Exception as e:
+            logger.warning(
+                "[OTC][Yahoo] intraday candle fetch failed — zero-fabrication policy",
+                symbol=sym, error=str(e),
+            )
+            return []
 
     async def _fetch_crypto_history(self, symbol: str, limit: int) -> List[Dict[str, Any]]:
         """Fetch REAL daily crypto candles (BTC/USD, ETH/USD) from CoinGecko.

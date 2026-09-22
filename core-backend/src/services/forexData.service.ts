@@ -104,6 +104,33 @@ const FRANKFURTER_BASE = "https://api.frankfurter.app";
 const OPEN_ER_API_BASE = "https://open.er-api.com/v6/latest";
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
+/**
+ * PART 28 — YAHOO FINANCE 1-MINUTE FOREX CHART API.
+ * Keyless intraday source for the 10 real (non-OTC) pairs. Returns genuine
+ * 1-minute OHLC bars (`meta.regularMarketPrice` + `timestamp[]`). Yanked in
+ * front of the Frankfurter/open.er-api daily feeds — those are ECB daily
+ * reference rates and CANNOT power live M1 candles or a 1Hz blotter (PART 27).
+ * Unofficial endpoint: gentle polling only (1-min bars change once/minute), so
+ * a per-symbol throttle re-serves the last real intraday print inside the same
+ * minute instead of hammering the API.
+ */
+const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
+const YAHOO_POLL_MS = 9000;
+
+/** The 10 REAL_FOREX_PAIRS (ECB-sourced) now fed by the intraday Yahoo tier. */
+const REAL_FOREX_INTRADAY_SET: ReadonlySet<string> = new Set([
+  "EUR/SEK",
+  "EUR/NOK",
+  "EUR/DKK",
+  "EUR/PLN",
+  "EUR/CZK",
+  "EUR/HUF",
+  "USD/SEK",
+  "USD/NOK",
+  "USD/PLN",
+  "USD/CZK",
+]);
+
 /** Well-known symbols the GitHub repo may store. */
 const KNOWN_FOREX_SYMBOLS = [
   "EUR/USD",
@@ -207,6 +234,16 @@ class ForexDataService {
   /** Timestamp of the last successful fresh spot fetch from ANY live API
    *  (not held/cached). Used to detect partial recovery. */
   private lastFreshApiSuccessAt = 0;
+
+  // ── PART 28: Yahoo Finance intraday forex tier ──
+  // Per-symbol throttle so the 1-second poll loop re-serves the last genuine
+  // 1-minute Yahoo print (9s cadence => ~1.1 req/s global, well under the
+  // unofficial endpoint's comfort zone). Bars only change once per minute, so
+  // re-serving within the minute loses nothing.
+  private lastYahooFetch: Map<
+    string,
+    { ts: number; price: number; bid?: number; ask?: number }
+  > = new Map();
 
   private constructor() {
     this.client = axios.create({
@@ -437,6 +474,25 @@ class ForexDataService {
       };
     }
 
+    // ── PART 28 TIER 0.5: Yahoo Finance 1-minute intraday (real pairs only) ──
+    // The 10 ECB real pairs now stream from Yahoo's intraday chart API — the
+    // same source the candle engine and signal pipeline consume for OTC. This
+    // runs BEFORE the ECB daily feeds so live M1 candles / 1Hz blotter get
+    // genuine intraday prints, not a daily close repeated all day (PART 27 bug
+    // class). Falls through to Frankfurter/open.er-api when Yahoo is down.
+    if (REAL_FOREX_INTRADAY_SET.has(norm)) {
+      const yahooResult = await this.fetchYahooSpot(norm);
+      this.recordSourceHealth(
+        "yahoo_finance",
+        yahooResult.success,
+        yahooResult.error,
+      );
+      if (yahooResult.success) {
+        this.recoveryMode = false;
+        return yahooResult;
+      }
+    }
+
     // ── RECOVERY MODE: skip throttle, try all tiers aggressively ──
     // When the system is recovering from an "exhausted" state, the normal
     // API_CALL_THROTTLE_MS would delay recovery by 250ms per tier. In
@@ -576,7 +632,108 @@ class ForexDataService {
     return this.getLiveSpotFresh(norm);
   }
 
-  // ── Frankfurter API (ECB rates) ──────────────────────────────────────────
+  // ── Yahoo Finance intraday chart API (PART 28: real pairs) ──────────────
+
+  private async fetchYahooSpot(symbol: string): Promise<ForexSpotResult> {
+    try {
+      const { base, quote } = this.splitSymbol(symbol);
+      if (!base || !quote) {
+        return {
+          success: false,
+          price: null,
+          source: "yahoo_finance",
+          error: `Cannot parse symbol: ${symbol}`,
+        };
+      }
+
+      // Per-symbol throttle: 1-min Yahoo bars change at most once per minute,
+      // so re-serving the last real intraday print inside the window keeps the
+      // 1Hz blotter fed without hammering the unofficial endpoint.
+      const held = this.lastYahooFetch.get(symbol);
+      if (held && Date.now() - held.ts < YAHOO_POLL_MS) {
+        return {
+          success: true,
+          price: held.price,
+          ...(held.bid !== undefined ? { bid: held.bid } : {}),
+          ...(held.ask !== undefined ? { ask: held.ask } : {}),
+          source: "yahoo_intraday_held",
+        };
+      }
+
+      await this.throttleApiCall();
+
+      const ticker = `${base}${quote}=X`;
+      const url = `${YAHOO_CHART_BASE}/${encodeURIComponent(ticker)}?interval=1m&range=1d&includePrePost=false`;
+      const response = await this.client.get(url, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      });
+
+      const result = response.data?.chart?.result?.[0];
+      const meta = result?.meta;
+      const timestamps: number[] | undefined = result?.timestamp;
+      const closes: number[] | undefined =
+        result?.indicators?.quote?.[0]?.close;
+
+      if (!meta || !Array.isArray(timestamps) || !Array.isArray(closes)) {
+        return {
+          success: false,
+          price: null,
+          source: "yahoo_finance",
+          error: "Unexpected Yahoo chart payload",
+        };
+      }
+
+      // Freshest real intraday print: last non-null close on the tape.
+      let price = Number(meta?.regularMarketPrice ?? NaN);
+      for (let i = closes.length - 1; i >= 0; i -= 1) {
+        const c = Number(closes[i]);
+        if (Number.isFinite(c) && c > 0) {
+          if (!(Number.isFinite(price) && price > 0)) price = c;
+          break;
+        }
+      }
+      const lastTs = timestamps.length ? timestamps[timestamps.length - 1] : 0;
+
+      if (!Number.isFinite(price) || price <= 0) {
+        return {
+          success: false,
+          price: null,
+          source: "yahoo_finance",
+          error: "No positive close on Yahoo tape",
+        };
+      }
+
+      this.lastYahooFetch.set(symbol, {
+        ts: Date.now(),
+        price,
+        ...(meta?.bid !== undefined ? { bid: Number(meta.bid) } : {}),
+        ...(meta?.ask !== undefined ? { ask: Number(meta.ask) } : {}),
+      });
+      this.updateSpotCache(symbol, price);
+
+      logger.debug("[ForexData] Yahoo intraday quote", {
+        symbol,
+        price,
+        lastBarTs: lastTs,
+        bars: closes.length,
+      });
+
+      return {
+        success: true,
+        price,
+        source: "yahoo_finance",
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        price: null,
+        source: "yahoo_finance",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // ── Frankfurter API (ECB rates) ──────────────────────────────────────
 
   private async fetchFrankfurterSpot(symbol: string): Promise<ForexSpotResult> {
     try {
@@ -755,6 +912,16 @@ class ForexDataService {
       return ghResult;
     }
 
+    // PART 28: real pairs get Yahoo Finance intraday bars (M1/Hr) before the
+    // ECB daily feed — this is what actually powers M1/M5 chart warmup for the
+    // 10 real pairs now that they stream intraday.
+    if (REAL_FOREX_INTRADAY_SET.has(norm)) {
+      const yahooResult = await this.fetchYahooCandles(norm, timeframe, limit);
+      if (yahooResult.success && yahooResult.bars.length > 0) {
+        return yahooResult;
+      }
+    }
+
     // Try CoinGecko for crypto pairs (has historical OHLC)
     if (norm === "BTC/USD" || norm === "ETH/USD") {
       const cgResult = await this.fetchCoinGeckoCandles(norm, limit);
@@ -846,7 +1013,139 @@ class ForexDataService {
     }
   }
 
-  // ── Frankfurter historical rates (converted to candle-like bars) ──────────
+  // ── Yahoo Finance intraday candles (PART 28: real pairs) ────────────────
+
+  private async fetchYahooCandles(
+    norm: string,
+    timeframe: string,
+    limit: number,
+  ): Promise<{
+    success: boolean;
+    bars: ForexCandle[];
+    source: string;
+    error?: string;
+  }> {
+    try {
+      const { base, quote } = this.splitSymbol(norm);
+      if (!base || !quote) {
+        return {
+          success: false,
+          bars: [],
+          source: "yahoo_finance",
+          error: `Cannot parse symbol: ${norm}`,
+        };
+      }
+
+      // Map our timeframe labels to Yahoo's interval + bucket (1-minute bars
+      // only cover the last day; larger intervals tolerate long ranges).
+      const tf = (timeframe || "1d").toLowerCase().trim();
+      const yahooInterval =
+        tf === "5m"
+          ? "5m"
+          : tf === "15m"
+            ? "15m"
+            : tf === "30m"
+              ? "30m"
+              : tf === "1h" || tf === "60m" || tf === "1hr"
+                ? "60m"
+                : tf === "1d"
+                  ? "1d"
+                  : "1m";
+      const minutes =
+        yahooInterval === "1m"
+          ? 1
+          : yahooInterval === "5m"
+            ? 5
+            : yahooInterval === "15m"
+              ? 15
+              : yahooInterval === "30m"
+                ? 30
+                : yahooInterval === "60m"
+                  ? 60
+                  : 1440;
+      const daysNeeded = Math.ceil(
+        (Math.min(Math.max(limit || 100, 10), 720) * minutes) / (24 * 60),
+      );
+      const range =
+        yahooInterval === "1m"
+          ? "1d"
+          : daysNeeded <= 5
+            ? "5d"
+            : daysNeeded <= 30
+              ? "1mo"
+              : daysNeeded <= 90
+                ? "3mo"
+                : "1y";
+
+      await this.throttleApiCall();
+
+      const ticker = `${base}${quote}=X`;
+      const url = `${YAHOO_CHART_BASE}/${encodeURIComponent(ticker)}?interval=${yahooInterval}&range=${range}&includePrePost=false`;
+      const response = await this.client.get(url, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      });
+
+      const result = response.data?.chart?.result?.[0];
+      const timestamps: number[] | undefined = result?.timestamp;
+      const q = result?.indicators?.quote?.[0];
+
+      if (
+        !Array.isArray(timestamps) ||
+        !Array.isArray(q?.open) ||
+        !Array.isArray(q?.high) ||
+        !Array.isArray(q?.low) ||
+        !Array.isArray(q?.close)
+      ) {
+        return {
+          success: false,
+          bars: [],
+          source: "yahoo_finance",
+          error: "Unexpected Yahoo chart payload",
+        };
+      }
+
+      const bars: ForexCandle[] = [];
+      for (let i = 0; i < timestamps.length; i += 1) {
+        const open = Number(q.open[i]);
+        const high = Number(q.high[i]);
+        const low = Number(q.low[i]);
+        const close = Number(q.close[i]);
+        if (!open || !high || !low || !close) continue;
+        bars.push({
+          timestamp: timestamps[i] * 1000,
+          open,
+          high,
+          low,
+          close,
+          volume: Number(q.volume?.[i] ?? 0),
+        });
+      }
+
+      if (bars.length === 0) {
+        return {
+          success: false,
+          bars: [],
+          source: "yahoo_finance",
+          error: "No positive bars on Yahoo tape",
+        };
+      }
+
+      return {
+        success: true,
+        bars: bars.slice(-limit),
+        source: `yahoo_finance:${yahooInterval}`,
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        bars: [],
+        source: "yahoo_finance",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // ── Frankfurter historical rates (converted to candle-like bars) ────────
 
   private async fetchFrankfurterCandles(
     base: string,

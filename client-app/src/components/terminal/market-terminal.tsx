@@ -119,8 +119,8 @@ export const MarketTerminal: React.FC = () => {
           ))}
         </div>
         <p className="mt-4 text-center text-[8px] text-term-ink-faint num-fig uppercase tracking-widest">
-          All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 — live
-          micro-quant verdicts · 60% definitive gate · {symbols.length} shown
+          All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 —
+          live micro-quant verdicts · 60% definitive gate · {symbols.length} shown
         </p>
       </main>
     </div>

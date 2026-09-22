@@ -61,11 +61,11 @@
        digital channel. Consumed by tailwind.config.js via
        rgb(var(--x) / <alpha-value>) so `/opacity` modifiers keep working. */
     --term-canvas: 6 7 11;       /* #06070B */
-    --term-panel: 12 15 24;      /* #0C0F18 */
-    --term-line: 30 36 52;       /* #1E2434 */
+    --term-panel: 13 16 26;      /* #0D101A */
+    --term-line: 42 50 72;       /* #2A3248 */
     --term-ink: 232 237 246;     /* #E8EDF6 */
     --term-ink-dim: 129 140 160; /* #818CA0 */
-    --term-ink-faint: 82 92 112; /* #525C70 */
+    --term-ink-faint: 104 116 141; /* #68748D */
     --term-gold: 216 160 72;     /* #D8A048 */
     --term-crypto: 0 179 201;    /* #00B3C9 */
 

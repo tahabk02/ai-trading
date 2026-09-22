@@ -7,6 +7,7 @@ import {
 import {
   resolveRealForexRegimeDisplay,
   realForexCardBehavior,
+  REAL_FOREX_NONINTERACTIVE_COPY,
 } from "@/lib/realForexRegime";
 
 describe("PART 15 — real forex terminal wiring", () => {
@@ -75,5 +76,33 @@ describe("PART 15 — real forex terminal wiring", () => {
     expect(b.interactive).toBe(true);
     expect(b.scoredOnly).toBe(false);
     expect(b.ariaLabel).toBe("Open Pro Terminal for EUR/USD");
+  });
+
+  it("PART 28: every real card is a live intraday tape, never daily_close", () => {
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const d = resolveRealForexRegimeDisplay(sym, "tradable");
+      const b = realForexCardBehavior(sym, "tradable");
+      expect(d.dataKind).toBe("live");
+      expect(b.dataKind).toBe("live");
+    }
+    // Non-real stays live too.
+    expect(resolveRealForexRegimeDisplay("EUR/USD", undefined).dataKind).toBe("live");
+  });
+
+  it("PART 27: scored-only cards carry hover + on-card copy reusing suppressedReason", () => {
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const d = resolveRealForexRegimeDisplay(sym, undefined);
+      expect(d.scoredOnly).toBe(true);
+      expect(d.nonInteractiveTitle).toBe(
+        REAL_FOREX_NONINTERACTIVE_COPY.regime_pending_confirmation,
+      );
+      expect(d.scoredOnlyCaption).toBe(d.nonInteractiveTitle);
+    }
+    const scored = resolveRealForexRegimeDisplay("EUR/SEK", "scored_only");
+    expect(scored.scoredOnlyCaption).toBe(
+      REAL_FOREX_NONINTERACTIVE_COPY.regime_scored_only,
+    );
+    const b = realForexCardBehavior("EUR/SEK", undefined);
+    expect(b.nonInteractiveTitle).toContain("Regime review pending");
   });
 });
