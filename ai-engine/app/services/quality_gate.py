@@ -5,7 +5,8 @@ A second, INDEPENDENT layer on top of the confidence gate. Where
 signal_gatekeeper's multi-tier ladder prices how STRONG the dynamic confluence
 is, this watershed prices how ALIGNED the trade is across five independent
 microstructure factors — and refuses to release any signal unless the
-weighted ensemble clears the weakest EXECUTABLE tier (T4-LOW = 0.70):
+weighted ensemble clears the STRICT emission bar (T1 PREMIUM = 0.965,
+QUALITY_EMIT_BAR = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER], 2026-09-24):
 
   * mtf        (0.25) — EMA-20 > EMA-50 > EMA-200 structure on EVERY provided
                         timeframe (with ≥ 2 timeframes, else 0 — a one-legged
@@ -20,14 +21,20 @@ weighted ensemble clears the weakest EXECUTABLE tier (T4-LOW = 0.70):
                         < 0.40 for SELL (real microstructure order-flow).
 
 ``factors`` are honest 0/1 booleans — missing or non-finite evidence scores
-0 and can therefore never pass the watershed. The weighted sum
+0 and can therefore never pass the watershed. The shipped shared vector
 (0.25+0.25+0.15+0.15+0.20 = 1.00) means ANY single failed factor caps the
-score at ≤ 0.75 — i.e. an IMMEDIATE downgrade off the T1/T2 band for a single
-miss — the ensemble stays the strictest possible interpretation. The quality
-score is then resolved onto the SAME canonical TIER_THRESHOLDS ladder as the
-confidence gate (T1 ≥ 0.965 … T4 ≥ 0.70); the emission bar is the weakest
-executable tier (T4), and the resolved tier is reported alongside the price
-it corresponds to.
+score at ≤ 0.75 — an IMMEDIATE downgrade off the T1/T2 band for a single miss.
+PART 33 [239] splits that vector per asset type
+(:mod:`app.services.asset_type_weights`): OTC/REAL/CRYPTO each carry their own
+weights, learned only from their OWN resolved signals and only once >= 30
+(``MIN_RESOLVED_SIGNALS``) exist. Because every vector still sums to 1.0, the
+invariant that matters is preserved and is unit-tested: NO single-factor miss
+can reach the 0.965 emission bar under ANY profile — the split changes which
+factor a borderline tape fails, never whether one miss is enough to block. The
+quality score is then resolved onto the SAME canonical TIER_THRESHOLDS ladder as
+the confidence gate (T1 ≥ 0.965 … T4 ≥ 0.70); the emission bar is the STRICT
+executable tier (T1 = 0.965), and the resolved tier is reported alongside the
+price it corresponds to.
 
 Payload contract::
     {
@@ -39,7 +46,7 @@ Payload contract::
       "tier":        "T1" | … | "T5" resolved from the ensemble score,
       "tier_label":  PREMIUM / HIGH / MEDIUM / LOW / WEAK,
       "reason":      "ALL_FACTORS_ALIGNED" | "QUALITY_BELOW_GATE:<factor>",
-      "gate":        effective tier bar used for this decision (0.70 default),
+      "gate":        effective tier bar used for this decision (0.30 default),
       "market_waiting": True when below the watershed,
     }
 """
@@ -68,8 +75,9 @@ GATE_WEIGHTS: Dict[str, float] = {
 FACTOR_ORDER: List[str] = ["mtf", "momentum", "volatility", "volume", "pressure"]
 REQUIRED_FACTOR_COUNT = 5
 
-# Emission bar = the weakest EXECUTABLE tier (T4-LOW 0.70) — the same canonical
-# ladder that prices confluence. Always in lockstep with signal_gatekeeper.
+# Emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 96.5%, derived from
+# the canonical ladder as confluence — 2026-09-24 strict upgrade; was the
+# LIVE-TEST T4-LOW 0.30 floor). Always in lockstep with signal_gatekeeper.
 QUALITY_EMIT_BAR = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
 
 ATR_MIN_RATIO = 0.0008   # below this — volatility crushed, tradeable? no
@@ -265,16 +273,27 @@ def compute_factor_scores(inputs: Dict[str, Any], direction: str) -> Dict[str, i
     }
 
 
-def quality_score(factors: Dict[str, int]) -> float:
-    """Weighted ensemble score in [0, 1] (binary factors, weights sum to 1)."""
+def quality_score(
+    factors: Dict[str, int],
+    weights: Optional[Dict[str, float]] = None,
+) -> float:
+    """Weighted ensemble score in [0, 1] (binary factors, weights sum to 1).
+
+    ``weights`` defaults to the shipped :data:`GATE_WEIGHTS` — the single shared
+    vector, unchanged. PART 33 [239] passes the calling asset type's own profile
+    vector instead; every supplied vector must still sum to 1.0 (see
+    :mod:`app.services.asset_type_weights`), so the "one failed factor caps the
+    score" property is preserved whatever the weights are.
+    """
+    w = GATE_WEIGHTS if weights is None else weights
     total = 0.0
     for name in FACTOR_ORDER:
-        total += GATE_WEIGHTS[name] * float(factors.get(name, 0))
+        total += float(w.get(name, 0.0)) * float(factors.get(name, 0))
     return round(total, 4)
 
 
 def current_hard_gate() -> float:
-    """Effective emission bar = the weakest EXECUTABLE tier (T4-LOW 0.70).
+    """Effective emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 0.965).
 
     Kept for API compatibility; the tier ladder (signal_gatekeeper) is the
     single source of truth and is always in lockstep.
@@ -282,17 +301,25 @@ def current_hard_gate() -> float:
     return float(QUALITY_EMIT_BAR)
 
 
-def evaluate_quality(factors: Dict[str, int]) -> Dict[str, Any]:
+def evaluate_quality(
+    factors: Dict[str, int],
+    weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
     """Watershed decision on already-scored factors.
 
     Returns {quality, tier, tier_label, decision, gate, reason}.
 
-    * quality clears T4 (0.70)     -> decision "EMIT" at resolved tier
-    * quality below T4             -> decision "BLOCK", reason names the
-                                      first (highest-weighted) failed factor.
+    * quality clears T1 (0.965) -> decision "EMIT" at resolved tier
+    * quality below T1          -> decision "BLOCK", reason names the
+                                   first (highest-weighted) failed factor.
+
+    PART 33 [239]: ``weights`` carries the calling asset type's profile vector.
+    The emission bar is NOT affected — only the score. Because every profile
+    still sums to 1.0, no single-factor miss can clear 0.965, so the T1 strict
+    contract survives the per-type split.
     """
     factors = {name: (1 if int(factors.get(name, 0)) >= 1 else 0) for name in FACTOR_ORDER}
-    q = quality_score(factors)
+    q = quality_score(factors, weights=weights)
     tier = resolve_tier(q)
     if is_dispatchable_tier(tier, min_tier=MIN_EXECUTABLE_TIER):
         return {
@@ -303,7 +330,12 @@ def evaluate_quality(factors: Dict[str, int]) -> Dict[str, Any]:
             "gate": QUALITY_EMIT_BAR,
             "reason": "ALL_FACTORS_ALIGNED",
         }
-    failed = next((name for name in FACTOR_ORDER if factors.get(name) == 0), None)
+    w = GATE_WEIGHTS if weights is None else weights
+    failed = next(
+        (name for name in sorted(FACTOR_ORDER, key=lambda n: -float(w.get(n, 0.0)))
+         if factors.get(name) == 0),
+        None,
+    )
     return {
         "quality": q,
         "tier": tier,
@@ -318,6 +350,9 @@ def apply_quality_gate(
     direction: str,
     confidence_pct: float,
     factor_inputs: Optional[Dict[str, Any]],
+    weights: Optional[Dict[str, float]] = None,
+    asset_class: Optional[str] = None,
+    weights_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Full quality payload for a directional verdict.
 
@@ -327,10 +362,16 @@ def apply_quality_gate(
     When no factor window exists the ensemble is honestly reported as None
     (NOT fabricated) and the caller's confidence gate remains in control —
     this is the documented latency window of the live single-TF candle path.
+
+    PART 33 [239]: ``weights`` is the calling asset type's profile vector from
+    :mod:`app.services.asset_type_weights` (omitted -> the shared GATE_WEIGHTS,
+    i.e. the previous behaviour exactly). ``asset_class`` / ``weights_source``
+    are provenance only — stamped on the payload so a consumer can always tell
+    WHICH weighting produced the score and whether it was structural or learned.
     """
     if factor_inputs:
         factors = compute_factor_scores(factor_inputs, direction)
-        verdict = evaluate_quality(factors)
+        verdict = evaluate_quality(factors, weights=weights)
         q = verdict["quality"]
         tier = verdict["tier"]
         emitted = verdict["decision"] == "EMIT"
@@ -345,6 +386,8 @@ def apply_quality_gate(
             "gate": round(verdict["gate"], 4),
             "market_waiting": not emitted,
             "direction": direction,
+            "asset_class": asset_class,
+            "weights_source": weights_source,
         }
     gate = current_hard_gate()
     return {

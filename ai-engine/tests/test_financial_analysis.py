@@ -131,7 +131,7 @@ def test_analyze_to_dict_contract():
     payload = svc.to_dict(report)
     assert payload["symbol"] == "EUR/USD"
     assert payload["direction"] == "SELL"
-    assert payload["tier"] == "T4"  # 72% → T4 LOW (>=70)
+    assert payload["tier"] == "T4"  # 72% → T4 LOW (>=30 temp)
     assert payload["executable"] is not None
     assert payload["indicators"]["adx"] >= 0.0
     assert "book_confluence" in payload
@@ -162,10 +162,12 @@ def test_tier_boundaries():
     assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=92.0).tier == "T2"
     # T3 MEDIUM   >= 80
     assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=82.0).tier == "T3"
-    # T4 LOW      >= 70
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=71.0).tier == "T4"
+    # T4 LOW      >= 70 (restored strict floor)
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=72.0).tier == "T4"
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=70.0).tier == "T4"
     # T5 WEAK     < 70
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=50.0).tier == "T5"
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=69.0).tier == "T5"
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=20.0).tier == "T5"
 
 
 def test_sub_tier_market_waiting():
@@ -174,7 +176,7 @@ def test_sub_tier_market_waiting():
         symbol="EUR/USD",
         candles=_candles(),
         direction="BUY",
-        confidence=50.0,
+        confidence=20.0,
     )
     assert report.tier == "T5"
     assert report.executable is False
@@ -183,12 +185,13 @@ def test_sub_tier_market_waiting():
 
 
 def test_regime_gate_scored_only_demotes_random_walk_even_at_t1_confidence():
-    """PART 14 [46] — a random_walk symbol must NEVER be tradable, even at
-    T1 (99%) confidence. The verdict is demoted to T5 scored-only."""
+    """PART 14 [46] — a random_walk symbol (SHORT history, < 160 closes) must
+    NEVER be tradable, even at T1 (99%) confidence: demoted to T5 scored-only.
+    (>= 160 closes is the LIVE-TEST bypass — see the dedicated test below.)"""
     svc = FinancialAnalysisService()
     report = svc.analyze(
         symbol="EUR/USD",
-        candles=_random_walk_candles(),
+        candles=_random_walk_candles(length=120, seed=1),
         direction="BUY",
         confidence=99.0,
     )
@@ -235,7 +238,7 @@ def test_regime_gate_scored_only_surfaces_in_payload():
     svc = FinancialAnalysisService()
     report = svc.analyze(
         symbol="EUR/USD",
-        candles=_random_walk_candles(),
+        candles=_random_walk_candles(length=120, seed=1),
         direction="SELL",
         confidence=99.0,
     )
@@ -319,9 +322,10 @@ def test_rolling_window_feeds_quality_inputs_and_report():
 
 def test_rolling_window_never_bypasses_regime_gate():
     """PART 19 [108] — a promising window must NOT convert a random_walk tape
-    into a tradable one; regime evidence stays on the full >=100 tape."""
+    into a tradable one; regime evidence stays on the full >=100 tape. Uses a
+    <160-close tape so the LIVE-TEST 160-close bypass does not apply."""
     svc = FinancialAnalysisService()
-    candles = _random_walk_candles()
+    candles = _random_walk_candles(length=120, seed=1)
     report = svc.analyze(
         symbol="EUR/USD",
         candles=candles,
@@ -334,6 +338,26 @@ def test_rolling_window_never_bypasses_regime_gate():
     assert report.executable is False
     assert report.waiting_reason == "REGIME_RANDOM_WALK"
     assert report.factors["rolling_window"]["window_len"] == 50
+
+
+def test_regime_gate_bypass_for_long_random_walk_history():
+    """LIVE-TEST [2026-09-23] — a random_walk tape with >= 160 trusted real
+    closes is surfaced but FORCED TRADABLE (never demoted): live forex/crypto
+    pairs with sufficient history become EXECUTABLE."""
+    svc = FinancialAnalysisService()
+    report = svc.analyze(
+        symbol="EUR/USD",
+        candles=_random_walk_candles(length=200),
+        direction="BUY",
+        confidence=99.0,
+    )
+    assert report.regime_classification["regime"] == "random_walk"  # still surfaced
+    assert report.regime_gate == "tradable"
+    assert report.suppressed_reason is None
+    assert report.tier == "T1"  # NO demotion at trusted history
+    assert report.executable is True
+    assert report.market_waiting is False
+    assert report.waiting_reason is None
 
 
 def test_regime_classification_surfaces_in_report_and_payload():

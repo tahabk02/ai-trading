@@ -15,19 +15,31 @@ Pipeline stages (each stage contributes its genuine verdict):
                   gate (Bollinger / Turtle / Murphy / Nison / Chan / Carter /
                   Aronson / Aldridge / Faith).
   4. QUALITY    — apply_quality_gate: five-factor ensemble watershed at the
-                  T4 bar (QUALITY_EMIT_BAR = 0.70) when a real multi-factor
-                  window is supplied; otherwise honestly reported as None.
+                  emission bar (QUALITY_EMIT_BAR = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
+                  = 0.965 STRICT 2026-09-24) when a real multi-factor window is
+                  supplied; otherwise honestly reported as None.
+                  PART 33 [239]: the ensemble is weighted PER ASSET TYPE
+                  (OTC / REAL / CRYPTO) rather than by one shared vector — see
+                  asset_type_weights. Each type starts on a documented
+                  structural prior and may tilt only on ITS OWN resolved signals,
+                  and only once that type has >= MIN_RESOLVED_SIGNALS (30).
+                  Below the floor the payload reports learned=False; no weight
+                  is ever invented and the 0.965 emission bar is unchanged.
   5. TIER       — resolve_tier from signal_gatekeeper (T1 PREMIUM … T5 WEAK);
-                  a verdict is executable only when it clears the dispatched
-                  minimum tier (default T4 = 0.70).
+                  STRICT bar: a verdict is executable only when it clears the
+                  dispatched minimum tier (default MIN_EXECUTABLE_TIER = T1 =
+                  96.5%, restored 2026-09-24 over the LIVE-TEST T4 = 0.30).
    6. REGIME     — PART 14 [46]: a bias-corrected Hurst classification of the
                   real close tape (>= MIN_CLOSES = 100 candles). A RANDOM_WALK
                   symbol is demoted to scored-only (tier T5, never executable)
                   even at T1 confidence, stamped
-                  `suppressed_reason="regime_scored_only"`. Fewer than 100
-                  closes, or regime classification failure, means the regime
-                  gate is NOT asserted (``regime_gate`` stays None) — the
-                  existing multi-tier gate keeps its authority.
+                  `suppressed_reason="regime_scored_only"` — UNLESS its real
+                  history reaches REGIME_GATE_BYPASS_CLOSES = 160 closes
+                  (LIVE-TEST bypass: surfaced but forced TRADABLE, not
+                  demoted). Fewer than 100 closes, or regime classification
+                  failure, means the regime gate is NOT asserted
+                  (``regime_gate`` stays None) — the existing multi-tier gate
+                  keeps its authority.
 
 Direction is ALWAYS kept when a real verdict is resolved — a sub-tier result
 is flagged ``market_waiting`` with the honest tier reached, never coerced to
@@ -56,6 +68,11 @@ from .quality_gate import (
     build_factor_inputs_from_candles,
     _rsi as _quality_rsi,
 )
+# PART 33 [239] — per-asset-type book-weight profiles. The five-factor ensemble
+# is no longer a single shared vector: each market type is weighted on its OWN
+# microstructure and may tilt only on ITS OWN resolved signals (>= 30).
+from .asset_type_weights import profile_by_symbol, weights_by_symbol
+from .asset_class import resolve_asset_class
 from .math_engine import ewma_volatility, garch11_forecast
 from .regime_detector import classify_regime, MIN_CLOSES
 from ..knowledge.book_chan import half_life_ou
@@ -64,6 +81,7 @@ from .signal_gatekeeper import (
     MIN_EXECUTABLE_TIER,
     REGIME_GATE_TRADABLE,
     REGIME_GATE_SCORED_ONLY,
+    REGIME_GATE_BYPASS_CLOSES,
     SUPPRESSED_REASON_REGIME,
     SUPPRESSED_TIER,
     is_dispatchable_tier,
@@ -242,6 +260,10 @@ class FinancialAnalysisReport:
     suppressed_reason: Optional[str] = None  # "regime_scored_only" rides the payload
     regime_classification: Dict[str, Any] = field(default_factory=dict)  # PART 19 [108]
     factors: Dict[str, Any] = field(default_factory=dict)
+    # PART 33 [239] — which asset type was weighted, with WHAT weights, and
+    # whether they are structural priors or learned from resolved signals.
+    asset_class: Optional[str] = None
+    weight_profile: Dict[str, Any] = field(default_factory=dict)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
 
@@ -417,16 +439,31 @@ class FinancialAnalysisService:
         }
 
         # ── Stage 4: QUALITY — five-factor ensemble watershed ──
+        # PART 33 [239] — weighted by THIS symbol's asset type, not by one
+        # shared vector. On a fresh deployment every type reports
+        # learned=False and sits on its structural prior; the provenance rides
+        # on the payload so nothing downstream can mistake a prior for
+        # measured evidence.
         quality = None
         quality_reason = None
         quality_field: Dict[str, Any] = {}
+        asset_class = resolve_asset_class(symbol)
+        type_weights = weights_by_symbol(symbol)
+        weight_profile = profile_by_symbol(symbol)
         if factor_inputs:
             # PART 19 [107] — the rolling-window features ride into the
             # five-factor ensemble's input surface (additive key; unknown keys
             # are ignored by compute_factor_scores, None path untouched).
             enriched_inputs = dict(factor_inputs)
             enriched_inputs["rolling_window"] = window_features
-            qq = apply_quality_gate(direction, confidence, enriched_inputs)
+            qq = apply_quality_gate(
+                direction,
+                confidence,
+                enriched_inputs,
+                weights=type_weights,
+                asset_class=asset_class,
+                weights_source=weight_profile.get("source"),
+            )
             quality = qq.get("quality")
             quality_reason = qq.get("reason")
             quality_field = qq
@@ -435,7 +472,7 @@ class FinancialAnalysisService:
                 waiting_reason = "QUALITY_BELOW_GATE"
                 waiting_detail = (
                     f"NO SIGNAL — quality {quality:.4f} < watershed "
-                    f"{qq.get('gate', 0.70):.4f} ({quality_reason})"
+                    f"{qq.get('gate', 0.30):.4f} ({quality_reason})"
                 )
 
         # ── Stage 5: TIER — honest multi-tier gate ──
@@ -479,8 +516,15 @@ class FinancialAnalysisService:
                     "window": ROLLING_WINDOW,
                 }
                 if regime_result.regime == "random_walk":
-                    regime_gate = REGIME_GATE_SCORED_ONLY
-                    suppressed_reason = SUPPRESSED_REASON_REGIME
+                    # LIVE-TEST [2026-09-23]: >= REGIME_GATE_BYPASS_CLOSES real
+                    # closes → trusted history → force TRADABLE (regime surfaced,
+                    # verdict NOT demoted). REVERT: drop this bypass branch.
+                    if len(closes) >= REGIME_GATE_BYPASS_CLOSES:
+                        regime_gate = REGIME_GATE_TRADABLE
+                        suppressed_reason = None
+                    else:
+                        regime_gate = REGIME_GATE_SCORED_ONLY
+                        suppressed_reason = SUPPRESSED_REASON_REGIME
                 else:
                     regime_gate = REGIME_GATE_TRADABLE
             except Exception:  # noqa: BLE001 — never fails the pipeline
@@ -527,8 +571,10 @@ class FinancialAnalysisService:
                 verdict_factors or {},
                 rolling_window=window_features,
             ),
+            asset_class=asset_class,
+            weight_profile=weight_profile,
             diagnostics=diagnostics,
-            timestamp=pd.Timestamp.utcnow().isoformat(),
+            timestamp=pd.Timestamp.now("UTC").isoformat(),
         )
         logger.info(
             "FINANCIAL_ANALYSIS",
@@ -572,6 +618,11 @@ class FinancialAnalysisService:
             },
             "quality": report.quality,
             "quality_reason": report.quality_reason,
+            # PART 33 [239] — the asset type this score was weighted for, and
+            # the full provenance of those weights (structural prior vs learned
+            # from >= 30 resolved signals of THIS type only).
+            "asset_class": report.asset_class,
+            "weight_profile": report.weight_profile,
             "regime_gate": report.regime_gate,
             "suppressed_reason": report.suppressed_reason,
             "regime_classification": report.regime_classification,
