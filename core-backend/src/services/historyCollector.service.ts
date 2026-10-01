@@ -17,6 +17,8 @@ export const HISTORY_WINDOW_MINUTES = 30;
 export const HISTORY_BUCKET_MS = 60_000;
 export const HISTORY_TICKS_WINDOW = 2000;
 export const HISTORY_COLLECTOR_INTERVAL_MS = 60_000;
+/** Newest-N persisted 1m bars read once per symbol at boot (PART 32.3 [248]). */
+export const HISTORY_BACKFILL_BAR_LIMIT = 1_500;
 
 export interface HistoryTickInput {
   price: number;
@@ -340,6 +342,43 @@ class HistoryCollectorService {
       volume: r.volume,
       tick_count: r.tickCount,
     }));
+  }
+
+  /**
+   * The newest `limit` persisted 1m bars for ONE symbol, oldest first.
+   *
+   * This is the BOOT BACKFILL read (PART 32.3 [248]). It deliberately takes a
+   * ROW COUNT rather than a wall-clock window: the in-memory candle aggregator
+   * needs "give me the most recent N minutes of real history", and a window
+   * would silently return fewer bars than requested for a symbol whose feed is
+   * sparse — which is exactly the case the backfill exists to cover.
+   *
+   * One read path for every asset type; nothing here inspects OTC / REAL /
+   * CRYPTO.
+   */
+  public async getRecentBars(
+    symbol: string,
+    limit = HISTORY_BACKFILL_BAR_LIMIT,
+  ): Promise<HistoryBar[]> {
+    const norm = (symbol || "").trim().toUpperCase();
+    const take = Math.max(1, Math.min(10_000, Math.round(Number(limit) || 0)));
+    if (!norm) return [];
+    const rows = await prisma.assetHistory.findMany({
+      where: { symbol: norm, timeframe: "1m" },
+      orderBy: { bucketStartMs: "desc" },
+      take,
+    });
+    return rows
+      .map((r) => ({
+        bucket_start_ms: Number(r.bucketStartMs),
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume,
+        tick_count: r.tickCount,
+      }))
+      .reverse();
   }
 
   /** Real tick count for one symbol over the trailing window. */

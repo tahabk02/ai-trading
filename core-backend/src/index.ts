@@ -12,6 +12,7 @@ import { PrismaClient } from "@prisma/client";
 
 import { secrets } from "./config/secrets";
 import { logger } from "./utils/logger";
+import { canonicalizeSymbol } from "./utils/symbolFormat";
 import { RedisSubscriber } from "./messaging/subscriber";
 import { CacheService } from "./services/cache.service";
 import {
@@ -20,6 +21,7 @@ import {
   MARKET_TERMINAL_ROOM,
 } from "./services/websocket.service";
 import { tickIngestionService } from "./services/tickIngestion.service";
+import { liveTickSignalDispatcher } from "./services/liveTickSignal.dispatch";
 import { symbolRegistry } from "./services/symbolRegistry.service";
 import { forexDataService } from "./services/forexData.service";
 import { pocketOptionBridgeService } from "./services/pocketOptionBridge.service";
@@ -109,6 +111,12 @@ async function disconnectDatabase(): Promise<void> {
 // =============================================================================
 
 const app: Express = express();
+// DevTunnels (and any reverse proxy) forwards the real client IP via
+// X-Forwarded-For. Without `trust proxy`, `req.ip` resolves to the tunnel's
+// egress address, so the per-IP rate limiter and request logs share ONE bucket
+// across every tunnel client — spurious 429s and misattributed proxy logs.
+// Trust exactly one hop (DevTunnels terminates TLS and forwards to localhost).
+app.set("trust proxy", 1);
 // Explicit HTTP socket timings: Node's default keepAliveTimeout (5s) lets
 // proxies/reverse-terminators see keep-alive sockets go stale and respond 503
 // to the next request; a longer keep-alive keeps long-lived Node clients
@@ -335,17 +343,43 @@ io.on("connection", (socket) => {
       const parsed =
         typeof payload === "string"
           ? { symbol: payload, timeframe: undefined }
-          : (payload as { symbol?: string; timeframe?: string } | null);
+          : (payload as {
+              symbol?: string;
+              timeframe?: string;
+              horizon_minutes?: number;
+              min_tier?: string;
+              minTier?: string;
+            } | null);
       const rawSymbol = parsed?.symbol?.trim();
       if (!rawSymbol) return;
 
-      const normalized = rawSymbol.toUpperCase();
+      // Canonical key ONLY: broadcastLiveTick/addTick/canonicalizeSymbol all
+      // key on the canonical form, so joining a raw "EUR-USD"/"EURUSD" room
+      // would silently never receive anything (frozen chart on a pair switch).
+      const normalized = canonicalizeSymbol(rawSymbol);
+      if (!normalized) return;
       const tf =
         realtimeCandleAggregatorService.canonicalTimeframe(
           parsed?.timeframe || "",
         ) ?? "M1";
       socket.join(normalized);
       socket.join(`${normalized}:${tf}`);
+      // TARGET-EXPIRY HORIZON — the client sends the Pro Expiry Bar selection
+      // as `horizon_minutes` on every (re)subscribe, so the 1Hz /tick-signal
+      // path evaluates the horizon the operator actually chose instead of the
+      // engine's 1m default.
+      liveTickSignalDispatcher.setSelectedHorizonMinutes(
+        normalized,
+        parsed?.horizon_minutes,
+      );
+      // MINIMUM SIGNAL TIER — the client sends the Tier Selector's choice as
+      // `min_tier` on every (re)subscribe, so the 1Hz /tick-signal path scores
+      // against the band the operator actually trades instead of the engine's
+      // strict T1 default.
+      liveTickSignalDispatcher.setSelectedMinTier(
+        normalized,
+        parsed?.min_tier ?? parsed?.minTier,
+      );
       const previous = socket.data.activeSubscription as
         | { symbol?: string; timeframe?: string }
         | undefined;
@@ -427,6 +461,11 @@ io.on("connection", (socket) => {
       if (!wsService.hasActiveSubscribers(normalized)) {
         realtimeCandleAggregatorService.removeSymbol(normalized);
         pocketOptionBridgeService.requestSymbolUnsubscription(normalized);
+        // Nobody is watching this pair any more: forget the learned horizon so a
+        // later subscriber starts from the engine default instead of inheriting
+        // a stale expiry selection.
+        liveTickSignalDispatcher.clearSelectedHorizonMinutes(normalized);
+        liveTickSignalDispatcher.clearSelectedMinTier(normalized);
       }
       socket.data.activeSubscription = undefined;
       logger.info("Client unsubscribed from symbol room", {
@@ -620,6 +659,35 @@ const payoutSyncTimer: NodeJS.Timeout = startPayoutSyncJob();
 // and output a clean startup confirmation log.
 const PORT = Number(process.env.PORT) || 4000;
 
+/**
+ * A bind failure must be DIAGNOSABLE and LOUD.
+ *
+ * Without this handler Node throws EADDRINUSE as an uncaught exception, which
+ * — with `uncaughtException` deliberately swallowed into "server continues
+ * running" — leaves the process ALIVE while owning no socket. The operator sees
+ * a healthy-looking process that answers nothing on :4000, and the real cause
+ * (a stale `ts-node-dev` child still holding the port) is never named.
+ *
+ * Fail fast instead: name the port, say who to look for, and exit non-zero.
+ */
+httpServer.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    logger.error(
+      `Port ${PORT} is already in use. A stale core-backend (ts-node-dev ` +
+        `respawns a child that outlives the wrapper) is the usual cause. ` +
+        `Reclaim it with: npm run preflight:kill — then start again.`,
+      { port: PORT, code: err.code },
+    );
+    console.error(
+      `\n✖ Cannot bind port ${PORT}: already in use.\n` +
+        `  Run  npm run preflight:kill  to reclaim it, then start again.\n`,
+    );
+    process.exit(1);
+  }
+  logger.error("HTTP server error", { code: err.code, error: err.message });
+  process.exit(1);
+});
+
 httpServer.listen(PORT, () => {
   logger.info("Core Backend started", {
     port: PORT,
@@ -669,6 +737,43 @@ httpServer.listen(PORT, () => {
   // has a genuine 30-minute window per asset. Strictly real data only.
   logger.info("[History] Starting 30-minute historical data collector (every 60s)");
   historyCollector.start();
+
+  // ── BOOT BACKFILL: persisted history → in-memory candle aggregator ──
+  // PART 32.3 [248]. The aggregator's closed-candle arrays are RAM-only, so a
+  // restart left every chart with just the bars that happened to close while
+  // this process was up — on a cold start that is a handful of bars, and the
+  // seeded `history_candles` replay could not fill the pane. Reading the
+  // persisted 1m store back into memory on boot restores real depth across a
+  // restart without inventing anything.
+  //
+  // Reads the FULL instrument list (OTC + REAL + CRYPTO) through the identical
+  // per-symbol path — no asset-type branch, mirroring the "one script feeds all
+  // three layers" discipline. Observational by contract: a failure here must
+  // never stop the server booting, since live ticks still populate the arrays.
+  void symbolRegistry
+    .getAll()
+    .then((entries) =>
+      realtimeCandleAggregatorService.backfillAllFromHistory(
+        entries.map((e) => e.symbol),
+        (symbol, limit) =>
+          historyCollector.getRecentBars(symbol, limit).then((bars) =>
+            bars.map((b) => ({
+              bucketStartMs: b.bucket_start_ms,
+              open: b.open,
+              high: b.high,
+              low: b.low,
+              close: b.close,
+              volume: b.volume,
+              tickCount: b.tick_count,
+            })),
+          ),
+      ),
+    )
+    .catch((err) => {
+      logger.warn("[CandleAggregator] persisted-history backfill skipped", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 });
 
 // =============================================================================
