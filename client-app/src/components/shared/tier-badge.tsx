@@ -36,21 +36,22 @@ export const TierBadge: React.FC<TierBadgeProps> = ({
   const padding =
     size === "sm" ? "px-2.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-[9px]";
   const palette: Record<SignalTier, string> = {
-    T1: "bg-emerald-500/15 text-emerald-400 border-emerald-500/40",
-    T2: "bg-teal-500/15 text-teal-300 border-teal-400/40",
-    T3: "bg-amber-500/15 text-amber-400 border-amber-500/40",
-    T4: "bg-orange-500/15 text-orange-400 border-orange-500/40",
+    T1: "bg-st-pos/15 text-st-pos border-st-pos/40",
+    T2: "bg-st-teal/15 text-st-teal border-st-teal/40",
+    T3: "bg-st-warn/15 text-st-warn border-st-warn/40",
+    T4: "bg-st-caution/15 text-st-caution border-st-caution/40",
     T5: "bg-slate-500/15 text-slate-400 border-slate-500/40",
   };
   const dot: Record<SignalTier, string> = {
-    T1: "bg-emerald-400",
-    T2: "bg-teal-300",
-    T3: "bg-amber-400",
-    T4: "bg-orange-400",
+    T1: "bg-st-pos",
+    T2: "bg-st-teal",
+    T3: "bg-st-warn",
+    T4: "bg-st-caution",
     T5: "bg-slate-400",
   };
   return (
     <span
+      data-testid="tier-badge"
       title={`Tier ${resolved} — ${label}`}
       className={cn(base, padding, palette[resolved], className)}
     >

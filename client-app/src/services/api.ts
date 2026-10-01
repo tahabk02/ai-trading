@@ -6,6 +6,8 @@ import axios, {
 import { getApiBaseUrl } from "@/utils/getBaseUrl";
 import { OTC_WHITELIST } from "@/constants/symbols";
 import { logDebounced503 } from "@/lib/logDebouncer";
+import { installPredictBudget, PREDICT_ABORT_MS } from "@/lib/predictBudget";
+import { isTier, type TierSelection } from "@/lib/signalTiers";
 
 /**
  * SYMBOL PAYLOAD NORMALIZER — guarantees the POST body sent to
@@ -56,6 +58,19 @@ export interface PredictionRequest {
   candles?: any[];
   live_price?: number;
   dataSource?: string;
+  /**
+   * Confidence Filter — user-set minimum executable confidence (50..99%).
+   * Below it the engine demotes the pair to SCORED-ONLY (executable:false);
+   * absent = engine default 96.5% strict bar.
+   */
+  min_confidence?: number;
+  /**
+   * Flexible-tier floor — the weakest signal band the caller wants to trade
+   * (T1..T5). The engine ALWAYS emits every computed tier with its true
+   * confidence; this only decides which of them are marked `executable`.
+   * Absent = engine default T1 (96.5%). T5 is accepted but floors to T4.
+   */
+  min_tier?: TierSelection;
 }
 
 export interface CandleDataPoint {
@@ -103,6 +118,16 @@ export interface PredictionResponse {
   corroborator_unavailable: boolean;
   ml_probability: number | null;
   model_accuracy: number | null;
+  /**
+   * P1-2026-09-24 — non-blocking inference surface. `inference_fallback` is
+   * null when the RF corroborator ran inside budget; "ml_budget_exceeded" when
+   * a cold-cache train could not finish in the interactive budget and this
+   * verdict is the fast structural payload (RF numbers null this round, the
+   * model warming in the background). `inference_budget_ms` echoes the engine's
+   * budget (null = unbounded).
+   */
+  inference_fallback?: string | null;
+  inference_budget_ms?: number | null;
   timeframe: string;
   proxyLatencyMs: number | null;
   indicators?: {
@@ -711,6 +736,8 @@ const apiClient = {
     timeframe: string = "1d",
     signal?: AbortSignal,
     horizonMinutes?: number,
+    minConfidence?: number,
+    minTier?: TierSelection,
   ): Promise<PredictionResponse> {
     const _cb = Date.now();
     // ── NORMALIZE BEFORE SEND — never transmit a non-whitelist format.
@@ -722,6 +749,30 @@ const apiClient = {
     const hz = Number.isFinite(horizonMinutes) && (horizonMinutes as number) >= 1
       ? Math.min(10, Math.round(horizonMinutes as number))
       : undefined;
+    const mc = Number.isFinite(minConfidence) && (minConfidence as number) >= 50
+      ? Math.min(99, Math.round((minConfidence as number) * 100) / 100)
+      : undefined;
+    // Flexible-tier floor. Only a KNOWN band is forwarded; anything else is
+    // omitted so the engine applies its documented T1 default rather than the
+    // client inventing a preference.
+    const mt = isTier(minTier) ? (minTier as TierSelection) : undefined;
+
+    // ── P1-2026-09-24 — NON-BLOCKING PREDICT BUDGET ──
+    // The engine ships a fast structural verdict within its 150ms inference
+    // budget; this combined signal (internal 2s abort budget + any forwarded
+    // caller signal) guarantees the /predict await can NEVER lock the terminal
+    // spinner. A budget-abort is classified below as a recoverable timeout;
+    // a caller abort (symbol/timeframe switch) stays a silent cancel the store
+    // already handles.
+    const budget = installPredictBudget(PREDICT_ABORT_MS);
+    const budgetController = new AbortController();
+    const forwardBudgetAbort = () => budgetController.abort();
+    const forwardExternalAbort = () => budgetController.abort();
+    if (signal) {
+      if (signal.aborted) budgetController.abort();
+      else signal.addEventListener("abort", forwardExternalAbort, { once: true });
+    }
+    budget.signal.addEventListener("abort", forwardBudgetAbort, { once: true });
 
     try {
       const { data } = await api.post<PredictionResponse>(
@@ -731,16 +782,34 @@ const apiClient = {
           timeframe: cleanTimeframe,
           dataSource: "otc_forex",
           ...(hz != null ? { horizon_minutes: hz } : {}),
+          ...(mc != null ? { min_confidence: mc } : {}),
+          ...(mt != null ? { min_tier: mt } : {}),
           _cb,
         },
-        { signal },
+        { signal: budgetController.signal },
       );
       return data;
     } catch (proxyError) {
       // ── RECOVERABLE vs HARD FAILURE CLASSIFIER ──
-      // 503 Service Unavailable + axios ECONNABORTED (>15s live-quote timeout)
-      // are TRANSIENT (the quote stream is stalling, not gone). They carry
-      // `recoverable = true` so the store re-polls instead of alarming.
+      // Budget/timeout, 503 and transport failures are TRANSIENT (carry
+      // `recoverable = true` so the store re-polls instead of alarming).
+      //
+      // ══ PREDICT BUDGET ABORT (FIRST branch — must precede all AxiosError
+      // classification: aborts surface as ERR_CANCELED) ══
+      if (axios.isCancel(proxyError) && budget.isBudgetAbort()) {
+        const timeoutErr = new Error(
+          "Prediction budget exceeded — recycling.",
+        ) as PredictionError;
+        timeoutErr.name = "PredictionTimeoutError";
+        timeoutErr.recoverable = true;
+        throw timeoutErr;
+      }
+      // Caller abort (symbol/timeframe switch, unmount) — rethrow untouched;
+      // the axial interceptor skips retries on aborted signals and the store
+      // clears isLoading on the bare cancel.
+      if (axios.isCancel(proxyError)) {
+        throw proxyError;
+      }
       if (axios.isAxiosError(proxyError)) {
         // Live-quote / proxy timeout — the candle could not be priced in time.
         if (proxyError.code === "ECONNABORTED") {
@@ -783,6 +852,13 @@ const apiClient = {
         }
       }
       throw proxyError;
+    } finally {
+      // Release the predict-budget timer + abort listeners: the request is
+      // settled (resolved, errored or canceled) — nothing can abort it now.
+      if (signal) {
+        signal.removeEventListener("abort", forwardExternalAbort);
+      }
+      budget.dispose();
     }
   },
 
@@ -837,15 +913,23 @@ const apiClient = {
   async multiPredict(
     symbols: string[],
     timeframe: string = "1m",
+    minConfidence?: number,
+    minTier?: TierSelection,
   ): Promise<MultiPredictResponse> {
     const cleanSymbols = symbols
       .map((s) => normalizeSymbol(s) ?? s.trim().toUpperCase())
       .filter(Boolean);
+    const mc = Number.isFinite(minConfidence) && (minConfidence as number) >= 50
+      ? Math.min(99, Math.round((minConfidence as number) * 100) / 100)
+      : undefined;
+    const mt = isTier(minTier) ? (minTier as TierSelection) : undefined;
     const { data } = await api.post<MultiPredictResponse>(
       "/multi-predict",
       {
         symbols: cleanSymbols,
         timeframe: timeframe.trim().toLowerCase(),
+        ...(mc != null ? { min_confidence: mc } : {}),
+        ...(mt != null ? { min_tier: mt } : {}),
         _cb: Date.now(),
       },
       { timeout: 60_000 },

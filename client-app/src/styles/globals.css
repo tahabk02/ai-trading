@@ -65,12 +65,33 @@
     --term-line: 42 50 72;       /* #2A3248 */
     --term-ink: 232 237 246;     /* #E8EDF6 */
     --term-ink-dim: 129 140 160; /* #818CA0 */
-    --term-ink-faint: 104 116 141; /* #68748D */
+    --term-ink-faint: 112 124 149; /* #707C95 — raised from #68748D, which
+       measured 4.04:1 on --term-panel and failed WCAG AA (4.5) for the 8-10px
+       labels that use this token (pair captions, expiry pills, pin stars). */
     --term-gold: 216 160 72;     /* #D8A048 */
     --term-crypto: 0 179 201;    /* #00B3C9 */
 
     --bull: 34 171 148;          /* #22ab94 — direction UP (candles match) */
     --bear: 242 54 69;           /* #f23645 — direction DOWN (candles match) */
+
+    /* ── STATUS HUE CHANNELS ────────────────────────────────────────────────
+       The `--sl-*` / `--ob*` scales invert under `html.light`, so slate ink
+       re-themes itself. Tailwind's stock accent hues CANNOT: `text-emerald-400`
+       is a literal hex in the compiled stylesheet and resolves to #34D399 in
+       both themes — 1.84:1 on a white panel, i.e. invisible. That is why the
+       Order Book ladder, the signal-card tier colours and the LIVE dot were
+       all washed out in Light Mode.
+
+       These channels give the status hues the same token-bridge treatment the
+       slate scale already has. Dark values are the exact literals they replace,
+       so dark mode is pixel-identical; light values are darkened to clear
+       WCAG AA (>= 4.5:1) on white, #F8FAFC canvas and #F1F5F9 elevated. */
+    --st-pos: 52 211 153;      /* #34D399 emerald-400 (was literal) */
+    --st-neg: 251 113 132;     /* #FB7184 rose-400 (was literal) */
+    --st-warn: 251 191 36;     /* #FBBF24 amber-400 (was literal) */
+    --st-caution: 251 146 60;  /* #FB923C orange-400 (was literal) */
+    --st-info: 96 165 250;     /* #60A5FA blue-400 (was literal) */
+    --st-teal: 94 234 212;     /* #5EEAD4 teal-300 (was literal) */
 
     /* ── 8px SPACING GRID (4 / 8 / 12 / 16 / 24 / 32 / 48) ──
        The terminal lays out exclusively on this scale. Tailwind's numeric
@@ -125,6 +146,53 @@
     --tp-chart-border: #e2e8f0;
     --tp-crosshair: rgba(15, 23, 42, 0.3);
     --tp-price-line: rgba(15, 23, 42, 0.7);
+
+    /* ── PART 16 TERMINAL BLOTTER — LIGHT OVERRIDES ──
+       CRITICAL: these eight tokens are declared ONLY in :root above. Because
+       `html.light` did not redefine them, every `bg-term-panel` /
+       `text-term-ink` utility kept resolving to its DARK obsidian value under
+       the light theme — near-black cells on a #f8fafc page and near-white ink
+       on light surfaces (i.e. invisible text). The `--sl-*` and `--ob*` scales
+       WERE inverted below, which is why the breakage looked partial: only the
+       `term-*` families leaked through.
+
+       Values are the exact dark-theme mirror, chosen so every ink/background
+       pairing clears WCAG AA (>= 4.5:1 body, >= 3:1 hairline/large text):
+         ink #0F172A on panel #FFFFFF  -> 17.4:1
+         ink-dim  #475569 on #FFFFFF    ->  7.6:1
+         ink-faint #64748B on #FFFFFF   ->  4.8:1
+         gold     #A16207 on #FFFFFF    ->  5.4:1  (was #D8A048 -> 2.1:1)
+         crypto   #0E7490 on #FFFFFF    ->  5.3:1  (was #00B3C9 -> 2.4:1)
+       Gold/cyan are darkened rather than kept: the dark-theme values are
+       calibrated for a #06070B bed and fail hard against white. */
+    --term-canvas: 248 250 252;   /* #F8FAFC — page air, matches --tp-bg */
+    --term-panel: 255 255 255;    /* #FFFFFF — cell bed */
+    --term-line: 203 213 225;     /* #CBD5E1 — hairline (1.5:1 on white) */
+    --term-ink: 15 23 42;         /* #0F172A */
+    --term-ink-dim: 71 85 105;    /* #475569 */
+    --term-ink-faint: 100 116 139; /* #64748B */
+    --term-gold: 161 98 7;        /* #A16207 */
+    --term-crypto: 14 116 160;    /* #0E7490 */
+
+    /* ── STATUS HUE CHANNELS — LIGHT OVERRIDES ──
+       Same failure mode as the `--term-*` leak above: these were stock
+       Tailwind literals with no light counterpart. Measured on white, the dark
+       values were 1.48-2.57:1 (WCAG AA body text needs 4.5:1; the 1.5px tier
+       dots are non-text and still need 3:1). Each light value is the -700
+       step, which clears AA on all three light surfaces:
+
+         pos     #047857 -> 5.48 white / 5.24 canvas / 5.01 elevated
+         neg     #BE123C -> 6.29 / 6.01 / 5.74
+         warn    #B45309 -> 5.02 / 4.80 / 4.58
+         caution #C2410C -> 5.18 / 4.95 / 4.73
+         info    #1D4ED8 -> 6.70 / 6.41 / 6.12
+         teal    #0F766E -> 5.47 / 5.23 / 5.00                                        */
+    --st-pos: 4 120 87;         /* #047857 emerald-700 */
+    --st-neg: 190 18 60;        /* #BE123C rose-700 */
+    --st-warn: 180 83 9;        /* #B45309 amber-700 */
+    --st-caution: 194 65 12;    /* #C2410C orange-700 */
+    --st-info: 29 78 216;       /* #1D4ED8 blue-700 */
+    --st-teal: 15 118 110;      /* #0F766E teal-700 */
   }
 
   /* ── VIEWPORT & OVERFLOW LOCK ── */

@@ -76,8 +76,19 @@ function lastPriceUpdateShort(iso: string | null | undefined): string {
   }).format(parsed);
 }
 
-export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
-  stalePrice = false,
+/**
+ * `stalePrice` is REQUIRED, not optional-with-a-default.
+ *
+ * `streamLive` below is derived as `socketConnected && currentPrice > 0 && !stalePrice`.
+ * With an optional prop defaulting to `false`, omitting it makes `!stalePrice`
+ * permanently true and the panel goes blind to a quiet tape — the execution
+ * buttons would light up on a dead feed. Making it required turns that from a
+ * silent runtime hazard into a compile error, so the Pro page cannot forget it.
+ * There is no safe default here: "assume the feed is fresh" is the one default
+ * that fails toward firing a live order on stale data.
+ */
+export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
+  stalePrice,
 }) => {
   const [isMounted, setIsMounted] = useState(false);
   const { t, rtl } = useLangContext();
@@ -209,12 +220,13 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
   const streamLive =
     socketConnected && currentPrice > 0 && !stalePrice;
 
-  // PART 24 [161]/[162] — the expiry grid honors the gate the same way the
-  // chart does. Honest floor here is the ENGINE's MIN_EXECUTABLE_TIER (T4):
-  // a random_walk scored-only symbol or a sub-executable tier dims EVERY
-  // option (with the reason said out loud), and a choice whose bucket-aligned
-  // landing is closer than MIN_ACTIONABLE_WINDOW_MS is too_late for that
-  // option — never silently accepted.
+  // PART 24 [161]/[162] — SELECTION IS NEVER GATED. The grid reports the
+  // engine's regime/tier + bucket-timing state; it never enforces it. A
+  // sub-executable tier or a too_late landing used to disable EVERY option,
+  // which deadlocked the operator: they could not switch to a horizon that
+  // would clear the bar. The only remaining lock is `isTradeActive` — a
+  // transaction lock on an in-flight dispatch, categorically different from a
+  // market-state gate.
   const expirySel = expirySelectorState(
     (predictionData as { tier?: string | null } | null)?.tier ?? null,
     (predictionData as { suppressed_reason?: string | null } | null)
@@ -227,6 +239,8 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
   const expiryBySeconds = new Map(
     expirySel.options.map((o) => [o.seconds, o]),
   );
+  // Per-horizon status for the SELECTED expiry only.
+  const selectedExpiryState = expiryBySeconds.get(expirationSeconds) ?? null;
 
   const handleCall = useCallback(() => executeTrade("CALL"), [executeTrade]);
   const handlePut = useCallback(() => executeTrade("PUT"), [executeTrade]);
@@ -238,8 +252,33 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
   }
 
   return (
+    /*
+     * THE PANEL ROOT IS **NOT** A SCROLLPORT.
+     *
+     * Sticky resolves against the NEAREST SCROLL CONTAINER, so this root's
+     * overflow used to decide where CALL/PUT pinned themselves. Two measured
+     * bugs came from that:
+     *
+     *   1. `overflow-hidden` — a scroll CONTAINER with zero scroll range. The
+     *      footer's `sticky bottom-0` pinned to a box that could never scroll,
+     *      not to the rail. Measured: the footer sat 93px BELOW the rail's
+     *      visible bottom edge and `elementFromPoint` at PUT's centre hit the
+     *      status row behind it — CALL/PUT were visible but NOT clickable.
+     *   2. `overflow-y-auto` — fixed (1) but created the nested-scrollbar
+     *      failure: the rail scrolled 208px while containing a panel that
+     *      independently scrolled 136px. A scrollbar inside a scrollbar is a
+     *      real pointer/wheel hazard.
+     *
+     * So the root is a plain box: no vertical overflow at all, and
+     * `overflow-clip` (NOT `overflow-hidden`) purely for the rounded-corner
+     * clip. `overflow: clip` is the one overflow value that clips without
+     * BECOMING a scroll container, so it leaves the footer's sticky resolving
+     * against the operator rail — the single outer scrollport — instead of
+     * capturing it locally. Do not "fix" the radius by switching this to
+     * `hidden`.
+     */
     <div
-      className="bg-obsidian border border-slate-800/80 rounded-2xl overflow-hidden shadow-2xl shadow-black/40 flex flex-col transition-colors duration-200 max-w-full"
+      className="bg-obsidian border border-slate-800/80 rounded-2xl overflow-clip shadow-2xl shadow-black/40 flex flex-col transition-colors duration-200 max-w-full"
       dir={rtl ? "rtl" : "ltr"}
     >
       {/* Header */}
@@ -318,33 +357,40 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
               : "--:--"}
           </span>
         </div>
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 max-h-[120px] sm:max-h-[104px] overflow-y-auto custom-scrollbar pr-0.5">
+        <div
+          role="group"
+          aria-label="Trade expiration"
+          data-testid="expiry-options"
+          className="grid grid-cols-3 sm:grid-cols-6 gap-1 max-h-[120px] sm:max-h-[104px] overflow-y-auto custom-scrollbar pr-0.5"
+        >
           {TIMER_OPTIONS.map((opt) => {
             const st = expiryBySeconds.get(opt.seconds);
-            const suppressed = st?.suppressed ?? false;
+            const tooLate = st?.tooLate ?? false;
             return (
               <button
                 key={opt.seconds}
+                data-testid={`expiry-opt-${opt.label}`}
+                data-too-late={tooLate ? "true" : "false"}
+                aria-pressed={expirationSeconds === opt.seconds}
                 onClick={() => {
                   setExpirationSeconds(opt.seconds);
                   setSelectedExpirationSeconds(opt.seconds);
                 }}
-                disabled={isTradeActive || suppressed}
+                // `isTradeActive` is a TRANSACTION lock (a dispatch is in
+                // flight) — the only legitimate reason to block a click. No
+                // market-state gate may ever reach this attribute.
+                disabled={isTradeActive}
                 title={
-                  suppressed
-                    ? st?.reason === "too_late"
-                      ? `TOO LATE — aligns to ${st.alignedSeconds}s wait for the next bucket`
-                      : expirySel.blockedReason === "regime_scored_only"
-                        ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable"
-                        : "No actionable signal at any expiry for this symbol right now"
-                    : `Projection horizon: ${opt.label}`
+                  tooLate
+                    ? `${opt.label} — bucket-aligned landing too close to act on; still selectable`
+                    : `Trade expiration: ${opt.label}`
                 }
                 className={cn(
-                  "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-all duration-200 active:scale-95 min-h-[36px] sm:min-h-[32px]",
-                  !suppressed && expirationSeconds === opt.seconds
+                  "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-[transform,background-color,color] duration-75 active:scale-95 min-h-[36px] sm:min-h-[32px]",
+                  expirationSeconds === opt.seconds
                     ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
-                    : suppressed
-                      ? "bg-obsidian-950/60 text-slate-600 border border-slate-800/40 cursor-not-allowed"
+                    : tooLate
+                      ? "bg-obsidian-950/80 text-slate-300 border border-amber-500/40 border-b-2 hover:bg-slate-800 hover:text-white"
                       : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40",
                   isTradeActive && "opacity-50 cursor-not-allowed",
                 )}
@@ -354,14 +400,26 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
             );
           })}
         </div>
-        {/* PART 24 [162] — the expiry grid never stays silently interactive next
-            to a WEAK / SCORED-ONLY state: the reason is said out loud. */}
-        {!expirySel.anyActionable ? (
-          <p className="mt-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-300/90 flex items-center gap-1.5">
+        {/* PER-EXPIRY STATUS — describes the SELECTED expiry only. */}
+        {selectedExpiryState && !selectedExpiryState.actionReady ? (
+          <p
+            data-testid="expiry-status"
+            data-reason={selectedExpiryState.reason ?? "unknown"}
+            className="mt-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-300/90 flex items-center gap-1.5"
+          >
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
-            {expirySel.blockedReason === "regime_scored_only"
-              ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable"
-              : "No actionable signal at any expiry for this symbol right now"}
+            {selectedExpiryState.reason === "too_late"
+              ? `TOO LATE TO ACT ON ${selectedExpiryState.label} — NEXT BUCKET IN ${Math.max(
+                  1,
+                  Math.ceil(selectedExpiryState.retryInMs / 1000),
+                )}s`
+              : selectedExpiryState.reason === "regime_scored_only"
+                ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable on this symbol"
+                : selectedExpiryState.reason === "regime_pending_high_precision"
+                  ? "BELOW THE STRICT 96.5% BAR: no expiry is actionable yet"
+                  : selectedExpiryState.reason === "no_tier"
+                    ? "Evaluating — awaiting the first verdict for this expiry"
+                    : "Below the executable tier for any expiry on this symbol"}
           </p>
         ) : null}
       </div>
@@ -525,16 +583,31 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
         )}
       </div>
 
-      {/* Action Buttons — enabled ONLY when the 96.5% signal gate has passed */}
-      <div className="px-3 sm:px-4 pt-3 sm:pt-4 pb-2 sm:pb-3 flex flex-col gap-2 sm:gap-2.5">
+      {/*
+        ACTION FOOTER — pinned to the bottom of the panel's own scrollport.
+
+        The panel's natural height (~647px) can exceed the operator rail on a
+        short window (measured 647px inside a 602px rail at 1280x800). The rail
+        therefore gives the panel a bounded region with internal scroll, and
+        without this the CALL/PUT block would sit at the very bottom of that
+        scroll range — reachable only by scrolling, i.e. effectively hidden
+        behind a live order book.
+
+        `sticky bottom-0` keeps the two execution buttons on screen at all times
+        while the selector rows above them scroll. The opaque background +
+        top border are load-bearing: the scrolling expiry grid would otherwise
+        show through the controls. `z-10` lifts them above that grid.
+      */}
+      <div className="sticky bottom-0 z-10 mt-auto px-3 sm:px-4 pt-3 sm:pt-4 pb-2 sm:pb-3 flex flex-col gap-2 sm:gap-2.5 bg-[var(--tp-surface)] border-t border-[var(--tp-border)] backdrop-blur-sm">
         {/* HIGHER / BUY */}
         <button
+          data-testid="action-call"
           onClick={handleCall}
           disabled={signalLocked || isTradeActive || !streamLive || isKillSwitchLocked}
           className={cn(
             "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-xl font-black text-sm sm:text-base uppercase tracking-wider",
             "flex items-center justify-center gap-2 sm:gap-3",
-            "transition-all duration-200 active:scale-[0.98]",
+            "transition-[transform,background-color,color] duration-75 active:scale-[0.98]",
             "shadow-xl shadow-emerald-500/25",
             "min-h-[48px] sm:min-h-[52px]",
             signalLocked || isTradeActive || !streamLive || isKillSwitchLocked
@@ -556,12 +629,13 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
 
         {/* LOWER / SELL */}
         <button
+          data-testid="action-put"
           onClick={handlePut}
           disabled={signalLocked || isTradeActive || !streamLive || isKillSwitchLocked}
           className={cn(
             "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-xl font-black text-sm sm:text-base uppercase tracking-wider",
             "flex items-center justify-center gap-2 sm:gap-3",
-            "transition-all duration-200 active:scale-[0.98]",
+            "transition-[transform,background-color,color] duration-75 active:scale-[0.98]",
             "shadow-xl shadow-rose-500/25",
             "min-h-[48px] sm:min-h-[52px]",
             signalLocked || isTradeActive || !streamLive || isKillSwitchLocked

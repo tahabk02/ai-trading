@@ -2,7 +2,7 @@
 
 import React from "react";
 import { useRouter } from "next/navigation";
-import { TrendingUp, TrendingDown, Activity, ChevronDown } from "lucide-react";
+import { TrendingUp, TrendingDown, Activity, ChevronDown, Filter } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { getPairLabel, getQuoteCurrency } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
@@ -10,6 +10,12 @@ import { HorizonSelector } from "./horizon-selector";
 import { useMarketTerminalStore, type HorizonMinutes } from "@/store/useMarketTerminalStore";
 import { buildProHref, suppressCardNav } from "@/lib/pro-deep-link";
 import { realForexCardBehavior } from "@/lib/realForexRegime";
+import {
+  cardEffectiveConfidence,
+  isBelowConfidenceBar,
+} from "@/lib/minConfidenceFilter";
+import { resolveCardTier, tierClearsSelection } from "@/lib/tierFilter";
+import { TierBadge } from "@/components/shared/tier-badge";
 
 interface AssetCardProps {
   symbol: string;
@@ -47,20 +53,58 @@ interface AssetCardProps {
  *     as before — the redesign must not silently re-introduce an interactive
  *     affordance on a scored-only card.
  */
-export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) => {
+const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) => {
   const router = useRouter();
   const quote = useMarketTerminalStore((s) => s.quotes[symbol]);
   const verdict = useMarketTerminalStore((s) => s.verdicts[symbol]);
   const prediction = useMarketTerminalStore((s) => s.predictions[symbol]);
   const horizon = useMarketTerminalStore((s) => s.resolveHorizon(symbol));
+  const minConfidencePct = useMarketTerminalStore((s) => s.minConfidencePct);
+  const minTier = useMarketTerminalStore((s) => s.minTier);
 
-  // PART 15 [51] — real-forex regime display (payload regime_gate + the
-  // [47]/[48] confirmation gate). Scored-only unless explicitly confirmed.
+  // ── FILTER PINS (view-only curation, independent of tradability) ──
+  const isFavorite = useMarketTerminalStore((s) => s.favorites.includes(symbol));
+  const isHidden = useMarketTerminalStore((s) => s.hiddenSymbols.includes(symbol));
+  const toggleFavorite = useMarketTerminalStore((s) => s.toggleFavorite);
+  const toggleHidden = useMarketTerminalStore((s) => s.toggleHidden);
+
+  // PART 15 [51] / PART 28.2 [214]/[215] — real-forex regime display driven
+  // by the payload regime_gate (intraday engine verdict). Tradable →
+  // interactive like OTC; random_walk → scored-only; null → pending.
   const regime = realForexCardBehavior(
     symbol,
     (prediction?.data as { regime_gate?: string | null } | null)?.regime_gate,
   );
   const scoredOnly = regime.scoredOnly;
+
+  // ── CONFIDENCE FILTER DEMOTION ──
+  // A pair whose measurable confidence is strictly below the operator's bar
+  // renders SCORED-ONLY-style (non-interactive, "BELOW {bar}% BAR") until the
+  // bar is lowered — mirroring the engine's executable:false verdict sent on
+  // the same filter. No measurable confidence (waiting) is never demoted.
+  const filterConf = cardEffectiveConfidence(
+    prediction?.confidence,
+    verdict?.confidence,
+  );
+  const demotedByFilter =
+    !scoredOnly && isBelowConfidenceBar(filterConf, minConfidencePct);
+
+  // ── TIER SELECTOR DEMOTION (flexible tiers) ──
+  // A verdict whose HONEST band sits below the operator's selected floor is
+  // shown, but not interactive — the same treatment a below-bar confidence
+  // gets. Crucially the card still DISPLAYS its real tier/tier_label: we never
+  // relabel it, so a T3 signal reads "T3 MEDIUM", not a rewritten T5.
+  const cardTier = resolveCardTier(prediction?.data, verdict);
+  const demotedByTier =
+    !scoredOnly && !demotedByFilter && !tierClearsSelection(cardTier, minTier);
+  const interactive = !scoredOnly && !demotedByFilter && !demotedByTier;
+  const nonInteractiveTitle = scoredOnly
+    ? regime.nonInteractiveTitle
+    : demotedByFilter
+      ? `Confidence below the ${minConfidencePct.toFixed(1)}% filter bar — lower the Confidence Filter to trade.`
+      : demotedByTier
+        ? `${cardTier ?? "This"} is below your ${minTier} trade floor — select a lower tier to trade it.`
+        : undefined;
 
   const proHref = React.useMemo(
     () => buildProHref(symbol, horizon * 60),
@@ -68,7 +112,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
   );
 
   const handleHorizonChange = (h: HorizonMinutes) => {
-    if (scoredOnly) return; // real scored-only cards never re-aim an expiration
+    if (!interactive) return; // scored-only / below-bar cards never re-aim an expiration
     if (onHorizonChange) {
       onHorizonChange(symbol, h);
       return;
@@ -77,12 +121,12 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
   };
 
   const openPro = React.useCallback(() => {
-    if (scoredOnly) return; // non-interactive — no trade action from this card
+    if (!interactive) return; // non-interactive — no trade action from this card
     router.push(proHref);
-  }, [router, proHref, scoredOnly]);
+  }, [router, proHref, interactive]);
 
   const handleCardKeyDown = (e: React.KeyboardEvent) => {
-    if (scoredOnly) return;
+    if (!interactive) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       openPro();
@@ -172,7 +216,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
   const confPct = liveDir && liveConf > 0 ? liveConf.toFixed(1) : null;
   const confBarWidth = confPct != null ? Math.max(0, Math.min(100, liveConf)) : 0;
 
-  const spreadLine = !scoredOnly ? (
+  const spreadLine = interactive ? (
     <span className="num-fig text-[8px] leading-tight text-term-ink-faint">
       {spreadText} spr · {ticksText}
     </span>
@@ -180,23 +224,24 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
 
   return (
     <div
-      role={scoredOnly ? undefined : "link"}
-      tabIndex={scoredOnly ? -1 : 0}
+      data-testid="asset-card"
+      role={interactive ? "link" : undefined}
+      tabIndex={interactive ? 0 : -1}
       aria-label={regime.ariaLabel}
-      aria-disabled={scoredOnly ? true : undefined}
-      aria-description={scoredOnly ? regime.nonInteractiveTitle : undefined}
-      title={scoredOnly ? regime.nonInteractiveTitle : undefined}
+      aria-disabled={interactive ? undefined : true}
+      aria-description={nonInteractiveTitle}
+      title={nonInteractiveTitle}
       onClick={openPro}
       onKeyDown={handleCardKeyDown}
       className={cn(
         "group relative flex flex-col rounded-cell px-2 py-1 min-w-0 select-none",
-        scoredOnly
-          ? "border border-term-line bg-term-panel/80 cursor-not-allowed"
-          : "border border-term-line bg-term-panel cursor-pointer transition-colors duration-150 hover:border-bull/40",
+        interactive
+          ? "border border-term-line bg-term-panel cursor-pointer transition-colors duration-150 hover:border-bull/40"
+          : "border border-term-line bg-term-panel/80 cursor-not-allowed",
       )}
     >
       {/* ── PART 16 [66] 2px left-lead ALIGN STRIP — hover only, tradable only ── */}
-      {!scoredOnly && (
+      {interactive && (
         <span
           aria-hidden
           className="absolute left-0 top-0 bottom-0 w-[2px] bg-bull opacity-0 transition-opacity duration-150 group-hover:opacity-100"
@@ -207,7 +252,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
       <div className="flex items-center justify-between gap-1 min-w-0">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <h4 className={cn("font-sans font-semibold text-[11px] tracking-tight truncate", scoredOnly ? "text-term-ink-dim" : "text-term-ink")}>
+            <h4 className={cn("font-sans font-semibold text-[11px] tracking-tight truncate", interactive ? "text-term-ink" : "text-term-ink-dim")}>
               {symbol}
             </h4>
             <AssetClassBadge symbol={symbol} />
@@ -222,19 +267,19 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
       <div className="mt-1 flex items-end justify-between gap-1 min-w-0">
         <div className="min-w-0">
           <span
-            key={scoredOnly ? undefined : `${symbol}::${priceText}`}
+            key={interactive ? `${symbol}::${priceText}` : undefined}
             className={cn(
               "num-fig text-[16px] font-bold leading-tight truncate block",
-              scoredOnly ? "text-term-ink-faint" : "text-term-ink",
-              !scoredOnly && flashDir === "up" && "price-flash-up",
-              !scoredOnly && flashDir === "down" && "price-flash-down",
+              interactive ? "text-term-ink" : "text-term-ink-faint",
+              interactive && flashDir === "up" && "price-flash-up",
+              interactive && flashDir === "down" && "price-flash-down",
             )}
           >
             {priceText}
           </span>
         </div>
         <div className="shrink-0 text-right min-w-0">
-          {!scoredOnly && (
+          {interactive && (
             <p
               className={cn(
                 "num-fig text-[9px] font-semibold leading-tight",
@@ -267,6 +312,46 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
             {regime.scoredOnlyCaption}
           </span>
         </div>
+      ) : demotedByFilter ? (
+        <div className="mt-2 flex flex-col gap-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-amber-400 bg-amber-500/10 border border-amber-500/40"
+              title={nonInteractiveTitle}
+            >
+              <Filter size={10} />
+              BELOW {minConfidencePct.toFixed(1)}% BAR
+            </span>
+            <span className="num-fig ml-auto text-[9px] font-semibold text-term-ink-dim whitespace-nowrap">
+              {filterConf != null ? `${filterConf.toFixed(1)}%` : ""}
+            </span>
+          </div>
+          <span className="text-[8px] leading-tight text-term-ink-faint">
+            Confidence under the filter — lower the bar to activate.
+          </span>
+        </div>
+      ) : demotedByTier ? (
+        <div className="mt-2 flex flex-col gap-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-slate-300 bg-slate-500/10 border border-slate-500/40"
+              title={nonInteractiveTitle}
+            >
+              <Filter size={10} />
+              BELOW {minTier} FLOOR
+            </span>
+            {/* The engine's HONEST band is still shown — a T3 reads T3, never
+                a rewritten T5 — so the trader can see exactly what they are
+                choosing to include. */}
+            {cardTier && <TierBadge tier={cardTier} />}
+            <span className="num-fig ml-auto text-[9px] font-semibold text-term-ink-dim whitespace-nowrap">
+              {filterConf != null ? `${filterConf.toFixed(1)}%` : ""}
+            </span>
+          </div>
+          <span className="text-[8px] leading-tight text-term-ink-faint">
+            Below your selected trade floor — pick a lower tier to activate.
+          </span>
+        </div>
       ) : (
         <>
           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
@@ -277,6 +362,9 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
               </span>
             )}
             {horizonBadge}
+            {/* Honest band for an actionable card too — every tier is
+                visible, not just T1. */}
+            {cardTier && <TierBadge tier={cardTier} />}
             <span className="num-fig ml-auto text-[8px] text-term-ink-faint whitespace-nowrap">
               {hasAnySignal
                 ? ""
@@ -309,7 +397,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
       )}
 
       {/* ── ROW 4 — expiry pills + Pro deep-link (tradable only) ── */}
-      {!scoredOnly && (
+      {interactive && (
         <div className="mt-1 pt-1 border-t border-term-line flex items-center justify-between gap-1">
           {/* stopPropagation: horizon pills must never trigger card navigation */}
           <div onClickCapture={(e) => suppressCardNav(e)}>
@@ -328,6 +416,75 @@ export const AssetCard: React.FC<AssetCardProps> = ({ symbol, onHorizonChange })
           </button>
         </div>
       )}
+
+      {/* ── ROW 5 — filter pins ──────────────────────────────────────────────
+          Rendered for EVERY card, including scored-only ones. Pinning is a
+          VIEW/curation action with no trading consequence, so it must never
+          be hidden behind the tradability gate — otherwise a scored-only pair
+          could never be favorited, which is exactly when an operator most
+          wants to keep an eye on it. */}
+      <div
+        className="mt-1 flex items-center justify-end gap-0.5"
+        onClickCapture={(e) => suppressCardNav(e)}
+      >
+        <button
+          type="button"
+          aria-pressed={isFavorite}
+          aria-label={
+            isFavorite
+              ? `Remove ${symbol} from favorites`
+              : `Add ${symbol} to favorites`
+          }
+          title={isFavorite ? "Remove from favorites" : "Pin to favorites"}
+          data-testid={`asset-pin-${symbol}`}
+          onClick={(e) => {
+            suppressCardNav(e);
+            toggleFavorite(symbol);
+          }}
+          className={cn(
+            "text-[10px] leading-none px-1 py-0.5 rounded-chip transition-colors cursor-pointer",
+            isFavorite
+              ? "text-term-gold"
+              : "text-term-ink-faint hover:text-term-ink-dim",
+          )}
+        >
+          {isFavorite ? "★" : "☆"}
+        </button>
+        <button
+          type="button"
+          aria-pressed={isHidden}
+          aria-label={
+            isHidden ? `Show ${symbol} in the grid` : `Hide ${symbol} from the grid`
+          }
+          title={isHidden ? "Show in grid" : "Hide from grid"}
+          data-testid={`asset-hide-${symbol}`}
+          onClick={(e) => {
+            suppressCardNav(e);
+            toggleHidden(symbol);
+          }}
+          className={cn(
+            "text-[9px] font-bold uppercase tracking-tight transition-colors cursor-pointer",
+            isHidden
+              ? "text-term-ink-dim line-through"
+              : "text-term-ink-faint hover:text-term-ink-dim",
+          )}
+        >
+          {isHidden ? "HIDDEN" : "HIDE"}
+        </button>
+      </div>
     </div>
   );
 };
+
+/**
+ * Memoised so an unchanged symbol keeps its object identity through the
+ * `setQuotes` structural-sharing bail-out and React skips the render entirely.
+ * `onHorizonChange` arrives inline from the grid, so compare it by identity-
+ * insensitive value: the parent handler is stable across renders.
+ */
+export const AssetCard = React.memo(
+  AssetCardImpl,
+  (prev, next) =>
+    prev.symbol === next.symbol &&
+    prev.onHorizonChange === next.onHorizonChange,
+);

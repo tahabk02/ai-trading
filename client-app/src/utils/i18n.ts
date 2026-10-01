@@ -189,6 +189,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Updated",
     enterSymbolPrompt: "Enter a symbol above to trigger real-time ML inference.",
     runningInference: "Running high-speed ML inference...",
+    recomputingSignal: "Recomputing…",
     // PART 22.1 — RF corroboration split labels (distinct from signal precision)
     rfProbability: "RF Prob",
     rfHoldoutAccuracy: "RF Holdout Acc",
@@ -512,6 +513,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Mis à jour",
     enterSymbolPrompt: "Entrez un symbole ci-dessus pour déclencher l'inférence ML.",
     runningInference: "Exécution de l'inférence ML haute vitesse...",
+    recomputingSignal: "Recalcul en cours…",
     // PART 22.1 — libellés de corroboration RF séparés (distincts de la précision du signal)
     rfProbability: "Prob RF",
     rfHoldoutAccuracy: "Préc RF (holdout)",
@@ -840,6 +842,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "تم التحديث",
     enterSymbolPrompt: "أدخل رمزاً أعلاه لتشغيل استدلال تعلم الآلة المباشر.",
     runningInference: "جارٍ تشغيل استدلال تعلم الآلة فائق السرعة...",
+    recomputingSignal: "جاري إعادة الحساب…",
     // PART 22.1 — تسميات توثيق RF منفصلة (مختلفة عن دقة الإشارة)
     rfProbability: "احتمال RF",
     rfHoldoutAccuracy: "دقة RF (holdout)",
@@ -1167,6 +1170,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Actualizado",
     enterSymbolPrompt: "Introduce un símbolo arriba para ejecutar inferencia ML.",
     runningInference: "Ejecutando inferencia ML de alta velocidad...",
+    recomputingSignal: "Recalculando…",
     // PART 22.1 — etiquetas de corroboración RF separadas (distintas de la precisión de la señal)
     rfProbability: "Prob. RF",
     rfHoldoutAccuracy: "Prec RF (holdout)",

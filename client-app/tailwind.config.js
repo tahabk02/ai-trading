@@ -115,6 +115,20 @@ module.exports = {
         // plain `bull-green`/`bear-red` hex tokens above stay untouched.
         bull: "rgb(var(--bull) / <alpha-value>)",
         bear: "rgb(var(--bear) / <alpha-value>)",
+        // ── STATUS HUES ── theme-driven, for the same reason the slate scale
+        //    is. Stock Tailwind accents (`emerald-400`, `rose-400`, `amber-400`,
+        //    `orange-400`, `blue-400`, `teal-300`) are literal hex in the
+        //    compiled CSS and do NOT follow the html.dark/.light class — they
+        //    render at 1.48-2.57:1 on a white panel. Prefer `text-st-*` /
+        //    `bg-st-*` / `border-st-*`; the `/opacity` modifiers still work.
+        st: {
+          pos: "rgb(var(--st-pos) / <alpha-value>)",
+          neg: "rgb(var(--st-neg) / <alpha-value>)",
+          warn: "rgb(var(--st-warn) / <alpha-value>)",
+          caution: "rgb(var(--st-caution) / <alpha-value>)",
+          info: "rgb(var(--st-info) / <alpha-value>)",
+          teal: "rgb(var(--st-teal) / <alpha-value>)",
+        },
       },
       borderRadius: {
         card: "8px",

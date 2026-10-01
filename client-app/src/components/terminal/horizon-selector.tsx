@@ -42,7 +42,7 @@ export const HorizonSelector: React.FC<HorizonSelectorProps> = ({
           onClick={() => onChange(h)}
           aria-pressed={h === value}
           className={cn(
-            "rounded-chip font-bold tracking-wider transition-colors border",
+                  "rounded-chip font-bold tracking-wider cursor-pointer border transition-[transform,background-color,color] duration-75 active:scale-90",
             pillClass,
             h === value
               ? "bg-term-ink text-term-canvas border-term-ink"

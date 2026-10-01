@@ -1,27 +1,22 @@
 /**
- * realForexRegime.ts — PART 15 [51] REAL-FOREX REGIME-GATE CARD DISPLAY.
+ * realForexRegime.ts — PART 15 [51] / PART 28.2 [214]/[215]
+ * REAL-FOREX REGIME-GATE CARD DISPLAY.
  *
- * Every REAL_FOREX_PAIRS card must surface the PART 14 `regime_gate` state
- * from financial_analysis.py's payload, reusing the existing suppressedReason
- * UI pattern (the same SCORED-ONLY rendering already built for random_walk).
+ * Every REAL_FOREX_PAIRS card surfaces the `regime_gate` state computed by
+ * financial_analysis.py from REAL intraday closes (>= MIN_CLOSES = 100),
+ * reusing the existing suppressedReason SCORED-ONLY rendering pattern.
  *
- * [47]/[48] GATE: EUR/GBP + EUR/NOK were flagged "trending" in the PART 14
- * audit, but at LOW confidence on a <1-year window — the fixed-income/regime
- * classification is still UNDER REVIEW. Until that number/date-range check is
- * EXPLICITLY confirmed, EVERY real-forex card renders scored-only style: it
- * must never visually invite a trade action while the classification that
- * would justify a tradable UI is still pending. The backend gate already
- * enforces non-executability; this only governs display wiring.
+ * PART 28.2: the [47]/[48] review gate is now answered by the engine itself —
+ * the 10 real pairs stream a genuine Yahoo intraday tape (PART 28), so the
+ * regime classification that justifies a tradable UI is evaluated live on
+ * intraday ticks. Pairs whose intraday classification is non-random-walk
+ * (trending / mean_reverting) come back "tradable" and unlock the card;
+ * random_walk pairs stay SCORED-ONLY. This is DATA-DRIVEN — the client no
+ * longer blanket-blocks all real cards, and it never invents a tradable
+ * state: no verdict on the payload still renders as "regime review pending".
  */
 
 import { REAL_FOREX_SET } from "@/constants/symbols";
-
-/**
- * PART 15 — set TRUE only after [47]/[48] are answered and explicitly
- * confirmed by a human. Until then every REAL_FOREX_PAIRS card shows the
- * SCORED-ONLY (non-tradable) display regardless of the payload.
- */
-export const REAL_FOREX_TRADABLE_CONFIRMED = false;
 
 /**
  * How the card's price row is sourced. PART 28 switched the 10 real pairs to
@@ -33,6 +28,9 @@ export type RealForexDataKind = "live" | "daily_close";
 
 /**
  * Why a scored-only card is not tradable — surfaced on hover + on-card.
+ * STRICT 96.5% BAR (2026-09-24): engine surfaces regime_gate
+ * "pending_high_precision" for every verdict below the executable floor, so
+ * the card copy explains the high-precision gate explicitly.
  */
 export const REAL_FOREX_NONINTERACTIVE_COPY: Record<
   NonNullable<RealForexRegimeDisplay["reason"]>,
@@ -40,6 +38,8 @@ export const REAL_FOREX_NONINTERACTIVE_COPY: Record<
 > = {
   regime_pending_confirmation: "Regime review pending — not yet confirmed tradable",
   regime_scored_only: "Random walk regime — scored only, not tradable",
+  regime_pending_high_precision:
+    "Below 96.5% — high-precision gate pending, scored only",
 };
 
 export interface RealForexRegimeDisplay {
@@ -49,11 +49,17 @@ export interface RealForexRegimeDisplay {
   scoredOnly: boolean;
   /**
    * Why the card is non-tradable:
+   *   "regime_pending_high_precision"  — engine executable=false (regime_gate
+   *                                       "pending_high_precision", sub-96.5%)
    *   "regime_scored_only"             — backend regime_gate === "scored_only"
-   *   "regime_pending_confirmation"    — [47]/[48] not yet confirmed
-   *   null                             — tradable (real pair only after confirm)
+   *   "regime_pending_confirmation"    — no verdict on the payload (null)
+   *   null                             — tradable (engine-cleared real pair)
    */
-  reason: "regime_scored_only" | "regime_pending_confirmation" | null;
+  reason:
+    | "regime_pending_high_precision"
+    | "regime_scored_only"
+    | "regime_pending_confirmation"
+    | null;
   /** Data cadence: every instrument (incl. the 10 real pairs) is a live tape. */
   dataKind: RealForexDataKind;
   /** Cursor/tooltip copy surfaced when a scored-only card is hovered. */
@@ -85,23 +91,11 @@ export function resolveRealForexRegimeDisplay(
 
   const gate = String(regimeGate || "").trim().toLowerCase();
 
-  // Until [47]/[48] are confirmed, real pairs are ALWAYS scored-only —
-  // regardless of what the payload currently says.
-  if (!REAL_FOREX_TRADABLE_CONFIRMED) {
-    const reason =
-      gate === "scored_only"
-        ? "regime_scored_only"
-        : "regime_pending_confirmation";
-    return {
-      isReal: true,
-      scoredOnly: true,
-      reason, dataKind: "live",
-      nonInteractiveTitle: REAL_FOREX_NONINTERACTIVE_COPY[reason],
-      scoredOnlyCaption: REAL_FOREX_NONINTERACTIVE_COPY[reason],
-    };
-  }
-
-  // Post-confirmation: honor the backend gate exactly.
+  // PART 28.2 + STRICT 96.5% BAR (2026-09-24): honor the backend gate exactly.
+  // No blanket [47]/[48] block — a real pair is tradable only when the
+  // engine's strict execution gate says so (regime_gate "tradable");
+  // "pending_high_precision" (sub-96.5% SCORED-ONLY) is its own reason;
+  // random_walk gate stays scored_only; no verdict stays "pending".
   if (gate === "tradable")
     return {
       isReal: true,
@@ -111,7 +105,11 @@ export function resolveRealForexRegimeDisplay(
       scoredOnlyCaption: "",
     };
   const reason =
-    gate === "scored_only" ? "regime_scored_only" : "regime_pending_confirmation";
+    gate === "pending_high_precision"
+      ? "regime_pending_high_precision"
+      : gate === "scored_only"
+        ? "regime_scored_only"
+        : "regime_pending_confirmation";
   return {
     isReal: true,
     scoredOnly: true,
@@ -153,7 +151,7 @@ export function realForexCardBehavior(
     scoredOnly,
     interactive: !scoredOnly,
     ariaLabel: scoredOnly
-      ? `${symbol} — real-forex, scored-only (${reason === "regime_scored_only" ? "random walk" : "regime review"})`
+      ? `${symbol} — real-forex, scored-only (${reason === "regime_scored_only" ? "random walk" : reason === "regime_pending_high_precision" ? "high-precision gate" : "regime review"})`
       : `Open Pro Terminal for ${symbol}`,
     reason,
     dataKind,

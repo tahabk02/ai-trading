@@ -14,6 +14,11 @@ import apiClient, { type PredictionResponse } from "@/services/api";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TierBadge } from "@/components/shared/tier-badge";
 import { getAssetSubType, searchSymbolUniverse } from "@/constants/symbols";
+import {
+  classifyVerdictState,
+  errorHeadline,
+  withheldHeadline,
+} from "@/lib/verdict-state";
 
 export interface PredictiveIntelligenceProps {
   symbol?: string;
@@ -116,6 +121,21 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
   const bookA = predictionData?.book_agreement_detail?.aligned_count ?? null;
   const bookN = predictionData?.book_agreement_detail?.active_count ?? null;
 
+  // ── SINGLE SOURCE OF TRUTH for the banner ──
+  // A transport failure outranks any verdict: after a failed request the
+  // verdict on screen is STALE, and showing its tier/confidence alongside an
+  // error is what made a dead backend look like a confident market. The
+  // confidence gauge and tier badge are suppressed on ERROR because no
+  // authoritative number exists for that cycle.
+  const verdictState = classifyVerdictState(
+    predictionData as unknown as Parameters<typeof classifyVerdictState>[0],
+    error,
+    isLoading,
+  );
+  const transportFailed = verdictState.kind === "ERROR";
+  const withheldState =
+    verdictState.kind === "WITHHELD" ? verdictState : null;
+
   // ── THERMAL-QUARANTINE STATE (96.5% hard floor) ──
   // When the engine demotes a sub-thermal directional verdict to market-waiting
   // (CONFLUENCE_BELOW_THERMAL), the confidence gauge turns amber to make the
@@ -189,7 +209,13 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
           </div>
         )}
 
-        {isLoading && (
+        {/* ── P1-2026-09-24 — non-blocking ──
+             The full-panel ML spinner only appears when there is NO verdict to
+             show yet (an initial cold /predict). Once a verdict exists it stays
+             on screen even while a re-fetch runs — a subtle "RECOMPUTING…"
+             chip signals the background refresh instead of swapping the panel
+             for a spinner (which previously froze the component tree). */}
+        {isLoading && !predictionData && (
           <div className="flex items-center gap-2 my-6 justify-center py-4">
             <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-xs text-slate-400 font-mono">
@@ -198,8 +224,57 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
           </div>
         )}
 
-        {predictionData && !isLoading && (
+        {predictionData && (
           <div className="space-y-4">
+            {/* ── WITHHELD vs ERROR: the two states that must never be confused ──
+                 ERROR (transport/gateway/timeout) renders a ROSE banner and
+                 SUPPRESSES the tier badge + confidence gauge entirely — the
+                 verdict in the store is stale for this cycle, so its number is
+                 not shown at all. WITHHELD (risk gate declined) renders a calm
+                 SLATE banner and KEEPS the real confluence number visible,
+                 because that number is genuine and auditable. */}
+            {transportFailed && verdictState.kind === "ERROR" && (
+              <div
+                data-testid="verdict-error-banner"
+                role="alert"
+                className="mb-3 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl"
+              >
+                <p className="text-[11px] text-rose-400 font-mono break-words">
+                  {errorHeadline(verdictState.errorKind)}
+                </p>
+                {verdictState.detail && (
+                  <p className="text-[10px] text-rose-300/70 font-mono mt-1 break-words">
+                    {verdictState.detail}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {withheldState && (
+              <div
+                data-testid="verdict-withheld-banner"
+                className="mb-3 p-3 bg-slate-800/40 border border-slate-700/60 rounded-xl"
+              >
+                <p className="text-[11px] text-slate-300 font-mono break-words">
+                  {withheldHeadline(withheldState.reason)}
+                </p>
+                {withheldState.detail && (
+                  <p className="text-[10px] text-slate-500 font-mono mt-1 break-words">
+                    {withheldState.detail}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {(isLoading && predictionData) && (
+              <div className="flex items-center justify-end gap-2">
+                <div className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
+                <span className="text-[10px] text-amber-400 font-mono uppercase tracking-wider">
+                  {t("recomputingSignal")}
+                </span>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center justify-between bg-obsidian-950/60 p-3 rounded-xl border border-slate-800 gap-2">
               <span
                 className={
@@ -243,16 +318,24 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                   </span>
                 )}
 
-              {/* ── PART 6: HONEST TIER BADGE (engine-dispatched) ── */}
-              <TierBadge
-                tier={predictionData.tier}
-                confidence={
-                  displayConfidence != null
-                    ? Number(displayConfidence)
-                    : null
-                }
-                size="sm"
-              />
+              {/* ── PART 6: HONEST TIER BADGE (engine-dispatched) ──
+                   Suppressed on a transport ERROR: the verdict behind it is
+                   stale, and a tier badge next to a dead-connection banner is
+                   the exact "false premium" illusion this clamp removes. The
+                   backend's tier coherence clamp already demotes withheld
+                   calls to T5/WEAK, so a WITHHELD state still shows its real
+                   (non-premium) tier. */}
+              {!transportFailed && (
+                <TierBadge
+                  tier={predictionData.tier}
+                  confidence={
+                    displayConfidence != null
+                      ? Number(displayConfidence)
+                      : null
+                  }
+                  size="sm"
+                />
+              )}
 
               <div className="flex items-center gap-4 font-mono text-xs">
                 <span className="text-slate-400 font-bold">
@@ -275,7 +358,7 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                         ? "text-emerald-400 bg-emerald-500/10"
                         : deltaDisplay.startsWith("-")
                           ? "text-rose-400 bg-rose-500/10"
-                          : "text-slate-600 dark:text-slate-400 bg-slate-500/10")
+                          : "text-slate-400 bg-slate-500/10")
                     }
                   >
                     {deltaDisplay}
@@ -285,6 +368,23 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {transportFailed ? (
+                /* Transport failure: the confluence number on screen belongs to
+                   the LAST good cycle, not this one. Rendering it would put a
+                   live-looking percentage next to a dead-connection banner, so
+                   the gauge is replaced by an explicit "no verdict" state. */
+                <div
+                  data-testid="verdict-gauge-suppressed"
+                  className="md:col-span-1 bg-obsidian-950/60 border border-slate-800 rounded-xl p-4 flex items-center justify-center text-center relative min-h-[180px]"
+                >
+                  <div className="flex flex-col items-center gap-1">
+                    <span className="w-8 h-8 border-2 border-slate-700 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
+                      no verdict this cycle
+                    </span>
+                  </div>
+                </div>
+              ) : (
               <div className="md:col-span-1 bg-obsidian-950/60 border border-slate-800 rounded-xl p-4 flex flex-col items-center justify-center text-center relative min-h-[180px]">
                 <div
                   className={
@@ -351,6 +451,7 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                   )}
                 </div>
               </div>
+              )}
 
               <div className="md:col-span-2 grid grid-cols-2 sm:grid-cols-2 gap-2">
                 <MetricCard

@@ -89,13 +89,13 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
   // T1-T5 tiers the engine dispatches.
   const unknownTierColor =
     displayConfidence >= 96.5
-      ? "text-emerald-400"
+      ? "text-st-pos"
       : displayConfidence >= 90
-        ? "text-teal-300"
+        ? "text-st-teal"
         : displayConfidence >= 80
-          ? "text-amber-400"
+          ? "text-st-warn"
           : displayConfidence >= 70
-            ? "text-orange-400"
+            ? "text-st-caution"
             : "text-slate-400";
 
   const handleViewChart = () => {
@@ -109,17 +109,17 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
   return (
     <div
       onClick={handleViewChart}
-      className="bg-obsidian-900 border border-slate-800 rounded-xl p-3 sm:p-5 shadow-2xl hover:border-blue-500/50 transition-all duration-300 cursor-pointer"
+      className="bg-obsidian-900 border border-slate-800 rounded-xl p-3 sm:p-5 shadow-card dark:shadow-2xl hover:border-blue-500/50 transition-all duration-300 cursor-pointer"
     >
       {/* ── Header: Symbol + Badge (BUY 🟢 / SELL 🔴) ── */}
       <div className="flex justify-between items-start mb-3 sm:mb-4 gap-2">
         <div className="min-w-0 flex-1">
-          <h3 className="text-base sm:text-xl font-bold text-white tracking-tight truncate flex items-center gap-2">
+          <h3 className="text-base sm:text-xl font-bold text-slate-50 tracking-tight truncate flex items-center gap-2">
             {getPairLabel(symbol)}
             <AssetClassBadge symbol={symbol} />
           </h3>
           <p
-            className="text-slate-500 text-[10px] sm:text-xs uppercase font-semibold mt-0.5"
+            className="text-ink-muted text-[10px] sm:text-xs uppercase font-semibold mt-0.5"
             dir={detectLang() === "ar" ? "rtl" : "ltr"}
           >
             {createdAt ? format(new Date(createdAt), "HH:mm:ss") : "--"} · LOCAL
@@ -129,9 +129,9 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           className={cn(
             "shrink-0 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full text-[10px] sm:text-xs font-bold flex items-center gap-1 min-h-[28px] sm:min-h-[32px]",
             isBuy
-              ? "bg-emerald-500/10 text-emerald-400"
+              ? "bg-st-pos/10 text-st-pos"
               : isSell
-                ? "bg-rose-500/10 text-rose-400"
+                ? "bg-st-neg/10 text-st-neg"
                 : "bg-slate-500/10 text-slate-300",
           )}
         >
@@ -149,15 +149,15 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
       {/* ── Price & Confidence Grid ── */}
       <div className="grid grid-cols-2 gap-2 sm:gap-4">
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
-          <p className="text-slate-500 text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
+          <p className="text-ink-muted text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
             Execution Price
           </p>
-          <p className="text-white font-mono text-sm sm:text-lg truncate">
+          <p className="text-slate-50 font-mono text-sm sm:text-lg truncate">
             ${formatPairPrice(price, symbol)}
           </p>
         </div>
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
-          <p className="text-slate-500 text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
+          <p className="text-ink-muted text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
             Book Agreement
           </p>
           {/* ── REAL DYNAMIC BOOK AGREEMENT — tier colors reflect the exact ──
@@ -173,7 +173,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
             {displayConfidence.toFixed(1)}%
           </p>
           {booksN && booksN > 0 ? (
-            <p className="text-slate-500 text-[8px] sm:text-[9px] uppercase font-semibold truncate tabular-nums mt-0.5">
+            <p className="text-ink-muted text-[8px] sm:text-[9px] uppercase font-semibold truncate tabular-nums mt-0.5">
               {booksA}/{booksN} books
             </p>
           ) : null}

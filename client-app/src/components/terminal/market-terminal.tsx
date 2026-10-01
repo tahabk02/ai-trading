@@ -5,15 +5,35 @@ import { useMarketTerminal } from "@/hooks/useMarketTerminal";
 import {
   useMarketTerminalStore,
   ALL_MARKET_SYMBOLS,
-  REAL_MARKET_SYMBOLS,
   selectTerminalConnected,
-  selectTerminalFilter,
+  selectAssetClasses,
+  selectFavorites,
+  selectHiddenSymbols,
+  selectSymbolQuery,
+  selectFavoritesOnly,
   selectGlobalHorizon,
+  selectTerminalPredictions,
+  selectTerminalVerdicts,
+  selectMinConfidencePct,
+  selectMinTier,
+  selectHideBelowThreshold,
 } from "@/store/useMarketTerminalStore";
 import { HorizonSelector } from "./horizon-selector";
-import { AssetClassFilterPills } from "./asset-class-filter";
+import {
+  AssetClassFilterPills,
+  AssetSymbolSearch,
+  AssetFilterStatus,
+  FavoritesOnlyToggle,
+} from "./asset-class-filter";
+import { ConfidenceFilter } from "./confidence-filter";
+import { TierSelector } from "./tier-selector";
 import { AssetCard } from "./asset-card";
 import { cn } from "@/utils/cn";
+import {
+  cardEffectiveConfidence,
+  isBelowConfidenceBar,
+} from "@/lib/minConfidenceFilter";
+import { applyAssetFilter } from "@/lib/assetFilter";
 
 /**
  * MARKET TERMINAL — the all-pairs grid (Alpha.5 Pro main dashboard).
@@ -32,35 +52,81 @@ import { cn } from "@/utils/cn";
  * scored-only until [47]/[48] regime verification is explicitly confirmed.
  */
 export const MarketTerminal: React.FC = () => {
-  const { connected, setGlobalHorizon, setCardHorizon, refreshNow } =
-    useMarketTerminal();
+  const {
+    connected,
+    setGlobalHorizon,
+    setCardHorizon,
+    refreshNow,
+    setMinConfidencePct,
+    setMinTier,
+    toggleHideBelowThreshold,
+  } = useMarketTerminal();
   const globalHorizon = useMarketTerminalStore(selectGlobalHorizon);
-  const filter = useMarketTerminalStore(selectTerminalFilter);
+  const assetClasses = useMarketTerminalStore(selectAssetClasses);
+  const favorites = useMarketTerminalStore(selectFavorites);
+  const hiddenSymbols = useMarketTerminalStore(selectHiddenSymbols);
+  const symbolQuery = useMarketTerminalStore(selectSymbolQuery);
+  const favoritesOnly = useMarketTerminalStore(selectFavoritesOnly);
   const connectedFlag = useMarketTerminalStore(selectTerminalConnected);
+  // Confidence Filter — subscribed live so the grid demotes/hides the instant
+  // the slider moves (no waiting for the throttled engine re-dispatch).
+  const minConfidencePct = useMarketTerminalStore(selectMinConfidencePct);
+  // Tier Selector — same live-subscription rationale: cards re-render the
+  // moment the operator changes the band they trade.
+  const minTier = useMarketTerminalStore(selectMinTier);
+  const hideBelowThreshold = useMarketTerminalStore(selectHideBelowThreshold);
+  const predictions = useMarketTerminalStore(selectTerminalPredictions);
+  const verdicts = useMarketTerminalStore(selectTerminalVerdicts);
 
   const live = connected && connectedFlag;
 
   const symbols = React.useMemo(() => {
-    if (filter === "all") return ALL_MARKET_SYMBOLS;
-    const defs = ALL_MARKET_SYMBOLS.map((sym) => ({
-      sym,
-      sub: useMarketTerminalStore.getState().quotes[sym]?.assetSubType,
-    }));
-    const byQuote = defs.filter((d) => d.sub === filter).map((d) => d.sym);
-    return byQuote.length > 0
-      ? byQuote
-      : // Quotes may not have landed yet — fall back to the static registry so a
-        // brand-new grid still renders every pair immediately.
-        ALL_MARKET_SYMBOLS.filter((sym) => {
-          // Registry-driven filter: OTC pairs have label "… OTC"; crypto majors
-          // are BTC/USD + ETH/USD; the 10 real pairs (PART 14/15) live in their
-          // own REAL_FOREX_PAIRS group (assetSubType "forex").
-          if (filter === "crypto") return /^BTC\/USD$|^ETH\/USD$/.test(sym);
-          if (filter === "real") return REAL_MARKET_SYMBOLS.has(sym);
-          if (filter === "otc") return !REAL_MARKET_SYMBOLS.has(sym) && !/^BTC\/USD$|^ETH\/USD$/.test(sym);
-          return true;
-        });
-  }, [filter]);
+    // ASSET FILTER — classification is STATIC (registry-backed), never derived
+    // from live quotes. The previous implementation read
+    // `getState().quotes[sym]?.assetSubType` inside this memo, which is a
+    // non-reactive read: before the first `market_quotes` snapshot every
+    // `sub` was `undefined`, and once a PARTIAL snapshot landed the non-empty
+    // result suppressed the fallback — so selecting "Real" mid-boot could
+    // render an arbitrary subset (3 of 10 pairs) with no error surfaced.
+    // `applyAssetFilter` is pure and always sees the full universe.
+    const base = applyAssetFilter(ALL_MARKET_SYMBOLS, {
+      classes: assetClasses,
+      favorites,
+      hidden: hiddenSymbols,
+      query: symbolQuery,
+      favoritesOnly,
+    });
+
+    // Confidence Filter (hide mode): physically remove pairs whose measurable
+    // confidence is below the active bar. Cards with no confidence yet (still
+    // evaluating / market-waiting) are NEVER hidden.
+    if (!hideBelowThreshold) return base;
+    const kept = base.filter((sym) => {
+      const pred = predictions[sym];
+      const verdict = verdicts[sym];
+      const conf = cardEffectiveConfidence(
+        pred?.confidence,
+        verdict?.confidence,
+      );
+      return !isBelowConfidenceBar(conf, minConfidencePct);
+    });
+    return kept;
+  }, [
+    assetClasses,
+    favorites,
+    hiddenSymbols,
+    symbolQuery,
+    favoritesOnly,
+    hideBelowThreshold,
+    minConfidencePct,
+    predictions,
+    verdicts,
+  ]);
+
+  const hiddenCount = React.useMemo(
+    () => ALL_MARKET_SYMBOLS.length - symbols.length,
+    [symbols.length],
+  );
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-term-canvas text-term-ink">
@@ -88,10 +154,19 @@ export const MarketTerminal: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            <AssetClassFilterPills
-              value={filter}
-              onChange={(f) => useMarketTerminalStore.getState().setFilter(f)}
+            {/* Asset filtering is NEVER gated on feed health, tier, or tradability —
+                a disabled filter reads as "this data is unavailable". */}
+            <AssetSymbolSearch />
+            <AssetClassFilterPills />
+            <FavoritesOnlyToggle />
+            <AssetFilterStatus />
+            <ConfidenceFilter
+              value={minConfidencePct}
+              hideBelow={hideBelowThreshold}
+              onCommit={setMinConfidencePct}
+              onToggleHide={toggleHideBelowThreshold}
             />
+            <TierSelector value={minTier} onCommit={setMinTier} />
             <HorizonSelector
               value={globalHorizon}
               onChange={setGlobalHorizon}
@@ -99,7 +174,7 @@ export const MarketTerminal: React.FC = () => {
             />
             <button
               onClick={() => refreshNow()}
-              className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-chip border border-term-line text-term-ink-dim hover:text-term-ink hover:border-term-ink-faint transition-colors whitespace-nowrap cursor-pointer"
+              className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-chip border border-term-line text-term-ink-dim hover:text-term-ink hover:border-term-ink-faint cursor-pointer transition-[transform,background-color,color] duration-75 active:scale-90 whitespace-nowrap"
             >
               Refresh
             </button>
@@ -120,7 +195,9 @@ export const MarketTerminal: React.FC = () => {
         </div>
         <p className="mt-4 text-center text-[8px] text-term-ink-faint num-fig uppercase tracking-widest">
           All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 —
-          live micro-quant verdicts · 60% definitive gate · {symbols.length} shown
+          live micro-quant verdicts · 60% definitive gate · Conf bar{" "}
+          {minConfidencePct.toFixed(1)}% · {symbols.length} shown
+          {hiddenCount > 0 ? ` · ${hiddenCount} below bar hidden` : ""}
         </p>
       </main>
     </div>

@@ -46,12 +46,12 @@ describe("PART 15 — real forex terminal wiring", () => {
     expect(assetClassBadgeLabel("ETH/USD")).toBe("CRYPTO");
   });
 
-  it("[47]/[48] pending: every real pair card is scored-only regardless of payload", () => {
+  it("[47]/[48] superseded by PART 28.2: the intraday engine verdict (regime_gate) drives the card", () => {
     for (const sym of ALL_REAL_SYMBOLS) {
       const d = resolveRealForexRegimeDisplay(sym, "tradable");
       expect(d.isReal).toBe(true);
-      expect(d.scoredOnly).toBe(true);
-      expect(d.reason).not.toBeNull();
+      expect(d.scoredOnly).toBe(false);
+      expect(d.reason).toBeNull();
     }
   });
 
@@ -104,5 +104,69 @@ describe("PART 15 — real forex terminal wiring", () => {
     );
     const b = realForexCardBehavior("EUR/SEK", undefined);
     expect(b.nonInteractiveTitle).toContain("Regime review pending");
+  });
+});
+
+describe("PART 28.2 [214]/[215] — data-driven real-forex regime unlock", () => {
+  const ALL_REAL_SYMBOLS = REAL_FOREX_PAIRS.map((p) => p.symbol);
+
+  it("a tradable regime_gate unlocks the real card to full OTC interactivity", () => {
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const b = realForexCardBehavior(sym, "tradable");
+      expect(b.interactive).toBe(true);
+      expect(b.scoredOnly).toBe(false);
+      expect(b.ariaLabel).toBe(`Open Pro Terminal for ${sym}`);
+      expect(b.nonInteractiveTitle).toBe("");
+      expect(b.scoredOnlyCaption).toBe("");
+      expect(b.dataKind).toBe("live");
+    }
+  });
+
+  it("a random_walk real pair (regime_gate 'scored_only') stays honestly locked", () => {
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const d = resolveRealForexRegimeDisplay(sym, "scored_only");
+      const b = realForexCardBehavior(sym, "scored_only");
+      expect(d.scoredOnly).toBe(true);
+      expect(d.reason).toBe("regime_scored_only");
+      expect(b.interactive).toBe(false);
+      expect(b.ariaLabel).toContain("scored-only");
+      expect(b.ariaLabel).not.toContain("Open Pro Terminal");
+    }
+  });
+
+  it("no intraday verdict (null gate) renders 'regime review pending', never guessed", () => {
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const d = resolveRealForexRegimeDisplay(sym, undefined);
+      expect(d.scoredOnly).toBe(true);
+      expect(d.reason).toBe("regime_pending_confirmation");
+      expect(d.scoredOnlyCaption).toBe(
+        REAL_FOREX_NONINTERACTIVE_COPY.regime_pending_confirmation,
+      );
+    }
+  });
+
+  it("STRICT 96.5% BAR: regime_gate 'pending_high_precision' (sub-96.5% executable=false) gets its own scored-only reason + copy", () => {
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const d = resolveRealForexRegimeDisplay(sym, "pending_high_precision");
+      const b = realForexCardBehavior(sym, "pending_high_precision");
+      expect(d.scoredOnly).toBe(true);
+      expect(d.reason).toBe("regime_pending_high_precision");
+      expect(d.scoredOnlyCaption).toBe(
+        REAL_FOREX_NONINTERACTIVE_COPY.regime_pending_high_precision,
+      );
+      expect(b.interactive).toBe(false);
+      expect(b.ariaLabel).toContain("scored-only");
+      expect(b.ariaLabel).toContain("high-precision gate");
+      expect(b.ariaLabel).not.toContain("Open Pro Terminal");
+    }
+  });
+
+  it("the 2 intraday-cleared real pairs (EUR/CZK, EUR/DKK) resolve interactive; the 8 random_walk real pairs stay scored-only", () => {
+    const cleared = new Set(["EUR/CZK", "EUR/DKK"]);
+    for (const sym of ALL_REAL_SYMBOLS) {
+      const b = realForexCardBehavior(sym, cleared.has(sym) ? "tradable" : "scored_only");
+      expect(b.interactive).toBe(cleared.has(sym));
+      expect(b.scoredOnly).toBe(!cleared.has(sym));
+    }
   });
 });

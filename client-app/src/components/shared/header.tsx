@@ -106,7 +106,7 @@ export const Header: React.FC = () => {
   };
   return (
     <>
-      <nav className="border-b border-[var(--tp-border)] bg-header-sheen backdrop-blur-xl sticky top-0 z-40 transition-colors duration-150">
+      <nav className="shrink-0 border-b border-[var(--tp-border)] bg-header-sheen backdrop-blur-xl sticky top-0 z-40 transition-colors duration-150">
         <div className="max-w-full mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-3">
           {/* Left: Hamburger (mobile/tablet) + Branding */}
           <div className="flex items-center gap-2.5 shrink-0">

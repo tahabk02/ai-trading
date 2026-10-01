@@ -188,30 +188,30 @@ export default function SettingsPage() {
                 <h1 className="text-2xl sm:text-3xl font-black tracking-wider uppercase">
                   <span className="text-emerald-500">{t("systemSettings")}</span>
                 </h1>
-                <p className="text-slate-600 dark:text-slate-400 mt-1 text-xs sm:text-sm max-w-2xl">
+                <p className="text-slate-400 mt-1 text-xs sm:text-sm max-w-2xl">
                   {t("settingsSubtitle")}
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/80 px-4 py-2.5 shadow-sm">
+              <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-2.5 shadow-sm">
                 <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.75)]" />
-                <span className="text-xs text-slate-700 dark:text-slate-300 font-bold tracking-wider uppercase">
+                <span className="text-xs text-slate-300 font-bold tracking-wider uppercase">
                   {t("backendSyncOnline")}
                 </span>
               </div>
             </header>
 
             {/* Appearance & Language Section */}
-            <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/80 p-6 shadow-sm">
+            <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-6 shadow-sm">
               <div className="flex items-center gap-3 mb-5">
                 <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-blue-500/15 text-blue-600 dark:text-blue-400">
                   <Languages className="w-5 h-5" />
                 </span>
                 <div>
-                  <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+                  <h2 className="text-base sm:text-lg font-bold text-slate-200 uppercase tracking-wider">
                     {t("appearanceAndLanguage")}
                   </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
+                  <p className="text-xs text-slate-400 mt-0.5">
                     {t("appearanceDesc")}
                   </p>
                 </div>
@@ -219,7 +219,7 @@ export default function SettingsPage() {
 
               {/* Theme selector */}
               <div className="mb-5">
-                <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                   {t("theme")}
                 </label>
                 <div className="grid grid-cols-3 gap-2 sm:gap-3">
@@ -234,7 +234,7 @@ export default function SettingsPage() {
                         "flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold uppercase tracking-wider transition-all border active:scale-[0.98]",
                         theme === opt.mode
                           ? "bg-blue-600 text-white border-blue-600 shadow-sm"
-                          : "bg-slate-50 dark:bg-slate-950/60 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800",
+                          : "bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800",
                       )}
                     >
                       {opt.icon}
@@ -246,7 +246,7 @@ export default function SettingsPage() {
 
               {/* Language selector */}
               <div>
-                <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                   {t("language")}
                 </label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
@@ -260,7 +260,7 @@ export default function SettingsPage() {
                         "rounded-xl px-4 py-3 text-sm font-bold uppercase tracking-wider transition-all border active:scale-[0.98]",
                         lang === opt.code
                           ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
-                          : "bg-slate-50 dark:bg-slate-950/60 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800",
+                          : "bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800",
                       )}
                     >
                       {opt.label}
@@ -277,10 +277,10 @@ export default function SettingsPage() {
                 {[1, 2, 3, 4, 5, 6].map((i) => (
                   <div
                     key={i}
-                    className="bg-white dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 p-6 animate-pulse"
+                    className="bg-slate-900/80 rounded-xl border border-slate-800 p-6 animate-pulse"
                   >
-                    <div className="h-5 w-1/3 bg-slate-200 dark:bg-slate-700 rounded mb-4" />
-                    <div className="h-10 bg-slate-100 dark:bg-slate-800 rounded" />
+                    <div className="h-5 w-1/3 bg-slate-700 rounded mb-4" />
+                    <div className="h-10 bg-slate-800 rounded" />
                   </div>
                 ))}
               </div>
@@ -289,13 +289,13 @@ export default function SettingsPage() {
               {settings && (
                 <>
               <section className="lg:col-span-2 space-y-6">
-                <div className="bg-white dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-                  <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
-                    <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+                <div className="bg-slate-900/80 rounded-xl border border-slate-800 shadow-sm overflow-hidden">
+                  <div className="px-6 py-5 border-b border-slate-800 flex items-center justify-between gap-3">
+                    <h2 className="text-base sm:text-lg font-bold text-slate-200 uppercase tracking-wider">
                       {t("radarConfiguration")}
                     </h2>
-                    <div className="text-xs text-slate-500 font-mono">
-                      <span className="text-slate-600 dark:text-slate-400 font-bold">{t("guardrails")}</span> · {t("persistedToDatabase")}
+                    <div className="text-xs text-slate-400 font-mono">
+                      <span className="text-slate-400 font-bold">{t("guardrails")}</span> · {t("persistedToDatabase")}
                     </div>
                   </div>
 
@@ -317,8 +317,8 @@ export default function SettingsPage() {
                     <div className="space-y-5">
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {/* Confidence Guardrail */}
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
-                          <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold">
+                        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                          <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold">
                             {t("confidenceGuardrail")}
                           </label>
                           <div className="mt-2">
@@ -330,7 +330,7 @@ export default function SettingsPage() {
                                   confidenceGuardrail: parseFloat(e.target.value),
                                 }))
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-bold focus:outline-none focus:border-emerald-500 cursor-pointer shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-bold focus:outline-none focus:border-emerald-500 cursor-pointer shadow-sm"
                             >
                               <option value="0.90">{t("veryStrict")}</option>
                               <option value="0.80">{t("strictFilter")}</option>
@@ -339,14 +339,14 @@ export default function SettingsPage() {
                               <option value="0.50">{t("relaxed")}</option>
                             </select>
                           </div>
-                          <p className="mt-2 text-xs text-slate-500">
+                          <p className="mt-2 text-xs text-slate-400">
                             {t("minConfidenceHint")}
                           </p>
                         </div>
 
                         {/* Timeframe */}
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
-                          <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold">
+                        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                          <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold">
                             {t("timeframeExecution")}
                           </label>
                           <div className="mt-2">
@@ -358,7 +358,7 @@ export default function SettingsPage() {
                                   timeframe: e.target.value,
                                 }))
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-bold focus:outline-none focus:border-emerald-500 cursor-pointer shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-bold focus:outline-none focus:border-emerald-500 cursor-pointer shadow-sm"
                             >
                               {tfOptions.map((opt) => (
                                 <option key={opt.value} value={opt.value}>
@@ -367,24 +367,24 @@ export default function SettingsPage() {
                               ))}
                             </select>
                           </div>
-                          <p className="mt-2 text-xs text-slate-500">
+                          <p className="mt-2 text-xs text-slate-400">
                             {t("defaultAnalysisHint")}
                           </p>
                         </div>
                       </div>
 
                       {/* API Bounds */}
-                      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
-                        <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                        <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold">
                           {t("apiBounds")}
                         </label>
                         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div>
                             <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm text-slate-700 dark:text-slate-300 font-bold">
+                              <span className="text-sm text-slate-300 font-bold">
                                 {t("maxRequests")}
                               </span>
-                              <span className="text-xs text-slate-500 font-mono">
+                              <span className="text-xs text-slate-400 font-mono">
                                 {t("perMinute")}
                               </span>
                             </div>
@@ -399,15 +399,15 @@ export default function SettingsPage() {
                                   maxRequestsPerMin: parseInt(e.target.value) || 120,
                                 }))
                               }
-                              className="mt-2 w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:border-emerald-500 shadow-sm"
+                              className="mt-2 w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono focus:outline-none focus:border-emerald-500 shadow-sm"
                             />
                           </div>
                           <div>
                             <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm text-slate-700 dark:text-slate-300 font-bold">
+                              <span className="text-sm text-slate-300 font-bold">
                                 {t("responseSla")}
                               </span>
-                              <span className="text-xs text-slate-500 font-mono">
+                              <span className="text-xs text-slate-400 font-mono">
                                 {t("targetMs")}
                               </span>
                             </div>
@@ -423,19 +423,19 @@ export default function SettingsPage() {
                                   responseSlaMs: parseInt(e.target.value) || 800,
                                 }))
                               }
-                              className="mt-2 w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:border-emerald-500 shadow-sm"
+                              className="mt-2 w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono focus:outline-none focus:border-emerald-500 shadow-sm"
                             />
                           </div>
                         </div>
 
-                        <div className="mt-4 rounded-xl bg-white dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 p-4">
+                        <div className="mt-4 rounded-xl bg-slate-950/60 border border-slate-800 p-4">
                           <div className="flex items-start gap-3">
                             <div className="mt-1 h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] shrink-0" />
                             <div>
-                              <p className="text-sm text-slate-900 dark:text-slate-200 font-bold">
+                              <p className="text-sm text-slate-200 font-bold">
                                 {t("securityPosture")}
                               </p>
-                              <p className="text-xs text-slate-500 mt-1">
+                              <p className="text-xs text-slate-400 mt-1">
                                 {t("securityHint")}
                               </p>
                             </div>
@@ -444,13 +444,13 @@ export default function SettingsPage() {
                       </div>
 
                       {/* Broker & API Section */}
-                      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
-                        <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 uppercase tracking-wider mb-3">
+                      <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                        <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider mb-3">
                           {t("brokerAndApi")}
                         </h3>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div className="sm:col-span-2">
-                            <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                            <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                               {t("binanceApiKey")}
                             </label>
                             <input
@@ -460,14 +460,14 @@ export default function SettingsPage() {
                               onChange={(e) =>
                                 saveBroker({ ...broker, binanceApiKey: e.target.value })
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
                             />
-                            <p className="mt-1 text-[10px] text-slate-500 font-mono">
+                            <p className="mt-1 text-[10px] text-slate-400 font-mono">
                               {t("storedLocallyHint")}
                             </p>
                           </div>
                           <div className="sm:col-span-2">
-                            <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                            <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                               {t("binanceApiSecret")}
                             </label>
                             <input
@@ -480,11 +480,11 @@ export default function SettingsPage() {
                                   binanceApiSecret: e.target.value,
                                 })
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
                             />
                           </div>
                           <div>
-                            <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                            <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                               {t("alpacaApiKey")}
                             </label>
                             <input
@@ -494,11 +494,11 @@ export default function SettingsPage() {
                               onChange={(e) =>
                                 saveBroker({ ...broker, alpacaApiKey: e.target.value })
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
                             />
                           </div>
                           <div>
-                            <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                            <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                               {t("alpacaApiSecret")}
                             </label>
                             <input
@@ -511,17 +511,17 @@ export default function SettingsPage() {
                                   alpacaApiSecret: e.target.value,
                                 })
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
                             />
                           </div>
 
                           {/* Slippage Tolerance */}
                           <div className="sm:col-span-2">
                             <label className="flex items-center justify-between">
-                              <span className="block text-xs uppercase tracking-wider text-slate-500 font-bold">
+                              <span className="block text-xs uppercase tracking-wider text-slate-400 font-bold">
                                 {t("slippageTolerance")}
                               </span>
-                              <span className="text-xs font-mono font-bold text-slate-700 dark:text-slate-300">
+                              <span className="text-xs font-mono font-bold text-slate-300">
                                 {broker.slippageTolerance.toFixed(2)}%
                               </span>
                             </label>
@@ -539,14 +539,14 @@ export default function SettingsPage() {
                               }
                               className="w-full mt-2 cursor-pointer accent-blue-500"
                             />
-                            <p className="mt-1 text-[10px] text-slate-500">
+                            <p className="mt-1 text-[10px] text-slate-400">
                               {t("slippageHint")}
                             </p>
                           </div>
 
                           {/* Risk Mode */}
                           <div className="sm:col-span-2">
-                            <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                            <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                               {t("riskMode")}
                             </label>
                             <div className="flex flex-wrap gap-2">
@@ -561,7 +561,7 @@ export default function SettingsPage() {
                                     "px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider border transition-all active:scale-[0.98]",
                                     broker.riskMode === rm.value
                                       ? "bg-blue-600 text-white border-blue-600 shadow-sm"
-                                      : "bg-white dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800",
+                                      : "bg-slate-900/50 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800",
                                   )}
                                 >
                                   {rm.label}
@@ -572,7 +572,7 @@ export default function SettingsPage() {
 
                           {/* WebSocket Endpoint Override */}
                           <div className="sm:col-span-2">
-                            <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                            <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                               {t("wsEndpointOverride")}
                             </label>
                             <input
@@ -585,9 +585,9 @@ export default function SettingsPage() {
                                   wsEndpointOverride: e.target.value,
                                 })
                               }
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-slate-900 dark:text-slate-100 text-sm font-mono placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-slate-100 text-sm font-mono placeholder:text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm"
                             />
-                            <p className="mt-1 text-[10px] text-slate-500 font-mono">
+                            <p className="mt-1 text-[10px] text-slate-400 font-mono">
                               {t("wsEndpointHint")}
                             </p>
                           </div>
@@ -618,7 +618,7 @@ export default function SettingsPage() {
                           type="button"
                           onClick={handleReset}
                           disabled={isSaving}
-                          className="inline-flex items-center gap-2 rounded-xl px-5 py-3 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-bold uppercase tracking-wider transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                          className="inline-flex items-center gap-2 rounded-xl px-5 py-3 border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 text-sm font-bold uppercase tracking-wider transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
                         >
                           {t("resetToDefaults")}
                         </button>
@@ -630,86 +630,86 @@ export default function SettingsPage() {
 
               {/* Execution Console */}
               <aside>
-                <div className="bg-white dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
-                  <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
-                    <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+                <div className="bg-slate-900/80 rounded-xl border border-slate-800 shadow-sm overflow-hidden">
+                  <div className="px-6 py-5 border-b border-slate-800">
+                    <h2 className="text-base sm:text-lg font-bold text-slate-200 uppercase tracking-wider">
                       {t("executionConsole")}
                     </h2>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-400 mt-1">
                       {t("liveStatusHint")}
                     </p>
                   </div>
 
                   <div className="p-6 space-y-4">
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 px-4 py-3">
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
                           <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]" />
-                          <span className="text-xs uppercase tracking-wider text-slate-500 font-bold">
+                          <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">
                             {t("lastApplied")}
                           </span>
                         </div>
-                        <span className="text-sm font-bold text-slate-900 dark:text-slate-200">
+                        <span className="text-sm font-bold text-slate-200">
                           {successMsg ? t("justNow") : t("persisted")}
                         </span>
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 px-4 py-3">
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
                           <span className="h-2.5 w-2.5 rounded-full bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.5)]" />
-                          <span className="text-xs uppercase tracking-wider text-slate-500 font-bold">
+                          <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">
                             {t("confidenceMode")}
                           </span>
                         </div>
-                        <span className="text-sm font-bold font-mono text-slate-900 dark:text-slate-200">
+                        <span className="text-sm font-bold font-mono text-slate-200">
                           {(settings.confidenceGuardrail * 100).toFixed(0)}%
                         </span>
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 px-4 py-3">
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
                           <span className="h-2.5 w-2.5 rounded-full bg-violet-500 shadow-[0_0_10px_rgba(139,92,246,0.5)]" />
-                          <span className="text-xs uppercase tracking-wider text-slate-500 font-bold">
+                          <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">
                             {t("timeWindow")}
                           </span>
                         </div>
-                        <span className="text-sm font-bold font-mono text-slate-900 dark:text-slate-200">
+                        <span className="text-sm font-bold font-mono text-slate-200">
                           {settings.timeframe.toUpperCase()}
                         </span>
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 px-4 py-3">
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
                           <span className="h-2.5 w-2.5 rounded-full bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]" />
-                          <span className="text-xs uppercase tracking-wider text-slate-500 font-bold">
+                          <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">
                             {t("apiRate")}
                           </span>
                         </div>
-                        <span className="text-sm font-bold font-mono text-slate-900 dark:text-slate-200">
+                        <span className="text-sm font-bold font-mono text-slate-200">
                           {settings.maxRequestsPerMin}/min
                         </span>
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-xs uppercase tracking-wider text-slate-500 font-bold">
+                        <span className="text-xs uppercase tracking-wider text-slate-400 font-bold">
                           {t("systemHealth")}
                         </span>
                         <span className="text-xs text-emerald-600 dark:text-emerald-400 font-bold">
                           {t("nominal")}
                         </span>
                       </div>
-                      <div className="mt-3 h-2 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                      <div className="mt-3 h-2 w-full rounded-full bg-slate-800 overflow-hidden">
                         <div className="h-full w-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-500" />
                       </div>
-                      <p className="mt-2 text-xs text-slate-500">
+                      <p className="mt-2 text-xs text-slate-400">
                         {t("noDegradation")}
                       </p>
                     </div>

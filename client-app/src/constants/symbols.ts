@@ -686,6 +686,21 @@ function toSymbolSearchResult(p: SymbolDefinition): SymbolSearchResult {
 // ── BACK-COMPAT: old exported names are now ALIASES to the whitelist ──
 // These were previously 80-asset arrays. They are now hard-bound to the
 // OTC whitelist so any legacy import cannot reintroduce stock/crypto.
+/**
+ * The FULL terminal universe: every OTC pair, the real wholesale forex pairs
+ * (which `OTC_FOREX_PAIRS` deliberately spreads) and crypto. Deduped and
+ * canonical. Defined HERE rather than in the store so that pure filter logic
+ * (`lib/assetFilter`) can import the universe without pulling in the Zustand
+ * store — the store imports the filter module, so the reverse edge would be a
+ * circular import that leaves `ALL_MARKET_SYMBOLS` undefined at module init.
+ */
+export const ALL_MARKET_SYMBOLS: string[] = Array.from(
+  new Set([
+    ...OTC_FOREX_PAIRS.map((p) => p.symbol),
+    ...REAL_FOREX_PAIRS.map((p) => p.symbol),
+  ]),
+);
+
 export const ALL_SYMBOLS: SymbolDefinition[] = OTC_FOREX_PAIRS;
 export const US_STOCKS: SymbolDefinition[] = [];
 export const CRYPTO_PAIRS: SymbolDefinition[] = [];

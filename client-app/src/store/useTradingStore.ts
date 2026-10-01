@@ -23,6 +23,14 @@ import {
 import tradingAccuracyVerifier, {
   ERROR_RATE_LIMIT,
 } from "@/lib/accuracyVerifier";
+import { clampMinConfidencePct } from "@/lib/minConfidenceFilter";
+import { clampTierSelection } from "@/lib/tierFilter";
+import {
+  resolveExecutionFloor,
+  type TierSelection,
+} from "@/lib/signalTiers";
+import { ExpirySignalLock } from "@/lib/signalLock";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 
 // ── localStorage key ──
 const LS_TIMEFRAME_KEY = "selected_timeframe";
@@ -89,6 +97,22 @@ export function horizonBackendTf(minutes?: number | null): string {
   );
 }
 
+/**
+ * Expiry-button seconds (60/120/180/300/600) → AI horizon minutes (1/2/3/5/10).
+ *
+ * The Pro Terminal expiry bar and the AI prediction horizon are TWO different
+ * store fields that were being set independently, so choosing 3m on the Pro bar
+ * re-drew the chart's target-candle count while the /predict engine kept
+ * evaluating the PREVIOUS horizon — the TGT/ANC on screen belonged to a
+ * different horizon than the button the operator had selected. This is the one
+ * mapping that lets a single button click drive both.
+ */
+export function expirySecondsToHorizonMinutes(seconds?: number | null): number {
+  const secs = Number(seconds);
+  if (!Number.isFinite(secs) || secs <= 0) return resolveHorizonMinutes(null);
+  return resolveHorizonMinutes(Math.round(secs / 60));
+}
+
 // ── SERVER-AUTHORITATIVE CLOSED CANDLE CONTRACT ──
 // The backend's realtime candle aggregator pushes closed candles over the
 // WebSocket `candle` event and replays accumulated history via
@@ -104,6 +128,8 @@ export interface ServerSettledCandle {
   close: number;
   volume?: number;
   closed?: boolean;
+  /** Set by the backend on every sealed bucket — marks the bar as immutable. */
+  isFinal?: boolean;
 }
 
 // ── LIVE-SIGNAL ID UNIQUENESS (React key-collision fix) ──
@@ -167,6 +193,10 @@ export function stopRiskPolling(): void {
 const PREDICT_MIN_INTERVAL_MS = 5000;
 const predictionInFlight = new Map<string, Promise<void>>();
 const lastPredictionStartedAt = new Map<string, number>();
+// Expiry-scoped committed verdict — module-scoped so it survives re-renders but
+// is independent of any single symbol/horizon (it carries its own identity and
+// self-invalidates on drift). See lib/signalLock.ts.
+const signalLock = new ExpirySignalLock();
 
 // ── AUTO-RECOVERY / RE-POLL ON 503 · LIVE-QUOTE TIMEOUT ──
 // A 503 Service Unavailable or an axios ECONNABORTED (>15s live-quote timeout)
@@ -232,10 +262,17 @@ function predictionKey(
   symbol: string,
   timeframe: string,
   horizonMinutes?: number,
+  minConfidence?: number,
+  minTier?: TierSelection,
 ): string {
+  // The tier selection is part of the identity for the same reason the
+  // confidence bar is: a T4 request must never be served a verdict evaluated
+  // under the T1 default floor from the in-flight coalescing cache.
   return `${(symbol || "").trim().toUpperCase()}|${(timeframe || "")
     .trim()
-    .toLowerCase()}|h${resolveHorizonMinutes(horizonMinutes)}`;
+    .toLowerCase()}|h${resolveHorizonMinutes(horizonMinutes)}|mc${
+    clampMinConfidencePct(minConfidence)
+  }|mt${clampTierSelection(minTier)}`;
 }
 
 /**
@@ -703,13 +740,55 @@ const shouldBootAggregator = (): boolean => {
  *  ~200ms — cutting ~100× worth of full-array merges per tick burst. */
 const REALTIME_PUBLISH_INTERVAL_MS = 200;
 
+// ═══ SINGLE SOURCE OF TRUTH FOR PRICE FRESHNESS ═════════════════════════════
+// The LOCAL packet-arrival clock, in ms.
+//
+// Deliberately a MODULE-LEVEL holder rather than store state, because:
+//
+//   1. Writing it costs no render and no subscription — it is a plain number,
+//      so it can be called from the tick path without violating the zero-hop
+//      invariant.
+//   2. The feed-health sampler and the `stale` boolean in useWebSocket read the
+//      SAME value, so the badge can never disagree with the boolean.
+//
+// THE BUG THIS REPLACES: the health bar derived its age from the store's
+// `lastPriceUpdate` ISO string via `Date.parse`. That string is stamped by
+// history/replay bursts and /predict priming — a DIFFERENT clock from packet
+// arrival. Two clocks meant the boolean `stale` and the badge's derived
+// `freshness` could disagree, and a disagreement in the 2-10s band rendered as
+// a persistent "NO TICK" on a feed that was demonstrably live.
+let lastPriceReceiveAtMs = 0;
+
+/** Local receive clock of the newest genuine price packet (ms), or 0. */
+export const getLastPriceReceiveAtMs = (): number => lastPriceReceiveAtMs;
+
+/** Reset on symbol switch / hard reset so a stale clock can't linger. */
+export const resetLastPriceReceiveAt = (): void => {
+  lastPriceReceiveAtMs = 0;
+};
+
+/**
+ * Stamp the local packet-arrival clock.
+ *
+ * Named `mark…` rather than `set…` so the intent is unambiguous at the call
+ * site: a packet ARRIVED NOW. It takes no `set` and writes no state — which is
+ * exactly what guarantees it can never cause a React render, per-tick or
+ * otherwise. Monotonic by construction: a clock that went backwards (a
+ * duplicated late packet) would make the age jump and re-trigger the badge.
+ */
+export const markPriceReceive = (nowMs: number): void => {
+  if (Number.isFinite(nowMs) && nowMs > lastPriceReceiveAtMs) {
+    lastPriceReceiveAtMs = nowMs;
+  }
+};
+
 export const useTradingStore = create<TradingState>((set, get) => {
   // ── LIVE TICK RENDER COALESCER ──
   // Tracks, per symbol, the last live-candle signature we wrote into
   // `realtimeCandles`. Only forces a React re-render when the candle OBSERVABLY
   // changes (new bucket, updated OHLC) AND the throttle window has elapsed.
-  const liveSignatures = new Map<string, string>();
-  const lastRealtimePublish = new Map<string, number>();
+const liveSignatures = new Map<string, string>();
+const lastRealtimePublish = new Map<string, number>();
   const lastPublishedBucket = new Map<string, number>();
 
   const syncStoreCandle = (candle: Candle, symbol: string) => {
@@ -1003,6 +1082,9 @@ export const useTradingStore = create<TradingState>((set, get) => {
         quoteStreamWaiting: false,
         _priceVersion: state._priceVersion + 1,
       }));
+      // A committed verdict belongs to the pair it was graded for — never carry
+      // it onto a new symbol.
+      signalLock.reset();
 
       // ── RE-AIM THE SELF-DRIVING PROJECTOR ──
       // The aggregator's leading-projection loop now drives the newly selected
@@ -1126,6 +1208,10 @@ export const useTradingStore = create<TradingState>((set, get) => {
       const hz = resolveHorizonMinutes(minutes);
       if (hz === get().selectedHorizonMinutes) return;
 
+      // A verdict committed for the previous horizon must not survive the
+      // switch — the new horizon needs its own evaluation, not a relabelled one.
+      signalLock.reset();
+
       // Switching horizons supersedes any queued recovery retry for the
       // previous (symbol, timeframe, horizon) combination.
       clearPredictionRetry(
@@ -1183,7 +1269,17 @@ export const useTradingStore = create<TradingState>((set, get) => {
       const hz = resolveHorizonMinutes(
         horizonMinutes ?? get().selectedHorizonMinutes,
       );
-      const key = predictionKey(symbol, aiTf, hz);
+      // Confidence Filter rides single-symbol /predict too (mirrors the market
+      // grid): the operator's bar is sent to the engine, and it keys identity
+      // so switching the filter is a distinct evaluation (never a cache hit).
+      const minConfidence = clampMinConfidencePct(
+        useMarketTerminalStore.getState().minConfidencePct,
+      );
+      // The tier selector rides single-symbol /predict for the same reason.
+      const minTier = clampTierSelection(
+        useMarketTerminalStore.getState().minTier,
+      );
+      const key = predictionKey(symbol, aiTf, hz, minConfidence, minTier);
 
       // ── REQUEST COALESCING (kills the /predict storm) ──
       // 1) Identity dedup: at most ONE network fetch per (symbol, timeframe).
@@ -1226,7 +1322,14 @@ export const useTradingStore = create<TradingState>((set, get) => {
 
       const run: Promise<void> = (async () => {
         try {
-          const data = await apiClient.getPrediction(symbol, aiTf, signal, hz);
+          const data = await apiClient.getPrediction(
+            symbol,
+            aiTf,
+            signal,
+            hz,
+            minConfidence,
+            minTier,
+          );
 
           if (get()._lastRequestId !== requestId) return;
 
@@ -1331,11 +1434,46 @@ export const useTradingStore = create<TradingState>((set, get) => {
             },
           } satisfies PredictionResponse;
 
+          // ── EXPIRY-SCOPED SIGNAL LOCK — /predict MUST NOT BREAK IT ──
+          // `applyLiveSignal` reads the committed verdict back out of the lock
+          // so a per-tick dispatch cannot repaint the contract the operator is
+          // acting on. The HTTP /predict path used to write `predictionData`
+          // outright and never consulted the lock at all, so a request that was
+          // IN FLIGHT when the lock committed resolved afterwards and silently
+          // overwrote the locked direction/target/confidence — the operator
+          // would click BUY on a SELL contract (or a stale TGT) that the panel
+          // had already committed to. `requestId` only orders /predict against
+          // /predict; it cannot order an HTTP response against a WS commit.
+          //
+          // Treat this response exactly like a dispatch: while the lock is held
+          // for (symbol, horizon, expiry) it may refresh the NON-verdict
+          // diagnostics (waiting banner, verification, indicators) but the
+          // committed entry contract is read back from the lock.
+          const heldLock = signalLock.current(
+            {
+              symbol: normSymbol,
+              horizonMinutes: get().selectedHorizonMinutes,
+              expirationSeconds: get().selectedExpirationSeconds,
+            },
+            Date.now(),
+          );
+          const committedPrediction: PredictionResponse = heldLock
+            ? {
+                ...normalizedPrediction,
+                signal: heldLock.direction,
+                confidence: heldLock.confidence,
+                target_price:
+                  heldLock.targetPrice > 0
+                    ? heldLock.targetPrice
+                    : normalizedPrediction.target_price,
+              }
+            : normalizedPrediction;
+
           set((state) => ({
-            predictionData: normalizedPrediction,
+            predictionData: committedPrediction,
             predictionBySymbol: {
               ...state.predictionBySymbol,
-              [normSymbol]: normalizedPrediction,
+              [normSymbol]: committedPrediction,
             },
             candlesCache: {
               ...state.candlesCache,
@@ -1556,15 +1694,22 @@ export const useTradingStore = create<TradingState>((set, get) => {
       }
 
       // ════════════════════════════════════════════════════════════════════
-      // ⛔ STRICT ENGINE-DISPATCH CONFIDENCE GATE (defense-in-depth at the
-      // client boundary). The backend authoritatively refuses BUY/SELL below
-      // the strict 96.5% floor. This guard mirrors it so an ENGINE-VERIFIED
-      // directional signal that somehow carries a sub-96.5% score can never be
-      // dispatched — even if a restored snapshot or WS race delivered it.
+      // TIER-FLOOR ENGINE-DISPATCH GATE (defense-in-depth at the client
+      // boundary). The engine is the authority: it already marks a verdict
+      // `executable=false` when the confidence is below the floor the
+      // operator selected. This guard mirrors that SAME operator-chosen
+      // floor rather than a hardcoded 96.5%, so selecting T2/T3/T4 actually
+      // lets those bands trade — which is the whole point of the
+      // flexible-tier architecture. It still protects against an
+      // ENGINE-VERIFIED directional signal that somehow carries a
+      // below-floor score (restored snapshot, WS race, stale payload).
       // Manual button clicks WITHOUT a matching directional engine signal
       // (predictionData null) stay free — user override, not engine.
       // ════════════════════════════════════════════════════════════════════
-      const STRICT_TRADE_CONFIDENCE_MIN = 96.5;
+      const { barFrac: tradeFloorFrac } = resolveExecutionFloor(
+        useMarketTerminalStore.getState().minTier,
+      );
+      const STRICT_TRADE_CONFIDENCE_MIN = tradeFloorFrac * 100;
       const engineDirection = direction === "CALL" ? "BUY" : "SELL";
       const engineBacked =
         predictionData?.signal === engineDirection &&
@@ -1594,8 +1739,9 @@ export const useTradingStore = create<TradingState>((set, get) => {
         engineBacked &&
         (predictionData?.confidence ?? 0) < STRICT_TRADE_CONFIDENCE_MIN
       ) {
+        const floorTier = useMarketTerminalStore.getState().minTier;
         set({
-          lastTradeResult: `⛔ Engine signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below the strict 96.5% dispatch floor. Signal execution refused.`,
+          lastTradeResult: `⛔ Engine signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below your ${floorTier} trade floor (${STRICT_TRADE_CONFIDENCE_MIN.toFixed(1)}%). Select a lower tier to trade this band.`,
         });
         return;
       }
@@ -1875,6 +2021,46 @@ export const useTradingStore = create<TradingState>((set, get) => {
       // back to this pair instantly restores the freshest WS evaluation.
       const snapshotKey = shouldApply ? normActive : "";
 
+      // ── EXPIRY-SCOPED SIGNAL LOCK (Pro Terminal TGT/ANC stability) ──
+      // The direction + target the operator acts on must be the one evaluated
+      // for the horizon they selected. `applyLiveSignal` is a per-tick WS
+      // writer, so without this lock the committed verdict was overwritten on
+      // every dispatch — the flickering TGT/ANC. The lock freezes the VERDICT
+      // (direction/target/confidence) for the selected expiry while the live
+      // price keeps ticking underneath. It is bound to (symbol, horizon,
+      // expiry), so switching any of them forces a genuinely fresh evaluation
+      // instead of inheriting a foreign horizon's contract.
+      const lockIdentity = {
+        symbol: wsSymbol || normActive,
+        horizonMinutes: get().selectedHorizonMinutes,
+        expirationSeconds: get().selectedExpirationSeconds,
+      };
+      const lockNowMs = Date.now();
+      // Only the ACTIVE symbol's dispatch may hold the entry lock. A background
+      // symbol's tick used to commit under its own identity, and since the lock
+      // is a single slot, that evicted the pair the operator is actually trading
+      // — the next active tick then found no matching lock and re-committed,
+      // repainting the verdict on every background tick. That is precisely the
+      // flicker this lock exists to remove. The lock is reset on symbol/horizon
+      // change, so gating on `shouldApply` loses no legitimate state.
+      const lockApplies = shouldApply;
+      const heldLock =
+        direction === null || !lockApplies
+          ? null
+          : signalLock.current(lockIdentity, lockNowMs);
+      if (direction !== null && hasPrice && lockApplies) {
+        signalLock.commit(
+          lockIdentity,
+          {
+            direction,
+            price,
+            targetPrice: Number.isFinite(target) && target > 0 ? target : 0,
+            confidence: conf100,
+          },
+          lockNowMs,
+        );
+      }
+
       set((s) => {
         // Waiting-only rider: no direction is fabricated — keep the last real
         // directional verdict and only flip the market-waiting banner.
@@ -1903,27 +2089,41 @@ export const useTradingStore = create<TradingState>((set, get) => {
 
         let mergedPrediction = s.predictionData;
         if (shouldApply) {
+          // While the expiry lock is held, the incoming dispatch updates ONLY
+          // the live price. The committed verdict (direction / target /
+          // confidence) is read back from the lock, so a mid-expiry flip can
+          // never repaint the contract the operator is acting on.
+          const verdict = heldLock
+            ? {
+                direction: heldLock.direction,
+                confidence: heldLock.confidence,
+                target: heldLock.targetPrice,
+              }
+            : {
+                direction,
+                confidence: conf100,
+                target: Number.isFinite(target) && target > 0 ? target : 0,
+              };
           mergedPrediction = s.predictionData
             ? {
                 ...s.predictionData,
-                signal: direction,
-                confidence: conf100,
+                signal: verdict.direction,
+                confidence: verdict.confidence,
                 current_price: hasPrice
                   ? price
                   : s.predictionData.current_price,
                 target_price:
-                  Number.isFinite(target) && target > 0
-                    ? target
+                  verdict.target > 0
+                    ? verdict.target
                     : s.predictionData.target_price,
                 timestamp: ts,
               }
             : {
                 symbol: wsSymbol || normActive || "",
-                signal: direction,
-                confidence: conf100,
+                signal: verdict.direction,
+                confidence: verdict.confidence,
                 current_price: hasPrice ? price : 0,
-                target_price:
-                  Number.isFinite(target) && target > 0 ? target : 0,
+                target_price: verdict.target,
                 rf_probability: null,
                 rf_holdout_accuracy: null,
                 corroborator_unavailable: true,
@@ -2122,6 +2322,10 @@ export const useTradingStore = create<TradingState>((set, get) => {
       liveSignatures.clear();
       lastRealtimePublish.clear();
       lastPublishedBucket.clear();
+      // The receive clock belongs to the old session's ticks; leaving it set
+      // would let the health bar report a "fresh" feed for up to 10s after a
+      // hard reset, before the new symbol's first packet lands.
+      resetLastPriceReceiveAt();
       const norm = (get().activeSymbol || DEFAULT_SYMBOL).trim().toUpperCase();
       try {
         if (norm) {
@@ -2296,6 +2500,10 @@ export const useTradingStore = create<TradingState>((set, get) => {
           Number.isFinite(payload.volume) && (payload.volume as number) > 0
             ? (payload.volume as number)
             : 0,
+        // PRESERVE SETTLED PROVENANCE — dropping this flag made the chart's
+        // server-wins precedence rule unreachable, so client rows repainted
+        // sealed bars (broken/duplicated candles).
+        isFinal: payload.isFinal === true,
       };
       set((s) => {
         const bySym = s.serverCandles[symbol] ?? {};
@@ -2364,6 +2572,8 @@ export const useTradingStore = create<TradingState>((set, get) => {
             Number.isFinite(r.volume) && (r.volume as number) > 0
               ? (r.volume as number)
               : 0,
+          // Replayed history is server-sealed by definition.
+          isFinal: true,
         });
       }
       if (mapped.length === 0) return;

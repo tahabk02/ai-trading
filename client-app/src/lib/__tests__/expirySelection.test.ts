@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   MIN_ACTIONABLE_WINDOW_MS,
+  expiryCountdownRemainingSeconds,
   expirySelectionState,
   expirySelectorState,
   remainingToBucketCloseMs,
@@ -16,14 +17,15 @@ const PRO_EXPIRY_OPTIONS: ReadonlyArray<{ label: string; seconds: number }> = [
 ];
 
 describe("PART 24 [163] — switching expiry on a scored_only/T5 symbol never produces an actionable-looking state", () => {
-  it("T5 WEAK: all 5 expiry options are suppressed at every point in the bucket sweep", () => {
+  it("T5 WEAK: no option is action-ready at any point in the bucket sweep", () => {
     for (let now = 0; now < 60_000; now += 1_000) {
       const st = expirySelectorState("T5", null, 60, now, PRO_EXPIRY_OPTIONS);
       expect(st.zoneActive).toBe(false);
       expect(st.anyActionable).toBe(false);
       expect(st.blockedReason).toBe("low_tier");
       for (const opt of st.options) {
-        expect(opt.suppressed).toBe(true);
+        expect(opt.actionReady).toBe(false);
+        expect(opt.regimeBlocked).toBe(true);
       }
     }
   });
@@ -40,7 +42,25 @@ describe("PART 24 [163] — switching expiry on a scored_only/T5 symbol never pr
     expect(st.anyActionable).toBe(false);
     expect(st.blockedReason).toBe("regime_scored_only");
     for (const opt of st.options) {
-      expect(opt.suppressed).toBe(true);
+      expect(opt.actionReady).toBe(false);
+      expect(opt.regimeBlocked).toBe(true);
+    }
+  });
+
+  it("STRICT 96.5% BAR: pending_high_precision (sub-96.5% executable=false) blocks every expiry — never tradable", () => {
+    const st = expirySelectorState(
+      "T1",
+      "pending_high_precision",
+      60,
+      30_000,
+      PRO_EXPIRY_OPTIONS,
+    );
+    expect(st.zoneActive).toBe(false);
+    expect(st.anyActionable).toBe(false);
+    expect(st.blockedReason).toBe("regime_pending_high_precision");
+    for (const opt of st.options) {
+      expect(opt.actionReady).toBe(false);
+      expect(opt.regimeBlocked).toBe(true);
     }
   });
 
@@ -56,19 +76,20 @@ describe("PART 24 [163] — switching expiry on a scored_only/T5 symbol never pr
     expect(st.zoneActive).toBe(true);
     expect(st.anyActionable).toBe(true);
     expect(st.blockedReason).toBeNull();
-    expect(st.options[0].suppressed).toBe(false); // 1m
-    expect(st.options[4].suppressed).toBe(false); // 10m
+    expect(st.options[0].actionReady).toBe(true); // 1m
+    expect(st.options[4].actionReady).toBe(true); // 10m
   });
 
-  it("execution floor (T4) stays honest: T5 is sub-executable at both floors; T3 is executable", () => {
+  it("strict execution floor (MIN_EXECUTABLE_TIER=T1) stays honest: T5/T4/T3/T2 are all sub-executable; only T1 dispatches", () => {
     // Projection-horizon floor (default TARGET_CANDLES_MIN_TIER=T3): T1-T3 only.
     const proT4 = expirySelectorState("T4", null, 60, 30_000, PRO_EXPIRY_OPTIONS);
     expect(proT4.zoneActive).toBe(false); // T4 LOW has no projection zone
     expect(proT4.blockedReason).toBe("low_tier");
     const proT3 = expirySelectorState("T3", null, 60, 30_000, PRO_EXPIRY_OPTIONS);
     expect(proT3.zoneActive).toBe(true);
-    // Execution floor (MIN_EXECUTABLE_TIER=T4): T4/T3 executable, T5 never.
-    const exec = expirySelectorState(
+    // Strict execution floor (MIN_EXECUTABLE_TIER=T1 96.5%): only T1 is
+    // executable; T2/T3/T4T5 are all honest low_tier holds.
+    const execT5 = expirySelectorState(
       "T5",
       null,
       60,
@@ -76,8 +97,8 @@ describe("PART 24 [163] — switching expiry on a scored_only/T5 symbol never pr
       PRO_EXPIRY_OPTIONS,
       MIN_EXECUTABLE_TIER,
     );
-    expect(exec.zoneActive).toBe(false);
-    expect(exec.blockedReason).toBe("low_tier");
+    expect(execT5.zoneActive).toBe(false);
+    expect(execT5.blockedReason).toBe("low_tier");
     const execT4 = expirySelectorState(
       "T4",
       null,
@@ -86,8 +107,18 @@ describe("PART 24 [163] — switching expiry on a scored_only/T5 symbol never pr
       PRO_EXPIRY_OPTIONS,
       MIN_EXECUTABLE_TIER,
     );
-    expect(execT4.zoneActive).toBe(true);
-    expect(execT4.anyActionable).toBe(true);
+    expect(execT4.zoneActive).toBe(false);
+    expect(execT4.blockedReason).toBe("low_tier");
+    const execT1 = expirySelectorState(
+      "T1",
+      null,
+      60,
+      30_000,
+      PRO_EXPIRY_OPTIONS,
+      MIN_EXECUTABLE_TIER,
+    );
+    expect(execT1.zoneActive).toBe(true);
+    expect(execT1.anyActionable).toBe(true);
   });
 });
 
@@ -103,7 +134,7 @@ describe("PART 24 [161] — MIN_ACTIONABLE_WINDOW_MS alignment per expiry choice
     const now = 59_000; // 1s before the bucket closes, less than the 1.5s window
     const s = expirySelectionState(60, "1m", 60, now);
     expect(s.tooLate).toBe(true);
-    expect(s.suppressed).toBe(true);
+    expect(s.actionReady).toBe(false);
     expect(s.reason).toBe("too_late");
     expect(s.alignedSeconds).toBe(120); // silently accepting would have kept 60
     expect(s.remainingToBucketCloseMs).toBe(1_000);
@@ -114,7 +145,7 @@ describe("PART 24 [161] — MIN_ACTIONABLE_WINDOW_MS alignment per expiry choice
     for (const exp of [120, 180, 300, 600]) {
       const s = expirySelectionState(exp, `${exp}s`, 60, now);
       expect(s.tooLate).toBe(false);
-      expect(s.suppressed).toBe(false);
+      expect(s.actionReady).toBe(true);
       expect(s.alignedSeconds).toBe(exp);
     }
   });
@@ -136,5 +167,20 @@ describe("PART 24 [161] — MIN_ACTIONABLE_WINDOW_MS alignment per expiry choice
     const belowWindow = expirySelectionState(60, "1m", 60, 58_700, window);
     expect(belowWindow.tooLate).toBe(true);
     expect(belowWindow.alignedSeconds).toBe(120);
+  });
+});
+
+describe("expiry countdown", () => {
+  it("counts down from the selected duration without reset inputs", () => {
+    expect(expiryCountdownRemainingSeconds(0, 0, 60)).toBe(60);
+    expect(expiryCountdownRemainingSeconds(1_000, 0, 60)).toBe(59);
+    expect(expiryCountdownRemainingSeconds(59_000, 0, 60)).toBe(1);
+    expect(expiryCountdownRemainingSeconds(60_000, 0, 60)).toBe(0);
+    expect(expiryCountdownRemainingSeconds(119_500, 0, 60)).toBe(0);
+  });
+
+  it("rejects invalid durations", () => {
+    expect(expiryCountdownRemainingSeconds(1_000, 0, 0)).toBe(0);
+    expect(expiryCountdownRemainingSeconds(Number.NaN, 0, 60)).toBe(0);
   });
 });

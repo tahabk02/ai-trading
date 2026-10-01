@@ -155,9 +155,10 @@ export function historyBarCheck(
 // ── Signal Gate (AI-confidence parity) ──
 
 /** Hard confidence threshold for directional signals (PO AI parity).
- *  Mirrors the AI Engine's canonical HARD_GATE = 0.98 — the only signals the
- *  client renders as directional are the engine's 0.98-dispatched emissions. */
-export const SIGNAL_CONFIDENCE_THRESHOLD = 0.98;
+ *  STRICT 96.5% HIGH-PRECISION BAR (2026-09-24): restored 0.30 → 0.965,
+ *  mirroring engine signal_gatekeeper.MIN_EXECUTABLE_TIER (T1 PREMIUM).
+ *  Quick Trade BUY/SELL unlocks only at the strict executable bar. */
+export const SIGNAL_CONFIDENCE_THRESHOLD = 0.965;
 
 /** Normalize a confidence value (0..1 or 0..100) into 0..1. */
 export function normalizeConfidence(raw: number): number {
@@ -264,11 +265,19 @@ export function targetIntervals(leadMinutes: number, timeframeMinutes: number): 
   return Math.max(1, Math.min(30, Math.round(lead / tf)));
 }
 
+export const MAX_TARGET_INTERVALS = 120;
+
 export function targetIntervalsFor(expirationSeconds: number, timeframeSeconds: number): number {
   const exp = Number(expirationSeconds);
   const tf = Number(timeframeSeconds);
   if (!Number.isFinite(exp) || !Number.isFinite(tf) || tf <= 0) return 1;
-  return Math.max(1, Math.min(30, Math.round(exp / tf)));
+  return Math.max(1, Math.min(MAX_TARGET_INTERVALS, Math.ceil(exp / tf)));
+}
+
+export function targetDurationMinutes(expirationSeconds: number): number {
+  const exp = Number(expirationSeconds);
+  if (!Number.isFinite(exp) || exp <= 0) return 1;
+  return Math.max(0.01, Math.round((exp / 60) * 100) / 100);
 }
 
 export interface TargetSlot {
@@ -457,17 +466,36 @@ export function buildTargetFrame(opts: {
   target: number;
   atr: number;
   signal: string | null | undefined;
+  expirationSeconds?: number;
   /** PART 8 — engine tier (T1…T3 reach this point). Drives opacity + marker. */
   tier?: string | null;
+  /**
+   * VISUAL baseline the projected candles grow from — the DISPLAYED close of
+   * the last live bar (Heikin-Ashi when the tape renders as HA).
+   *
+   * The projection is drawn on the SAME right price scale as the candle series,
+   * so anchoring it on the REAL close while the tape shows smoothed HA geometry
+   * leaves a visible gap between the last live candle and the first projected
+   * one. Anchoring on the displayed close removes that gap while `target` stays
+   * the real, tradable level, so arc(1) STILL lands exactly on target.
+   * Falls back to `liveClose` when absent or non-positive.
+   */
+  visualAnchor?: number;
 }): TargetFrameCandle[] {
-  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal, tier } = opts;
+  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal, expirationSeconds, tier } = opts;
   if (!Number.isFinite(liveTipBucketSec) || liveTipBucketSec <= 0) return [];
   if (!Number.isFinite(intervals) || intervals < 1) return [];
   if (!Number.isFinite(timeframeSec) || timeframeSec <= 0) return [];
   if (!Number.isFinite(liveClose) || liveClose <= 0) return [];
   if (!Number.isFinite(target) || target <= 0) return [];
   const n = Math.max(1, Math.round(intervals));
-  const delta = target - liveClose;
+  // VISUAL baseline: the displayed last close, so the projection connects to the
+  // rendered candle. Falls back to the real close when no display baseline is
+  // supplied (SSR / no series yet). Either way arc(1) lands exactly on `target`.
+  const visInput = Number(opts.visualAnchor);
+  const baseline =
+    Number.isFinite(visInput) && visInput > 0 ? visInput : liveClose;
+  const delta = target - baseline;
   // PART 8 — the tier drives the BODY opacity while the direction colour is
   // untouched; the outline stays at 60% alpha for every tier so the projected
   // candles always read as an overlay, never as confirmed live candles.
@@ -498,16 +526,21 @@ export function buildTargetFrame(opts: {
   // absolute safety cap (50% of the anchor level) kills pathological ATR
   // values, and the low is clamped at 0 so geometry is always finite.
   const atrValid = Number.isFinite(atr) && atr > 0;
-  const basePrice = Math.max(Math.abs(liveClose), Math.abs(target));
+  const basePrice = Math.max(Math.abs(baseline), Math.abs(target));
   const safetyCap = Math.max(basePrice * 0.5, 1e-9);
   const frame: TargetFrameCandle[] = [];
-  let prevClose = liveClose;
+  const configuredExpiration = Number(expirationSeconds);
+  const finalOffsetSec =
+    Number.isFinite(configuredExpiration) && configuredExpiration > 0
+      ? configuredExpiration
+      : n * timeframeSec;
+  let prevClose = baseline;
   for (let i = 1; i <= n; i++) {
     const k = i;
     const t = k / n;
     const arc = 0.5 * t + 0.5 * t * t;
-    const close = liveClose + delta * arc;
-    const open = i === 1 ? liveClose : prevClose;
+    const close = baseline + delta * arc;
+    const open = i === 1 ? baseline : prevClose;
     const taper = (n - k) / n;
     const wick = Math.min(atrValid ? atr * 0.35 * taper : 0, safetyCap);
     const high = Math.max(open, close) + wick;
@@ -515,8 +548,9 @@ export function buildTargetFrame(opts: {
     // PART 8 — tier-styled bodies carry the tier opacity; legacy keeps the
     // hollow fill + per-slot alpha-decay value.
     const alpha = style.tierStyled ? style.bodyAlpha : targetAlpha(k, n);
+    const offsetSec = i === n ? finalOffsetSec : k * timeframeSec;
     frame.push({
-      time: liveTipBucketSec + k * timeframeSec,
+      time: liveTipBucketSec + offsetSec,
       open,
       high,
       low,
@@ -525,7 +559,7 @@ export function buildTargetFrame(opts: {
       borderColor,
       wickColor,
       alpha,
-      offsetSec: k * timeframeSec,
+      offsetSec,
       index: k,
       marker: style.marker,
     });
@@ -555,6 +589,19 @@ export function targetViewportRange(
   return { from, to };
 }
 
+export function targetViewportNeedsReanchor(
+  previousIntervals: number,
+  nextIntervals: number,
+): boolean {
+  const previous = Number.isFinite(previousIntervals)
+    ? Math.max(0, Math.round(previousIntervals))
+    : 0;
+  const next = Number.isFinite(nextIntervals)
+    ? Math.max(0, Math.round(nextIntervals))
+    : 0;
+  return previous !== next;
+}
+
 /** Build predictive target candles for the chart projection layer.
  *  Candles ALWAYS render when the four data preconditions hold — the 96.5%
  *  confidence gate ONLY affects the BUY/SELL label, NOT the candle geometry.
@@ -572,15 +619,20 @@ export function buildTargetCandles(opts: {
   tier?: string | null | undefined;
   expirationSeconds: number;
   timeframeSeconds: number;
+  /** DISPLAYED last close (HA when the tape renders HA). See buildTargetFrame. */
+  visualAnchor?: number;
 }): TargetCandleData[] {
-  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, tier, expirationSeconds, timeframeSeconds } = opts;
+  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, tier, expirationSeconds, timeframeSeconds, visualAnchor } = opts;
+  // Tier gate: an engine-graded T4/T5 verdict never draws a trajectory. An
+  // ABSENT tier keeps the legacy render (contract pinned by
+  // realtimeCandleAggregator.test.ts "absent tier keeps legacy behaviour").
   if (tier && !targetCandlesEnabled(tier)) return [];
   if (!Number.isFinite(liveTipBucketMs) || liveTipBucketMs <= 0) return [];
   if (!Number.isFinite(targetPrice) || targetPrice <= 0) return [];
   if (!Number.isFinite(timeframeSeconds) || timeframeSeconds <= 0) return [];
   if (!Number.isFinite(expirationSeconds) || expirationSeconds <= 0) return [];
   const tipSec = Math.floor(liveTipBucketMs / 1000);
-  const intervals = Math.max(1, Math.min(30, Math.round(expirationSeconds / timeframeSeconds)));
+  const intervals = targetIntervalsFor(expirationSeconds, timeframeSeconds);
   return buildTargetFrame({
     liveTipBucketSec: tipSec,
     timeframeSec: timeframeSeconds,
@@ -589,7 +641,9 @@ export function buildTargetCandles(opts: {
     target: targetPrice,
     atr,
     signal,
+    expirationSeconds,
     tier,
+    visualAnchor,
   });
 }
 
@@ -620,6 +674,13 @@ export interface TargetProjectionInputs {
   signal: "BUY" | "SELL" | null;
   /** PART 6 — engine tier (T1…T5). Empty overlay unless T1–T3. */
   tier?: string | null;
+  /**
+   * DISPLAYED close of the last live bar (Heikin-Ashi when the tape renders HA).
+   * Used ONLY for the drawn baseline so the overlay connects to the rendered
+   * candle; the trajectory still terminates on the real `targetPrice`.
+   * Excluded from the structural key so it cannot reintroduce per-tick rebuilds.
+   */
+  visualAnchor?: number;
 }
 
 export interface TargetProjectionSnapshot {
@@ -719,8 +780,8 @@ export class TargetProjectionEngine {
         candles: this.candles,
         anchorLiveClose: this.anchorLiveClose,
         targetPrice: inputs.targetPrice,
-        firstSlotSec: tipSec + tfSec,
-        lastSlotSec: tipSec + intervals * tfSec,
+        firstSlotSec: tipSec + Math.min(tfSec, expSec),
+        lastSlotSec: tipSec + expSec,
         changed: false,
       };
     }
@@ -731,13 +792,19 @@ export class TargetProjectionEngine {
           ? this.anchorLiveClose
           : 0;
     // PART 6 — T4/T5 tiers never draw the trajectory: overlay is empty.
+    // An absent tier keeps the legacy render (pinned by the aggregator suite);
+    // a graded tier below T3 is suppressed.
     const tierEnabled = inputs.tier
       ? targetCandlesEnabled(inputs.tier)
       : true;
     this.candles = tierEnabled
       ? buildTargetCandles({
           liveTipBucketMs: tipSec * 1000,
+          // REAL close — the truthful anchor and the memo's baseline.
           liveClose: anchor,
+          // DISPLAYED close — where the overlay physically attaches. Absent in
+          // tests/SSR, where buildTargetCandles falls back to `anchor`.
+          visualAnchor: inputs.visualAnchor,
           targetPrice: inputs.targetPrice,
           atr: inputs.atr,
           signal: inputs.signal,
@@ -754,8 +821,8 @@ export class TargetProjectionEngine {
       candles: this.candles,
       anchorLiveClose: anchor,
       targetPrice: inputs.targetPrice,
-      firstSlotSec: tipSec + tfSec,
-      lastSlotSec: tipSec + intervals * tfSec,
+      firstSlotSec: tipSec + Math.min(tfSec, expSec),
+      lastSlotSec: tipSec + expSec,
       changed: true,
     };
   }
@@ -1033,6 +1100,16 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
+  /**
+   * SETTLED-BAR PROVENANCE. Set ONLY on bars the backend sealed
+   * (`ServerClosedCandle.isFinal`). A settled bar is immutable: the chart merge
+   * must never repaint it with a client-side row for the same bucket, which is
+   * what produced broken/repainting closed candles. Client-closed and forming
+   * bars leave this undefined and stay provisional.
+   */
+  isFinal?: boolean;
+  /** Bucket the aggregator could not fill from real ticks (rendered as a gap). */
+  isGap?: boolean;
 }
 
 // ── NATIVE HEIKIN ASHI TRANSFORMATION ENGINE ──
@@ -1172,6 +1249,78 @@ export function toHeikinAshiSeries<T extends HeikinAshiBar>(candles: T[]): T[] {
     prev = next;
     return { ...c, ...bar };
   });
+}
+
+/**
+ * ══ RAW vs DISPLAY DOMAIN SEPARATION ══════════════════════════════════════
+ *
+ * The chart mixes two different price domains and MUST NOT confuse them:
+ *
+ *   • RAW    — real broker OHLC. The only truthful price domain. Every
+ *              predictive artefact (target-candle trajectory anchor, price
+ *              levels, stop, HUD last price) MUST be derived from this.
+ *   • DISPLAY — the Heikin-Ashi fold of RAW. A RENDERING transform only: the
+ *              body/wick geometry is smoothed, so its close is a lagging
+ *              midpoint, NOT a tradable price.
+ *
+ * The defect this pair of helpers exists to prevent: writing a live RAW tick
+ * straight into the already-folded display array. That put raw geometry on an
+ * HA axis for the forming bar (the "giant spike / stretched candle" artefact)
+ * AND made the target anchor flip between raw and HA values on every rebuild,
+ * so the TGT trajectory no longer matched the tape.
+ *
+ * `display` is therefore a PURE function of `raw` at all times — rebuild it from
+ * `raw`, never mutate it in place.
+ *
+ * ══ RULED OUT: "wicks stretch to the grid edges" is NOT a renderer bug ══════
+ *
+ * A later investigation (PART 32[228]) asked for the OHLC→pixel coordinate
+ * mapping to be audited, hypothesising that each candle's wick was being mapped
+ * against the FULL visible price domain rather than its own high/low. That
+ * hypothesis is FALSE and must not be re-chased:
+ *
+ *   • There is NO coordinate-mapping code. The main tape is a NATIVE
+ *     lightweight-charts `addCandlestickSeries` (financial-chart.tsx) whose
+ *     wick pixels come from the library's internal canvas renderer. The chart
+ *     component contains no `priceToCoordinate`/`coordinateToPrice` math, no
+ *     custom `ICandlePaneRenderer`/`IPanePrimitive`, and no `getContext`/
+ *     `fillRect` canvas drawing of its own.
+ *   • Therefore wick top/bottom are ALWAYS that candle's own high/low. A wick
+ *     physically cannot be mapped against the whole domain.
+ *   • Measured on the live terminal: bodies ~3.2px wide × ~13px tall with >90%
+ *     of candles showing a wick extending past the body — i.e. textbook
+ *     candlestick anatomy.
+ *   • `scaleMargins: { top: 0.08, bottom: 0.22 }` on the price scale already
+ *     supplies the domain padding that PART 32[229] asked to be added.
+ *
+ * The genuinely long wicks are the DATA, not the mapping: on spread-heavy OTC
+ * feeds real high/low sit far from open/close, and the Heikin-Ashi fold
+ * redistributes extremes further (HA high = max(high, close, open_prev)).
+ * The precision problem is a different one — this fold makes DISPLAY geometry
+ * disagree with the RAW price domain that TGT/ANC/LIVE labels are drawn from,
+ * so see the RAW-vs-DISPLAY contract above.
+ */
+export interface RawDisplaySeries<T> {
+  raw: T[];
+  display: T[];
+}
+
+export function syncRawDisplay<T extends HeikinAshiBar>(raw: T[]): RawDisplaySeries<T> {
+  const safe = Array.isArray(raw) ? raw : [];
+  return { raw: safe, display: toHeikinAshiSeries(safe) };
+}
+
+/**
+ * Last RAW close — the only correct anchor for predictive geometry.
+ *
+ * Returns 0 for an empty series so callers fall through to their own fallback
+ * rather than anchoring a trajectory to `NaN`/`undefined`.
+ */
+export function rawAnchorClose(raw: Array<{ close: number }> | null | undefined): number {
+  if (!Array.isArray(raw) || raw.length === 0) return 0;
+  const last = raw[raw.length - 1];
+  const close = Number(last?.close);
+  return Number.isFinite(close) && close > 0 ? close : 0;
 }
 
 /**
@@ -2933,6 +3082,20 @@ export class RealtimeCandleAggregator {
 
   /** Closed candles plus the in-progress bar — NATIVE Heikin-Ashi, ready to hand to the chart. */
   public getSeries(symbol: string): Candle[] {
+    return toHeikinAshiSeries(this.getRawSeries(symbol));
+  }
+
+  /**
+   * RAW (untransformed) closed candles plus the in-progress bar.
+   *
+   * The chart merge MUST fold Heikin-Ashi ONCE over the fully merged
+   * server + client row set: transforming the client rows here and then
+   * splicing raw server rows into the same array produced one series with two
+   * different candle geometries (HA bodies for client buckets, raw bodies for
+   * server buckets) and a broken HA_Open recursion at the seam. Raw rows are
+   * the merge currency; the chart applies the single fold.
+   */
+  public getRawSeries(symbol: string): Candle[] {
     const state = this.symbols.get((symbol || "").trim().toUpperCase());
     if (!state) return [];
     const rows: Candle[] = [];
@@ -2945,7 +3108,7 @@ export class RealtimeCandleAggregator {
       if (prev && c.timestamp <= prev.timestamp) continue;
       rows.push(c);
     }
-    return toHeikinAshiSeries(rows);
+    return rows;
   }
 
   /** The bar currently accumulating ticks, or null before the first tick. NATIVE Heikin-Ashi. */

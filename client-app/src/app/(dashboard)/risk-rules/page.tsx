@@ -187,14 +187,14 @@ export default function RiskRulesPage() {
                 <h1 className="text-2xl sm:text-3xl font-black tracking-wider uppercase">
                   <span className="text-amber-500">{t("riskRules")}</span>
                 </h1>
-                <p className="text-slate-600 dark:text-slate-400 mt-1 text-xs sm:text-sm max-w-2xl">
+                <p className="text-slate-400 mt-1 text-xs sm:text-sm max-w-2xl">
                   {t("riskRulesSubtitle")}
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/80 px-4 py-2.5 shadow-sm">
+              <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-2.5 shadow-sm">
                 <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.7)]" />
-                <span className="text-xs text-slate-700 dark:text-slate-300 font-bold tracking-wider uppercase">
+                <span className="text-xs text-slate-300 font-bold tracking-wider uppercase">
                   {t("engineEnforced")}
                 </span>
               </div>
@@ -206,11 +206,11 @@ export default function RiskRulesPage() {
                 className={`rounded-xl border p-5 shadow-sm transition-colors duration-200 ${
                   isKillSwitchLocked
                     ? "bg-rose-500/10 border-rose-500/40"
-                    : "bg-white dark:bg-slate-900/80 border-slate-200 dark:border-slate-800"
+                    : "bg-slate-900/80 border-slate-800"
                 }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                  <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+                  <h2 className="text-base sm:text-lg font-bold text-slate-200 uppercase tracking-wider">
                     {t("killSwitchMonitor")}
                   </h2>
                   {isKillSwitchLocked ? (
@@ -237,9 +237,9 @@ export default function RiskRulesPage() {
                 </div>
 
                 {/* Drawdown Limit Slider */}
-                <div className="space-y-3 mb-5 p-4 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
+                <div className="space-y-3 mb-5 p-4 rounded-xl bg-slate-950/60 border border-slate-800">
                   <div className="flex items-center justify-between gap-3">
-                    <label className="text-xs uppercase tracking-wider text-slate-500 font-bold">
+                    <label className="text-xs uppercase tracking-wider text-slate-400 font-bold">
                       {t("dailyMaxDrawdownLimit")}
                     </label>
                     <div className="flex items-center gap-2">
@@ -255,9 +255,9 @@ export default function RiskRulesPage() {
                           )
                         }
                         disabled={ddAdjusting}
-                        className="w-20 text-right text-sm font-mono text-slate-900 dark:text-white bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 focus:outline-none focus:border-amber-500 font-bold"
+                        className="w-20 text-right text-sm font-mono text-slate-200 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 focus:outline-none focus:border-amber-500 font-bold"
                       />
-                      <span className="text-xs text-slate-500 font-bold">%</span>
+                      <span className="text-xs text-slate-400 font-bold">%</span>
                     </div>
                   </div>
                   <input
@@ -285,8 +285,8 @@ export default function RiskRulesPage() {
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">
+                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
                       {t("drawdownToday")}
                     </p>
                     <p
@@ -299,27 +299,27 @@ export default function RiskRulesPage() {
                       {riskState.drawdownPct.toFixed(2)}%
                     </p>
                   </div>
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">
+                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
                       {t("maxLimit")}
                     </p>
                     <p className="text-xl font-black font-mono text-amber-500">
                       {riskState.maxDailyDrawdownPct.toFixed(2)}%
                     </p>
                   </div>
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">
+                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
                       {t("equity")}
                     </p>
-                    <p className="text-xl font-black font-mono text-slate-900 dark:text-white">
+                    <p className="text-xl font-black font-mono text-slate-200">
                       ${formatNumber(riskState.equity, 2)}
                     </p>
                   </div>
-                  <div className="rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">
+                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
                       {t("tradesWinLoss")}
                     </p>
-                    <p className="text-xl font-black font-mono text-slate-900 dark:text-white">
+                    <p className="text-xl font-black font-mono text-slate-200">
                       {riskState.tradesToday} ·{" "}
                       <span className="text-emerald-500 dark:text-emerald-400">{riskState.winsToday}</span>/
                       <span className="text-rose-500 dark:text-rose-400">{riskState.lossesToday}</span>
@@ -327,7 +327,7 @@ export default function RiskRulesPage() {
                   </div>
                 </div>
 
-                <div className="h-2 w-full bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
+                <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${
                       isKillSwitchLocked
@@ -349,20 +349,20 @@ export default function RiskRulesPage() {
                 {!isKillSwitchLocked && (
                   <div className="mt-4">
                     <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
                         {t("dailyExposure")}
                       </span>
-                      <span className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                      <span className="text-[10px] font-mono font-bold text-slate-300 tabular-nums">
                         {exposurePct.toFixed(1)}%
                       </span>
                     </div>
-                    <div className="h-2 w-full bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
+                    <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
                       <div
                         className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-blue-500 to-indigo-500 transition-all duration-500"
                         style={{ width: `${exposurePct}%` }}
                       />
                     </div>
-                    <p className="mt-1.5 text-[10px] text-slate-500 font-mono">
+                    <p className="mt-1.5 text-[10px] text-slate-400 font-mono">
                       {t("realizedPnl")}: ${riskState.realizedPnl.toFixed(2)} vs {t("equity")}{" "}
                       ${riskState.equity.toFixed(2)}
                     </p>
@@ -396,10 +396,10 @@ export default function RiskRulesPage() {
                 {[1, 2, 3, 4].map((i) => (
                   <div
                     key={i}
-                    className="bg-white dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 p-6 animate-pulse"
+                    className="bg-slate-900/80 rounded-xl border border-slate-800 p-6 animate-pulse"
                   >
-                    <div className="h-5 w-1/3 bg-slate-200 dark:bg-slate-700 rounded mb-4" />
-                    <div className="h-10 bg-slate-100 dark:bg-slate-800 rounded" />
+                    <div className="h-5 w-1/3 bg-slate-700 rounded mb-4" />
+                    <div className="h-10 bg-slate-800 rounded" />
                   </div>
                 ))}
               </div>
@@ -408,18 +408,18 @@ export default function RiskRulesPage() {
                 {rules.map((rule) => (
                   <div
                     key={rule.id}
-                    className="bg-white dark:bg-slate-900/80 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden"
+                    className="bg-slate-900/80 rounded-xl border border-slate-800 shadow-sm overflow-hidden"
                   >
-                    <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                    <div className="px-6 py-5 border-b border-slate-800 flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3">
                         <span className="text-2xl">
                           {getRuleIcon(rule.ruleType)}
                         </span>
                         <div>
-                          <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                          <h2 className="text-base font-bold text-slate-200">
                             {rule.name}
                           </h2>
-                          <p className="text-xs text-slate-500 font-mono mt-0.5">
+                          <p className="text-xs text-slate-400 font-mono mt-0.5">
                             {rule.ruleType.replace(/_/g, " ")}
                           </p>
                         </div>
@@ -433,14 +433,14 @@ export default function RiskRulesPage() {
                           }
                           className="sr-only peer"
                         />
-                        <div className="w-11 h-6 bg-slate-300 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500 rtl:peer-checked:after:-translate-x-full" />
+                        <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500 rtl:peer-checked:after:-translate-x-full" />
                       </label>
                     </div>
 
                     <div className="p-6 space-y-4">
                       <div className="flex items-center gap-4">
                         <div className="flex-1">
-                          <label className="block text-xs uppercase tracking-wider text-slate-500 font-bold mb-2">
+                          <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
                             {t("thresholdValue")}
                           </label>
                           <div className="relative">
@@ -458,7 +458,7 @@ export default function RiskRulesPage() {
                                 )
                               }
                               disabled={!rule.enabled}
-                              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-3 text-slate-900 dark:text-slate-100 text-sm font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-slate-100 text-sm font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
                             />
                             <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-mono">
                               {getRuleUnit(rule.ruleType)}
@@ -490,14 +490,14 @@ export default function RiskRulesPage() {
                         </div>
 
                         <div className="text-center min-w-[80px]">
-                          <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-1">
+                          <p className="text-xs text-slate-400 uppercase tracking-wider font-bold mb-1">
                             {t("status")}
                           </p>
                           <span
                             className={`text-xs font-bold px-2.5 py-1 rounded-full ${
                               rule.enabled
                                 ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                                : "bg-slate-200 dark:bg-slate-800 text-slate-500"
+                                : "bg-slate-800 text-slate-400"
                             }`}
                           >
                             {rule.enabled ? t("active").toUpperCase() : t("disabled")}
@@ -505,16 +505,16 @@ export default function RiskRulesPage() {
                         </div>
                       </div>
 
-                      <div className="rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 p-3">
+                      <div className="rounded-xl bg-slate-950/50 border border-slate-800 p-3">
                         <div className="flex items-center gap-2">
                           <div
                             className={`h-2 w-2 rounded-full ${
                               rule.enabled
                                 ? "bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.6)]"
-                                : "bg-slate-400 dark:bg-slate-600"
+                                : "bg-slate-600"
                             }`}
                           />
-                          <p className="text-xs text-slate-600 dark:text-slate-400">
+                          <p className="text-xs text-slate-400">
                             {rule.enabled ? t("enforcedByEngine") : t("notEnforced")}
                           </p>
                         </div>
@@ -549,21 +549,21 @@ export default function RiskRulesPage() {
                 type="button"
                 onClick={handleReset}
                 disabled={isSaving}
-                className="inline-flex items-center gap-2 rounded-xl px-5 py-3 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-sm font-bold uppercase tracking-wider transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                className="inline-flex items-center gap-2 rounded-xl px-5 py-3 border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 text-sm font-bold uppercase tracking-wider transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               >
                 {t("resetDefaults")}
               </button>
             </div>
 
             {/* Enforcement Status Footer Banner */}
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/80 p-4 shadow-sm">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
               <div className="flex items-start gap-3">
                 <div className="mt-1 h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] shrink-0" />
                 <div>
-                  <p className="text-sm text-slate-900 dark:text-white font-bold">
+                  <p className="text-sm text-slate-200 font-bold">
                     {t("liveEnforcementActive")}
                   </p>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  <p className="text-xs text-slate-400 mt-1">
                     {t("liveEnforcementHint")}
                   </p>
                 </div>

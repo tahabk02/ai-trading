@@ -25,6 +25,8 @@ import {
   formatAxisTime,
   targetColorFor,
   targetIntervalsFor,
+  targetDurationMinutes,
+  targetViewportNeedsReanchor,
   buildSignalView,
   targetViewportRange,
   timeframeToSeconds,
@@ -34,8 +36,11 @@ import {
   SIGNAL_CONFIDENCE_THRESHOLD,
   TargetProjectionEngine,
   SignalHoldBuffer,
+  rawAnchorClose,
+  syncRawDisplay,
   type AggregatorDebug,
   type Candle,
+  type RawDisplaySeries,
   type SignalHoldView,
   type TargetCandleData,
 } from "@/lib/realtimeCandleAggregator";
@@ -45,12 +50,53 @@ import {
   targetCandlesLabelFor,
 } from "@/lib/signalRender";
 import { targetCandlesEnabled } from "@/lib/signalTiers";
+import { expiryCountdownRemainingSeconds } from "@/lib/expirySelection";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import {
   chartDebugQualityFields,
   type QualityPredictDebug,
 } from "@/lib/chartDebug";
+import { useSignalViewStore } from "@/lib/signalViewStore";
+import { normalizeProjectionAtr, clampTargetToAnchor } from "@/lib/projectionAtr";
+
+/**
+ * ── COHERENCE PUBLISHER ──────────────────────────────────────────────────
+ * Renders nothing. Republishes the chart's ONE `SignalHoldView` so the
+ * CoherenceStrip renders the same signal the HUD is painting, instead of
+ * re-deriving it from the raw store field (which flickers to `null` between
+ * the REST and WS writers — the "SIGNAL: WAITING" gap).
+ *
+ * Deliberately a standalone child rather than an inline `useEffect` in the
+ * chart body: it keeps this hook out of a 1700-line component's hook order
+ * entirely, so no conditional-early-return above `hudView` can ever make this
+ * call site conditional.
+ *
+ * INVARIANT 1: this runs on the chart's HUD render cadence (~1 Hz), never
+ * inside the per-tick paint loop, and the store write is change-gated on all
+ * four view fields — so it cannot reintroduce a per-tick re-render.
+ */
+function SignalViewPublisher({ view }: { view: SignalHoldView }) {
+  const publishSignalView = useSignalViewStore((s) => s.publishSignalView);
+  const lastPublishedRef = useRef<SignalHoldView | null>(null);
+
+  useEffect(() => {
+    const previous = lastPublishedRef.current;
+    if (
+      previous &&
+      previous.gatedSignal === view.gatedSignal &&
+      previous.tier === view.tier &&
+      previous.bucketSec === view.bucketSec &&
+      previous.suppressedReason === view.suppressedReason
+    ) {
+      return;
+    }
+    lastPublishedRef.current = view;
+    publishSignalView(view);
+  }, [view, publishSignalView]);
+
+  return null;
+}
 
 declare global {
   interface Window {
@@ -217,7 +263,7 @@ function buildSeries(
   bucketMs: number,
   dataProp: APICandle[],
   serverClosed: GridCandle[] = [],
-): { rows: GridCandle[]; rejected: number } {
+): { raw: GridCandle[]; rows: GridCandle[]; rejected: number } {
   const byTs = new Map<number, GridCandle>();
   let rejected = 0;
   const now = Date.now();
@@ -244,29 +290,54 @@ function buildSeries(
   for (const r of serverClosed ?? []) {
     const slot = Number(r.timestamp);
     if (!Number.isFinite(slot) || slot <= 0) continue;
-    byTs.set(slot, r);
+    byTs.set(slot, { ...r, isFinal: true });
   }
-// Intra-frame builder output: the client aggregator paints ONLY the current
-  // forming bar here. Its locally-closed rows are used as a fallback ONLY when
-  // the server has no candle for that bucket (non-server timeframes, or before
-  // the first server close).
-  const aggregated = realtimeAggregator.getSeries(symbol) as GridCandle[];
+  // Intra-frame builder output: the client aggregator paints ONLY the current
+  // forming bar here. Its locally-closed rows are a fallback ONLY when the
+  // server has no candle for that bucket (non-server timeframes, or before the
+  // first server close).
+  //
+  // PRECEDENCE: a sealed server bar (isFinal) is IMMUTABLE — a client row for
+  // the same slot is never allowed to overwrite it. The previous guard tested
+  // the *client* row's flag, which no producer ever set, so client rows
+  // silently repainted settled bars (flicker/duplicate/"broken" candles).
+  const aggregated = realtimeAggregator.getRawSeries(symbol) as GridCandle[];
   for (const r of aggregated) {
     if (r.isGap === true) continue;
     const slot = Number(r.timestamp);
     if (!Number.isFinite(slot) || slot <= 0) continue;
-    if (r.isFinal === true && byTs.has(slot)) continue;
-    byTs.set(slot, r as GridCandle);
+    const existing = byTs.get(slot);
+    if (existing && existing.isFinal === true) continue;
+    byTs.set(slot, r);
   }
-  const out: GridCandle[] = [];
+  const merged: GridCandle[] = [];
   for (const r of [...byTs.values()].sort(
     (a, b) => a.timestamp - b.timestamp,
   )) {
-    const prev = out.length > 0 ? out[out.length - 1] : null;
+    const prev = merged.length > 0 ? merged[merged.length - 1] : null;
     if (prev && r.timestamp <= prev.timestamp) continue;
-    out.push(r);
+    merged.push(r);
   }
-  return { rows: out, rejected };
+  // ONE display fold over the FULLY MERGED series. Folding only the client
+  // rows (and splicing raw server rows in beside them) rendered two different
+  // candle geometries on one price axis and restarted the recursive HA_Open
+  // chain at the server/client seam.
+  //
+  // `raw` is the merged REAL domain and `rows` its pure HA fold. Both are
+  // returned so the live-tick path can mutate `raw` ONLY and re-derive `rows` —
+  // a raw tick must never be written into the folded array.
+  //
+  // PART 32[236] — RAW DOMAIN IS NOW THE DISPLAY DOMAIN. Previously `rows` was
+  // the Heikin-Ashi fold, which put two DIFFERENT price domains on one chart:
+  // the candle BODIES/WICKS were smoothed HA geometry, while the TGT / ANC /
+  // LIVE price lines, the TGT badge and the delta % were all anchored on the
+  // RAW broker close (rawAnchorClose). A reader comparing the TGT badge against
+  // the candle it sits next to could never reconcile them, because an HA body's
+  // high/low is not any real traded price (HA high = max(high, close, open_prev)).
+  // Every predictive label on this chart is RAW, so the tape is RAW too.
+  // HA is still available as an analysis overlay via `display`.
+  const { raw } = syncRawDisplay(merged) as RawDisplaySeries<GridCandle>;
+  return { raw, rows: raw, rejected };
 }
 
 function mergeLiveTick(
@@ -422,10 +493,17 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const targetSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  /**
+   * RAW domain — real broker OHLC, the single source of truth.
+   * `dataRef` holds its Heikin-Ashi fold and is DISPLAY ONLY. Live ticks mutate
+   * this array and never the folded one.
+   */
+  const rawRef = useRef<GridCandle[]>([]);
   const dataRef = useRef<GridCandle[]>([]);
   const linesRef = useRef<ChartLineBag>({});
-  const targetSlotKeyRef = useRef("");
   const targetStructuralKeyRef = useRef("");
+  const lastTargetIntervalsRef = useRef(0);
+  const targetCountdownAnchorRef = useRef(0);
   const projectionRef = useRef<TargetProjectionEngine>(new TargetProjectionEngine());
   const signalHoldRef = useRef<SignalHoldBuffer>(
     new SignalHoldBuffer({ holdNeutralEvals: 2 }),
@@ -444,10 +522,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const [hasCandles, setHasCandles] = useState(false);
   const [targetLayerActive, setTargetLayerActive] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
-  const [lookaheadHorizon, setLookaheadHorizon] = useState<number>(
-    Math.max(1, Math.round(expSeconds / tfSeconds)),
-  );
   const [hudNowMs, setHudNowMs] = useState<number>(() => Date.now());
+  const targetDurationMin = targetDurationMinutes(expSeconds);
 
   const activeSymbolRef = useRef(activeSymbol);
   activeSymbolRef.current = activeSymbol;
@@ -466,7 +542,28 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const predictionDataRef = useRef(predictionData);
   predictionDataRef.current = predictionData;
   const atrRef = useRef(atr);
-  atrRef.current = atr;
+  /*
+   * NORMALISE ATR BEFORE IT CAN REACH THE PROJECTOR.
+   *
+   * `buildTargetFrame` clamps the wick to `safetyCap = 50% of the price level`.
+   * That clamp does not suppress an out-of-scale ATR — it is the only thing
+   * shaping the geometry once ATR is wrong, and at 50% of price it draws a wick
+   * that reaches the top of the chart on the shared right scale. That is the
+   * reported "vertical spikes shooting up to the ceiling".
+   *
+   * Validating here, at the boundary where the wire value enters the chart, means
+   * `safetyCap` becomes unreachable for any plausible input and the arc renders
+   * with either a sane envelope or none at all — never a ceiling spike. It also
+   * keeps this OUT of `realtimeCandleAggregator.ts`, so the projection engine and
+   * the zero-hop tick path are untouched.
+   */
+  // Validated against the ANCHOR — the baseline the arc actually grows from, and
+  // the level whose units the incoming ATR must match. Falls back to the target,
+  // then to 0, which renders a flat line rather than an unvalidated envelope.
+  atrRef.current = normalizeProjectionAtr(
+    atr,
+    anchorRef.current || targetRef.current,
+  );
   const expSecondsRef = useRef(expSeconds);
   expSecondsRef.current = expSeconds;
   const tfSecondsRef = useRef(tfSeconds);
@@ -494,9 +591,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   );
   const effSignal = signalView.gatedSignal;
   const liveCloseView =
-    (dataRef.current.length > 0
-      ? dataRef.current[dataRef.current.length - 1].close
-      : 0) ||
+    // RAW domain: the live tape close, NOT the Heikin-Ashi display close. The HA
+    // close is a smoothed midpoint, so anchoring predictive geometry on it made
+    // the TGT trail the real feed.
+    rawAnchorClose(rawRef.current) ||
     Number(currentPrice) ||
     0;
   const feedOffline =
@@ -696,6 +794,12 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     ): void => {
       const tip = rows.length > 0 ? rows[rows.length - 1] : null;
       const bws = bw / 1000;
+      const firstTargetOffsetSec =
+        intervals > 0
+          ? Math.min(bws, expSecondsRef.current)
+          : 0;
+      const lastTargetOffsetSec =
+        intervals > 0 ? expSecondsRef.current : 0;
       let targetHigh = 0;
       let targetLow = 0;
       if (frame.length > 0) {
@@ -713,31 +817,30 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         candleCount: rows.length,
         historyRejectedCount: rejectedCountRef.current,
         tipBucketMs: tip ? tip.timestamp : 0,
-        projectionSlot0OffsetMs: bw,
+        projectionSlot0OffsetMs: firstTargetOffsetSec * 1000,
         expirationSeconds: expSecondsRef.current,
         timeframeSeconds: tfSecondsRef.current,
         intervals,
         liveTipBucketSec: tipSec,
-        firstTargetBucketSec: intervals > 0 && tipSec > 0 ? tipSec + bws : 0,
-        firstTargetOffsetSec: bws,
+        firstTargetBucketSec:
+          intervals > 0 && tipSec > 0 ? tipSec + firstTargetOffsetSec : 0,
+        firstTargetOffsetSec,
         lastTargetBucketSec:
-          intervals > 0 && tipSec > 0 ? tipSec + intervals * bws : 0,
-        lastTargetOffsetSec: intervals * bws,
+          intervals > 0 && tipSec > 0 ? tipSec + lastTargetOffsetSec : 0,
+        lastTargetOffsetSec,
         targetDirection: signalValue,
         targetFirstClose: frame.length > 0 ? frame[0].close : 0,
         targetLastClose: frame.length > 0 ? frame[frame.length - 1].close : 0,
         targetHigh,
         targetLow,
-        lookaheadHorizon: Math.max(
-          1,
-          Math.round(expSecondsRef.current / tfSecondsRef.current),
-        ),
+        lookaheadHorizon: targetDurationMinutes(expSecondsRef.current),
         // PART 8 — explicit verification surface (exact window.__chartDebug keys)
         mergedCandles: rows.length,
         targetIntervals: intervals,
-        targetFirstSlot: intervals > 0 && tipSec > 0 ? tipSec + bws : 0,
+        targetFirstSlot:
+          intervals > 0 && tipSec > 0 ? tipSec + firstTargetOffsetSec : 0,
         targetLastSlot:
-          intervals > 0 && tipSec > 0 ? tipSec + intervals * bws : 0,
+          intervals > 0 && tipSec > 0 ? tipSec + lastTargetOffsetSec : 0,
         targetCount: frame.length,
         barSpacing: chartRef.current?.timeScale().options().barSpacing ?? 0,
         chartWidth: containerRef.current?.clientWidth ?? 0,
@@ -746,9 +849,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         // [4] — debug keys per quick-fix spec
         timeframeSec: tfSecondsRef.current,
         expirationSec: expSecondsRef.current,
-        targetFirstSlotSec: intervals > 0 && tipSec > 0 ? tipSec + bws : 0,
+        targetFirstSlotSec:
+          intervals > 0 && tipSec > 0 ? tipSec + firstTargetOffsetSec : 0,
         targetLastSlotSec:
-          intervals > 0 && tipSec > 0 ? tipSec + intervals * bws : 0,
+          intervals > 0 && tipSec > 0 ? tipSec + lastTargetOffsetSec : 0,
         targetPrice:
           Number(targetRef.current) ||
           Number(predictionDataRef.current?.target_price) ||
@@ -785,7 +889,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       const view = currentSignalView();
       const signalValue = view.gatedSignal;
       const tierForGate = view.tier;
-      const targetPrice =
+      const targetPriceRaw =
         Number(targetRef.current) ||
         Number(predictionDataRef.current?.target_price) ||
         0;
@@ -793,6 +897,22 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         Number(anchorRef.current) ||
         Number(predictionDataRef.current?.current_price) ||
         0;
+      /*
+       * BOUND THE TARGET AGAINST THE ANCHOR.
+       *
+       * The target series shares the candles' "right" price scale but opts out
+       * of autoscale (`autoscaleInfoProvider: () => null`), so a target value
+       * outside the tape's visible range is drawn off-axis and CLIPPED at the
+       * top of the container — the reported "massive vertical spikes shooting up
+       * to the top of the chart". The candles' own scale is never stretched,
+       * which is exactly why the corruption was invisible to any autoscale check.
+       *
+       * A real intraday target does not sit many multiples of the price away
+       * from the anchor, so a target beyond this band is a stale value from a
+       * previous symbol, a unit error, or a malformed payload. Dropping it
+       * renders no projection, which is honest; drawing it corrupts the chart.
+       */
+      const targetPrice = clampTargetToAnchor(targetPriceRaw, anchorPrice);
       const stopPrice =
         Number(
           (predictionDataRef.current as { stop_loss?: number } | null)
@@ -816,6 +936,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // candle rendering. Suppress only when required data is genuinely
       // absent. Never anchor Date.now(); never gate on feedStatus/confidence.
       if (tipGridMs <= 0 || targetPrice <= 0) {
+        lastTargetIntervalsRef.current = 0;
         if (projectionRef.current.currentKey !== "") {
           projectionRef.current.reset();
           if (series) {
@@ -839,7 +960,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         liveTipBucketSec: tipSec,
         timeframeSec: tfSec,
         expirationSec: expSec,
+        // REAL tape close — the truthful anchor. Never the HA display close.
         liveClose,
+        // DISPLAYED close — where the overlay physically attaches to the last
+        // rendered candle. The arc still terminates on the real target price,
+        // so the TGT reads as continuous with the tape instead of jumping off
+        // the smoothed HA body by the HA-vs-raw offset.
+        visualAnchor: tip ? tip.close : 0,
         targetPrice,
         atr: Number(atrRef.current) || 0,
         signal: signalValue,
@@ -848,6 +975,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         // fetch of predictionDataRef). Closing the PART 20 drift.
         tier: tierForGate,
       });
+      const shouldReanchor = targetViewportNeedsReanchor(
+        lastTargetIntervalsRef.current,
+        snap.intervals,
+      );
+      lastTargetIntervalsRef.current = snap.intervals;
 
       if (snap.changed) {
         if (series) {
@@ -871,7 +1003,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           try { series.setMarkers(markers); } catch {}
         }
         setTargetLayerActive(snap.candles.length > 0);
-        if (snap.candles.length > 0) reanchor(rows.length, snap.intervals);
+        if (snap.candles.length > 0 && shouldReanchor) {
+          reanchor(rows.length, snap.intervals);
+        }
         console.debug("[target]", {
           intervals: snap.intervals,
           firstSlot: snap.firstSlotSec,
@@ -1079,10 +1213,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       candleSeriesRef.current = null;
       volumeRef.current = null;
       targetSeriesRef.current = null;
+      rawRef.current = [];
       dataRef.current = [];
       rejectedCountRef.current = 0;
       linesRef.current = {};
-      targetSlotKeyRef.current = "";
+      lastTargetIntervalsRef.current = 0;
       projection.reset();
       signalHold.reset();
     };
@@ -1097,6 +1232,50 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       useTradingStore.getState().serverCandles[activeSymbolRef.current]?.[
         timeframeRef.current
       ] ?? ([] as GridCandle[]);
+
+    /*
+     * TIMEFRAME CORRECTNESS — never bucket-check foreign-resolution data.
+     *
+     * The selected timeframe changes immediately on click, but `data` is only
+     * replaced when the new /predict resolves. In that window the props still
+     * hold the PREVIOUS timeframe's bars, and `historyBarCheck` rejects any
+     * timestamp that is not aligned to the NEW bucket (5m requires
+     * `ts % 300000 === 0`, which no 1m bar satisfies). Every bar was therefore
+     * dropped, `rows` came back empty, and the chart blanked until the fetch
+     * landed — a resolution switch looked like a feed outage.
+     *
+     * So: if the data is not on the selected grid, PAINT NOTHING and wait. The
+     * candles then render strictly per the selected timeframe, and never a
+     * blend of two resolutions. The target layer is cleared for the same reason
+     * — a projection anchored to the old grid is meaningless on the new one.
+     */
+    const dataAlignedToSelectedTf =
+      serverClosed.length > 0 ||
+      (dataPropRef.current ?? []).every((c) => {
+        let ts = Number(c.timestamp);
+        if (!Number.isFinite(ts) || ts <= 0) return false;
+        if (ts < 1e12) ts *= 1000;
+        return ts % bw === 0;
+      });
+
+    if (!dataAlignedToSelectedTf) {
+      // Foreign-resolution payload in hand. Clear rather than mis-render, and
+      // let the effect re-run when the correctly-resolved data arrives.
+      rawRef.current = [];
+      dataRef.current = [];
+      rejectedCountRef.current = 0;
+      applyCandleData(candleSeries, volume, []);
+      targetStructuralKeyRef.current = "";
+      lastTargetIntervalsRef.current = 0;
+      try {
+        targetSeriesRef.current?.setData([]);
+      } catch {}
+      firstTickRef.current = true;
+      pendingPaintRef.current = false;
+      setHasCandles(false);
+      return;
+    }
+
     const built = buildSeries(
       activeSymbolRef.current,
       bw,
@@ -1105,9 +1284,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     );
     const rows = built.rows;
     rejectedCountRef.current = built.rejected;
+    // RAW truth first, then its pure HA fold for painting.
+    rawRef.current = built.raw;
     dataRef.current = rows;
     applyCandleData(candleSeries, volume, rows);
-    targetSlotKeyRef.current = "";
     // ── TARGET-LAYER ANCHOR (fix: no vanish on server candle close) ──
     // `swapKey` changes whenever serverCandleVersion / data.length / dataEpoch /
     // lead offset changes. Only the STRUCTURAL part (symbol/timeframe/data
@@ -1120,8 +1300,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     const structuralKey = `SYM|${activeSymbolRef.current}|${tf}|${dataEpoch}|${
       selectedLeadOffsetMs ?? "auto"
     }`;
-    if (targetStructuralKeyRef.current !== structuralKey) {
+    const structuralChanged = targetStructuralKeyRef.current !== structuralKey;
+    if (structuralChanged) {
       targetStructuralKeyRef.current = structuralKey;
+      lastTargetIntervalsRef.current = targetIntervalsFor(
+        expSecondsRef.current,
+        tfSecondsRef.current,
+      );
       projectionRef.current.reset();
       signalHoldRef.current.reset();
       try {
@@ -1129,8 +1314,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       } catch {}
     }
     if (rows.length > 0) {
-      updateTargetLayer(rows[rows.length - 1].close);
+      // Anchor on the RAW close — never the HA display close.
+      updateTargetLayer(rawAnchorClose(rawRef.current));
     } else {
+      lastTargetIntervalsRef.current = 0;
       try {
         targetSeriesRef.current?.setData([]);
       } catch {}
@@ -1151,15 +1338,19 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       } catch {}
     }
     setHasCandles(rows.length > 0);
-    reanchor(
-      rows.length,
-      targetIntervalsFor(expSecondsRef.current, tfSecondsRef.current),
-    );
+    if (structuralChanged && rows.length > 0) {
+      reanchor(
+        rows.length,
+        targetIntervalsFor(expSecondsRef.current, tfSecondsRef.current),
+      );
+    }
   }, [swapKey, updateTargetLayer, reanchor, effectiveSignal, feedStatus, tf, dataEpoch, selectedLeadOffsetMs]);
 
   useEffect(() => {
     if (dataRef.current.length > 0) {
-      updateTargetLayer(dataRef.current[dataRef.current.length - 1].close);
+      // Re-run the projection when the forecast inputs change, still anchored on
+      // the RAW tape close so the TGT tracks the live feed.
+      updateTargetLayer(rawAnchorClose(rawRef.current));
     }
   }, [
     expirationSeconds,
@@ -1171,7 +1362,6 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     effSignal,
     currentPrice,
     liveCloseView,
-    lookaheadHorizon,
     activeSymbol,
     swapKey,
     updateTargetLayer,
@@ -1180,8 +1370,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   ]);
 
   useEffect(() => {
-    setLookaheadHorizon(Math.max(1, Math.round(expSeconds / tfSeconds)));
-  }, [expSeconds, tfSeconds, setLookaheadHorizon]);
+    const anchorMs = Date.now();
+    targetCountdownAnchorRef.current = anchorMs;
+    setHudNowMs(anchorMs);
+  }, [expSeconds]);
 
   useEffect(() => {
     const unsub = realtimeAggregator.subscribeLive((candle) => {
@@ -1192,15 +1384,23 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       if (!want || emitSymbol !== want) return;
       const candleSeries = candleSeriesRef.current;
       if (!candleSeries) return;
-      const arr = dataRef.current;
-      const result = mergeLiveTick(arr, c);
+      // ── RAW-ONLY MUTATION (the "giant spike" / mixed-axis fix) ──
+      // The tick is a REAL broker candle. It is merged into `rawRef` and NEVER
+      // into `dataRef`, which holds the Heikin-Ashi fold. Previously the raw
+      // tick was spliced straight into the folded array, so the forming bar
+      // rendered raw geometry beside HA bars — two encodings on one price axis —
+      // and the target anchor flipped between raw and HA on every rebuild.
+      const rawArr = rawRef.current;
+      const result = mergeLiveTick(rawArr, c);
       if (result === "stale") return;
+      // The display fold is re-derived by the rAF painter (once per frame), not
+      // here — raw is the only array this handler is allowed to touch.
       // MASTER MISSION part 3 — a live tick only FLAGS a pending paint; the
       // unified rAF loop drains it once per frame, so a burst of N ticks in a
       // frame becomes ONE chart paint (no per-tick series rebuild, no per-tick
       // buildTargetCandles, no forced reflow inside a tick handler).
       pendingPaintRef.current = true;
-      setHasCandles(arr.length > 0);
+      setHasCandles(rawArr.length > 0);
     });
     return unsub;
   }, [activeSymbol, swapKey]);
@@ -1223,6 +1423,15 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         if (pendingPaintRef.current) {
           pendingPaintRef.current = false;
           const candleSeries = candleSeriesRef.current;
+          // Re-derive the DISPLAY domain from RAW here, at most once per frame, so
+          // a coalesced burst of N ticks costs ONE fold instead of N. `dataRef`
+          // is rebuilt wholesale rather than patched, which is what keeps the
+          // recursive HA chain continuous.
+          //
+          // PART 32[236] — `.raw`, not `.display`: the rendered tape shares ONE
+          // price domain with the TGT/ANC/LIVE lines and the TGT badge. See the
+          // RAW/DISPLAY contract in realtimeCandleAggregator.ts.
+          dataRef.current = syncRawDisplay(rawRef.current).raw as GridCandle[];
           const arr = dataRef.current;
           const count = arr.length;
           if (candleSeries && count > 0) {
@@ -1289,7 +1498,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
                 });
               }
               if (count > 0) {
-                updateTargetLayer(arr[count - 1].close);
+                // Anchor the projection on the RAW tape close.
+                updateTargetLayer(rawAnchorClose(rawRef.current));
               }
             }
           } else {
@@ -1347,24 +1557,17 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const hudLive = Number(currentPriceRef.current) || 0;
   const hudDeltaPct =
     hudTarget > 0 && hudLive > 0 ? ((hudTarget - hudLive) / hudLive) * 100 : 0;
-  const hudFrame =
-    Array.isArray(hudPred?.future_candles) &&
-    hudPred.future_candles.length > 0
-      ? (hudPred.future_candles as Array<{ timestamp?: number }>)
-      : [];
-  const hudExpiryTs =
-    hudFrame.length > 0
-      ? Number(hudFrame[hudFrame.length - 1].timestamp) || 0
-      : 0;
-  const hudRemainingMs = hudExpiryTs > 0 ? hudExpiryTs - hudNowMs : 0;
+  const hudCountdownSeconds = expiryCountdownRemainingSeconds(
+    hudNowMs,
+    targetCountdownAnchorRef.current,
+    expSeconds,
+  );
   const hudCountdown =
-    hudExpiryTs > 0
-      ? `${String(Math.max(0, Math.floor(hudRemainingMs / 60000))).padStart(
+    expSeconds > 0
+      ? `${String(Math.floor(hudCountdownSeconds / 60)).padStart(
           2,
           "0",
-        )}:${String(
-          Math.max(0, Math.floor((hudRemainingMs % 60000) / 1000)),
-        ).padStart(2, "0")}`
+        )}:${String(hudCountdownSeconds % 60).padStart(2, "0")}`
       : null;
   const hudSignalColor =
     hudSignal === "BUY" ? BULLISH : hudSignal === "SELL" ? BEARISH : AXIS_TEXT;
@@ -1377,8 +1580,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
 
   return (
     <div
-      className="relative w-full h-[calc(100vh-320px)] min-h-[500px] rounded-xl overflow-hidden border bg-[var(--tp-chart-bg)] border-[var(--tp-border)] transition-colors duration-150"
+      className="relative w-full h-[320px] xl:h-full min-h-0 rounded-xl overflow-hidden border bg-[var(--tp-chart-bg)] border-[var(--tp-border)] transition-colors duration-150"
     >
+      {/* Publishes the SAME view the HUD above rendered — one evaluate, one
+          truth, so the CoherenceStrip cannot show a different signal. */}
+      <SignalViewPublisher view={hudView} />
       <div ref={containerRef} className="absolute inset-0" />
 
       {/* ── CURRENT TIME (LIVE) DIVIDER ── the neon boundary between the real
@@ -1406,9 +1612,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           <span className="text-[9px] font-mono text-emerald-400 uppercase tracking-widest font-black">
             LIVE - {tf}
           </span>
-          {lookaheadHorizon != null && lookaheadHorizon > 1 ? (
+          {targetDurationMin > 1 ? (
             <span className="text-[9px] font-mono text-sky-400 uppercase tracking-widest font-bold bg-sky-500/10 border border-sky-500/20 rounded px-1.5 py-0.5">
-              LOOKAHEAD {lookaheadHorizon}m
+              LOOKAHEAD {targetDurationMin}m
             </span>
           ) : null}
         </div>

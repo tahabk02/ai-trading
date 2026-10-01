@@ -15,17 +15,53 @@ const nextConfig = {
     NEXT_PUBLIC_AI_ENGINE_URL: process.env.NEXT_PUBLIC_AI_ENGINE_URL,
   },
 
-  // ── Rewrites for Local Development Only ──
-  // In production, the frontend code (getBaseUrl.ts) detects the server hostname
-  // and constructs absolute URLs directly (e.g., http://91.99.71.111:4000/api/v1).
-  // These rewrites are only needed for localhost development where both frontend
-  // and backend are accessible on different ports (3000, 4000, 8000).
+  // ── Trailing-slash normalization ──
+  // engine.io-client (socket.io-client) requests "/socket.io/?EIO=4&transport=…"
+  // WITH a trailing slash. Next's default trailing-slash redirect answers that
+  // with 308 → "/socket.io?EIO=4…", which the browser WebSocket API cannot
+  // follow (the upgrade fails outright; XHR polling survives by following it).
   //
-  // Strategy:
-  // - Localhost dev: Next.js rewrites proxy requests to localhost:4000/8000
-  // - Production: Browser-side code detects hostname and uses absolute URLs
-  // - Dev Tunnels: Browser-side code uses relative paths with rewrites
+  // PRODUCTION ONLY. `server.js` intercepts /api, /socket.io, /ai and /health
+  // BEFORE Next ever sees them, so the flag is belt-and-braces there.
+  //
+  // It must NOT be enabled in development: with it on, path-to-regexp stops
+  // matching the dev rewrite `/socket.io/:path*` against the zero-segment and
+  // trailing-slash forms, and `/socket.io/?EIO=4&transport=polling` fell
+  // through to a 404 — which killed the live feed in dev. Dev relies on the
+  // original rewrite behaviour, so the flag is gated on NODE_ENV.
+  skipTrailingSlashRedirect: process.env.NODE_ENV === "production",
+
+  // ── PROXYING: RUNTIME IN PROD, BUILD-TIME REWRITES IN DEV ──
+  // Production runs `client-app/server.js` (a custom server that resolves its
+  // upstreams from the PROCESS ENVIRONMENT ON EVERY REQUEST), so rewrites MUST
+  // be empty in a production build:
+  //
+  //   `rewrites()` runs ONCE at config-load time — during `next build` — and
+  //   the expanded destinations are frozen into `.next/routes-manifest.json`.
+  //   `npm start` never re-reads `process.env` for them. Therefore
+  //   `API_PROXY_URL=http://core-backend:4000` in `docker-compose.prod.yml`
+  //   was silently IGNORED, and the build-time fallback
+  //   `http://localhost:4000` was baked in instead. Inside the client-app
+  //   container `localhost:4000` *is client-app*, so every proxied request
+  //   looped back into the Next server and 404'd.
+  //
+  // DEVELOPMENT is different: `next dev` does NOT boot `server.js` (Next.js
+  // cannot attach a custom server to the dev server), so `/api/*`,
+  // `/socket.io/*` and `/ai/*` would have no handler at all and every proxied
+  // request would 404. That is why these localhost rewrites are kept for dev
+  // only. `next build` always runs with NODE_ENV=production, so a production
+  // image can never bake them in.
+  //
+  // If you add a path here, it only ever affects `next dev`. Production
+  // routing lives in matchRoute() in server.js.
   async rewrites() {
+    if (process.env.NODE_ENV === "production") {
+      // Intentionally empty — see above. Proxying is handled at runtime.
+      return [];
+    }
+
+    // Dev-only: the browser talks exclusively to the Next origin (see
+    // src/utils/config.ts) so these are all localhost in development.
     return [
       // 1. Core Backend REST API
       {
@@ -33,7 +69,9 @@ const nextConfig = {
         destination: "http://localhost:4000/api/:path*",
       },
 
-      // 2. Core Backend Socket.IO
+      // 2. Core Backend Socket.IO (required — `awaiting_ssid` / feed_status
+      //    reach the UI over this path). `:path*` matches the zero-segment
+      //    form `/socket.io` that the client actually dials.
       {
         source: "/socket.io/:path*",
         destination: "http://localhost:4000/socket.io/:path*",
