@@ -54,10 +54,55 @@ export const orderbookHealth = {
   },
 };
 
-/** Per-request upstream cap. The controller MUST bound the whole fork (spot +
- *  candles) at 5s so a dead upstream returns a JSON 504 instead of letting a
- *  proxy respond with a bare 502. */
-const UPSTREAM_TIMEOUT_MS = 5_000;
+/* ── Upstream deadline budget ─────────────────────────────────────────────────
+ *
+ * PART 32.5a [261] — the outer cap on the whole spot+candles fork was a flat
+ * 5s, which was a BUG rather than a bound: 5s is EXACTLY the primary tier's own
+ * budget inside `forexData.service`. So whenever the primary tier was slow it
+ * consumed the entire outer deadline by itself, and the 504 fired at the same
+ * instant the primary gave up — the fallback tiers that exist to cover exactly
+ * that case were cut off before they ever ran. Measured cost: a 504 at 5.00s
+ * while the cascade still had three healthy tiers to try.
+ *
+ * The cap therefore has to cover the WHOLE cascade: primary tier plus every
+ * fallback tier, each allowed to run to its own budget before the chain gives
+ * up.
+ *
+ *      primary (5s) + 3 fallback tiers x 2s  =  11s, + 1s margin  =  12s
+ *
+ * The margin absorbs connect/teardown overhead charged to no single tier, so a
+ * fully exhausted cascade still resolves inside the cap and returns a real
+ * upstream verdict (502 with the upstream detail) rather than a bare timeout.
+ *
+ * These mirror the cascade in `forexData.service.ts` and must stay in step with
+ * it. They are re-read from the SAME environment variables the service uses, so
+ * an operator tuning FOREX_HTTP_TIMEOUT_MS / FOREX_FALLBACK_TIMEOUT_MS widens
+ * both in lockstep instead of silently reintroducing this truncation. (They are
+ * duplicated rather than imported only because that module's timeout constants
+ * are not currently exported; exporting them there is the tidier long-term
+ * shape.)
+ */
+function envMs(name: string, fallback: number, min = 100, max = 60_000): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0
+    ? Math.min(Math.max(Math.floor(raw), min), max)
+    : fallback;
+}
+
+/** Primary-tier budget in `forexData.service` (PO mirror / Yahoo / GitHub). */
+export const FOREX_PRIMARY_TIMEOUT_MS = envMs("FOREX_HTTP_TIMEOUT_MS", 5_000);
+
+/** Number of serial fallback tiers: Frankfurter, open.er-api, CoinGecko. */
+export const FOREX_FALLBACK_TIER_COUNT = 3;
+
+/** Per-tier fallback budget in `forexData.service`. */
+export const FOREX_FALLBACK_TIMEOUT_MS = envMs("FOREX_FALLBACK_TIMEOUT_MS", 2_000);
+
+/** Worst-case cost of one fully exhausted `getLiveSpot` cascade. */
+export const FOREX_CHAIN_BUDGET_MS =
+  FOREX_PRIMARY_TIMEOUT_MS + FOREX_FALLBACK_TIER_COUNT * FOREX_FALLBACK_TIMEOUT_MS;
+
+const UPSTREAM_TIMEOUT_MS = FOREX_CHAIN_BUDGET_MS + 1_000;
 
 function withTimeout<T>(
   promise: Promise<T>,
@@ -134,8 +179,9 @@ export const getOrderBook = async (req: Request, res: Response) => {
 
   try {
     // ── Fetch REAL live spot + REAL historical candles in parallel, bounded
-    //    by a hard 5s cap (UPSTREAM_TIMEOUT_MS). On timeout → 504 JSON (never a
-    //    bare proxy 504).
+    //    by a hard cap (UPSTREAM_TIMEOUT_MS) sized to cover the ENTIRE forex
+    //    cascade — primary tier plus every fallback tier. On timeout → 504 JSON
+    //    (never a bare proxy 504).
     let spotResult: Awaited<ReturnType<typeof forexDataService.getLiveSpot>>;
     let barResult: Awaited<
       ReturnType<typeof forexDataService.getHistoricalCandles>
@@ -161,7 +207,7 @@ export const getOrderBook = async (req: Request, res: Response) => {
         symbol: normalizedSymbol,
         retryAfterMs: isTimeout ? 1000 : undefined,
         message: isTimeout
-          ? "Upstream forex rate pipeline exceeded the 5s order-book deadline."
+          ? `Upstream forex rate pipeline exceeded the ${Math.round(UPSTREAM_TIMEOUT_MS / 1000)}s order-book deadline (primary + all fallback tiers).`
           : "Upstream forex rate pipeline failed.",
         detail: cause instanceof Error ? cause.message : String(cause),
         timestamp: new Date().toISOString(),

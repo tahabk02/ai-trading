@@ -194,18 +194,46 @@ export function classifyAiEngineFailure(err: unknown): AiEngineFailure {
   };
 }
 
+/**
+ * PART 32.5a [262] — connection failures that are DEFINITIVE rather than
+ * transient: nothing is listening on the engine's port, so the destination
+ * cannot answer. ECONNREFUSED in particular is NOT "still starting up" — a
+ * booting engine already has its socket bound and answers with HTTP 503 (which
+ * is retried below as a 5xx). A refused connection means the process is not
+ * there at all, and re-dialling it inside one request window cannot change
+ * that, so every retry was pure latency.
+ */
+const DEFINITIVE_ENGINE_CONNECTION_CODES = new Set([
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+
 /** True when a downstream AI-Engine failure is TRANSIENT (worth a retry):
- *  no HTTP response at all (ECONNREFUSED/timeout/network), 429 rate-limit, or
- *  any 5xx — including the 503 the engine returns while starting up. 4xx
- *  validation errors are permanent and never retried. */
-function isTransientAiFailure(err: unknown): boolean {
+ *  no HTTP response at all (timeout/network), 429 rate-limit, or any 5xx —
+ *  including the 503 the engine returns while starting up. 4xx validation
+ *  errors are permanent and never retried, and neither are the definitive
+ *  "nothing is listening" codes above.
+ *
+ *  PART 32.5a [262]: a dead engine used to match the blanket `!err.response`
+ *  rule and burn the whole retry ladder. Measured cost with :8000 down —
+ *  3 attempts + 500ms/1000ms backoff = 12,280ms of stall on EVERY page load,
+ *  because /predict is called on mount. Retrying only what can actually clear
+ *  makes an offline engine fail in well under a second, and the breaker records
+ *  the refusal so later calls short-circuit for the whole cooldown window. */
+export function isTransientAiFailure(err: unknown): boolean {
   if (!axios.isAxiosError(err)) return false;
   const status = err.response?.status;
-  if (!err.response) return true;
+  if (!err.response) {
+    if (DEFINITIVE_ENGINE_CONNECTION_CODES.has(err.code || "")) return false;
+    return true;
+  }
   return status === 429 || (status != null && status >= 500);
 }
 
-async function postWithRetry<T>(
+export async function postWithRetry<T>(
   url: string,
   payload: unknown,
   config: Record<string, unknown>,
