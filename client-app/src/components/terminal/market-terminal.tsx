@@ -57,7 +57,6 @@ export const MarketTerminal: React.FC = () => {
     setGlobalHorizon,
     setCardHorizon,
     refreshNow,
-    setMinConfidencePct,
     setMinTier,
     toggleHideBelowThreshold,
   } = useMarketTerminal();
@@ -69,10 +68,14 @@ export const MarketTerminal: React.FC = () => {
   const favoritesOnly = useMarketTerminalStore(selectFavoritesOnly);
   const connectedFlag = useMarketTerminalStore(selectTerminalConnected);
   // Confidence Filter — subscribed live so the grid demotes/hides the instant
-  // the slider moves (no waiting for the throttled engine re-dispatch).
+  // the tier changes (no waiting for the throttled engine re-dispatch).
+  // PART 31 [309]: this is a READ-OUT, not an input. `setMinTier` resolves the
+  // selected tier's executable floor (resolveExecutionFloor) and writes it here
+  // in the same atomic store update, so the displayed bar and the bar forwarded
+  // as `min_confidence` are one value by construction.
   const minConfidencePct = useMarketTerminalStore(selectMinConfidencePct);
-  // Tier Selector — same live-subscription rationale: cards re-render the
-  // moment the operator changes the band they trade.
+  // Tier Selector — the ONLY input for the bar above; same live-subscription
+  // rationale: cards re-render the moment the operator changes the band.
   const minTier = useMarketTerminalStore(selectMinTier);
   const hideBelowThreshold = useMarketTerminalStore(selectHideBelowThreshold);
   const predictions = useMarketTerminalStore(selectTerminalPredictions);
@@ -162,8 +165,8 @@ export const MarketTerminal: React.FC = () => {
             <AssetFilterStatus />
             <ConfidenceFilter
               value={minConfidencePct}
+              tier={minTier}
               hideBelow={hideBelowThreshold}
-              onCommit={setMinConfidencePct}
               onToggleHide={toggleHideBelowThreshold}
             />
             <TierSelector value={minTier} onCommit={setMinTier} />
@@ -196,7 +199,7 @@ export const MarketTerminal: React.FC = () => {
         <p className="mt-4 text-center text-[8px] text-term-ink-faint num-fig uppercase tracking-widest">
           All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 —
           live micro-quant verdicts · 60% definitive gate · Conf bar{" "}
-          {minConfidencePct.toFixed(1)}% · {symbols.length} shown
+          {minConfidencePct.toFixed(1)}% ({minTier} floor) · {symbols.length} shown
           {hiddenCount > 0 ? ` · ${hiddenCount} below bar hidden` : ""}
         </p>
       </main>

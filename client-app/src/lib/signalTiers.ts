@@ -138,6 +138,25 @@ export function resolveExecutionFloor(
   };
 }
 
+/**
+ * The executable floor a selection implies, as a PERCENTAGE (0..100).
+ *
+ * PART 31 [309]: this is the ONLY thing that may set `minConfidencePct`. The
+ * Confidence Filter stopped being an independently draggable value and became
+ * a read-out of the selected tier's real floor, so the number the trader sees
+ * and the number the engine is asked for can no longer disagree.
+ */
+export function executionFloorPct(selection: TierSelection | null | undefined): number {
+  return resolveExecutionFloor(selection).barFrac * 100;
+}
+
+/**
+ * Absolute hard floor (percent) implied by LOWEST_TRADABLE_TIER. Nothing — no
+ * interaction path, no persisted value, no direct store poke — may express an
+ * executable bar below this.
+ */
+export const MIN_EXECUTABLE_FLOOR_PCT = TIER_THRESHOLDS[LOWEST_TRADABLE_TIER] * 100;
+
 /** True when ``tier`` clears the trader's selected floor.
  *
  *  This is the filter predicate for "show me signals I would actually trade".

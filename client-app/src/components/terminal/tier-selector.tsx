@@ -10,6 +10,7 @@ import {
 import {
   TIER_SELECTIONS,
   resolveExecutionFloor,
+  tierFloorClampNotice,
   tierSelectionHint,
 } from "@/lib/tierFilter";
 
@@ -49,6 +50,9 @@ export const TierSelector: React.FC<TierSelectorProps> = ({
   const isCustom = mounted && value !== DEFAULT_EXECUTION_TIER;
   const floor = resolveExecutionFloor(effective);
   const barPct = (floor.barFrac * 100).toFixed(1);
+  // PART 31 [310] — T5 changes nothing executable, so SAY that rather than
+  // leaving a 70.0% bar that looks like the click was ignored.
+  const clampNotice = mounted ? tierFloorClampNotice(effective) : "";
 
   return (
     <div className="flex items-center gap-1 select-none">
@@ -91,11 +95,18 @@ export const TierSelector: React.FC<TierSelectorProps> = ({
         </span>
       </div>
       {floor.floored && (
+        // Compact marker only: the full sentence renders ONCE, next to the
+        // 70.0% read-out in `ConfidenceFilter` — that is where a trader looking
+        // at a bar that did not move needs the explanation. This chip carries
+        // the same sentence as its tooltip so the two controls agree.
         <span
           className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-1 rounded-chip border border-slate-500/50 bg-slate-500/10 text-slate-400 whitespace-nowrap"
-          title="T5 is emitted and monitored, but the executable bar is floored at T4 (70%) so a WEAK signal can never trade."
+          title={
+            clampNotice ||
+            "The executable bar is floored so a WEAK signal can never trade."
+          }
         >
-          T5 monitor
+          ⌁ floored
         </span>
       )}
     </div>

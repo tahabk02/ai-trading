@@ -2,21 +2,23 @@
  * minConfidenceFilter.test.ts — CONFIDENCE FILTER (Alpha.5 Pro).
  *
  * Proves the client-side contract shared by the terminal toolbar + cards:
- *   • clampMinConfidencePct — the operator bar lives in 50..99, anything else
- *     (out-of-range, NaN, missing) falls back to the safe value.
+ *   • clampMinConfidencePct — the bar is HARD-FLOORED at
+ *     MIN_EXECUTABLE_FLOOR_PCT (70.0%, i.e. LOWEST_TRADABLE_TIER) and capped at
+ *     99. PART 31 [311] removed the free 50..99 drag; anything below the floor
+ *     is RAISED, not honoured.
  *   • cardEffectiveConfidence — horizon wins over live; only strictly positive
  *     confidences are measurable (0 = market-waiting convention).
  *   • isBelowConfidenceBar — strictly-below demotion; at/above the bar and
  *     waiting cards are never hidden behind the filter.
- *   • store integration — the store hydrates/persists the bar and honors the
+ *   • store integration — the store derives the bar from the tier and honors the
  *     hide-below toggle in the node (no-window) environment.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   MIN_CONFIDENCE_DEFAULT_PCT,
-  MIN_CONFIDENCE_LOW_PCT,
   MIN_CONFIDENCE_HIGH_PCT,
+  MIN_EXECUTABLE_FLOOR_PCT,
   clampMinConfidencePct,
   cardEffectiveConfidence,
   isBelowConfidenceBar,
@@ -26,14 +28,23 @@ import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 describe("clampMinConfidencePct", () => {
   it("keeps in-range values untouched", () => {
     expect(clampMinConfidencePct(96.5)).toBe(96.5);
-    expect(clampMinConfidencePct(50)).toBe(50);
+    expect(clampMinConfidencePct(MIN_EXECUTABLE_FLOOR_PCT)).toBe(
+      MIN_EXECUTABLE_FLOOR_PCT,
+    );
     expect(clampMinConfidencePct(99)).toBe(99);
     expect(clampMinConfidencePct(80.5)).toBe(80.5);
   });
 
-  it("clamps out-of-range values into 50..99", () => {
-    expect(clampMinConfidencePct(20)).toBe(MIN_CONFIDENCE_LOW_PCT);
-    expect(clampMinConfidencePct(0)).toBe(MIN_CONFIDENCE_LOW_PCT);
+  it("RAISES anything below the LOWEST_TRADABLE_TIER floor instead of honouring it", () => {
+    // PART 31 [311]: the retired slider's 50..99 range included sub-70% values,
+    // which would have asked the engine for a bar under T4.
+    for (const below of [20, 50, 60, 69.9, 0]) {
+      expect(clampMinConfidencePct(below)).toBe(MIN_EXECUTABLE_FLOOR_PCT);
+    }
+    expect(clampMinConfidencePct(-5)).toBe(MIN_EXECUTABLE_FLOOR_PCT);
+  });
+
+  it("caps at 99", () => {
     expect(clampMinConfidencePct(120)).toBe(MIN_CONFIDENCE_HIGH_PCT);
     expect(clampMinConfidencePct(99.9)).toBe(MIN_CONFIDENCE_HIGH_PCT);
   });
@@ -42,9 +53,18 @@ describe("clampMinConfidencePct", () => {
     expect(clampMinConfidencePct(undefined)).toBe(MIN_CONFIDENCE_DEFAULT_PCT);
     expect(clampMinConfidencePct(null)).toBe(MIN_CONFIDENCE_DEFAULT_PCT);
     expect(clampMinConfidencePct(Number.NaN)).toBe(MIN_CONFIDENCE_DEFAULT_PCT);
+    // Non-finite is treated as absent (there is no honest bar of Infinity),
+    // so it takes the fallback rather than being clamped up to the 99 cap.
     expect(clampMinConfidencePct(Number.POSITIVE_INFINITY)).toBe(
       MIN_CONFIDENCE_DEFAULT_PCT,
     );
+    expect(clampMinConfidencePct(Number.NEGATIVE_INFINITY)).toBe(
+      MIN_CONFIDENCE_DEFAULT_PCT,
+    );
+  });
+
+  it("floors an explicit sub-70% FALLBACK too — the floor is not a default", () => {
+    expect(clampMinConfidencePct(undefined, 10)).toBe(MIN_EXECUTABLE_FLOOR_PCT);
   });
 });
 
@@ -91,26 +111,17 @@ describe("isBelowConfidenceBar", () => {
 
 describe("useMarketTerminalStore — Confidence Filter state", () => {
   beforeEach(() => {
-    // Reset to the default bar so tests are order-independent.
-    useMarketTerminalStore.getState().setMinConfidencePct(MIN_CONFIDENCE_DEFAULT_PCT);
+    // Reset to the default tier so tests are order-independent. The bar is
+    // DERIVED (PART 31 [309]) so there is no bar setter left to reset.
+    useMarketTerminalStore.getState().setMinTier("T1");
     useMarketTerminalStore.getState().setHideBelowThreshold(false);
   });
 
-  it("hydrates with the engine's default 96.5% bar (no window in node)", () => {
+  it("hydrates with the engine's default T1 floor (96.5%, no window in node)", () => {
     const s = useMarketTerminalStore.getState();
+    expect(s.minTier).toBe("T1");
     expect(s.minConfidencePct).toBe(MIN_CONFIDENCE_DEFAULT_PCT);
     expect(s.hideBelowThreshold).toBe(false);
-  });
-
-  it("setMinConfidencePct clamps and persists the live bar", () => {
-    useMarketTerminalStore.getState().setMinConfidencePct(88);
-    expect(useMarketTerminalStore.getState().minConfidencePct).toBe(88);
-
-    useMarketTerminalStore.getState().setMinConfidencePct(30); // below range
-    expect(useMarketTerminalStore.getState().minConfidencePct).toBe(50);
-
-    useMarketTerminalStore.getState().setMinConfidencePct(120); // above range
-    expect(useMarketTerminalStore.getState().minConfidencePct).toBe(99);
   });
 
   it("setHideBelowThreshold reflects immediately", () => {
@@ -120,23 +131,26 @@ describe("useMarketTerminalStore — Confidence Filter state", () => {
     expect(useMarketTerminalStore.getState().hideBelowThreshold).toBe(false);
   });
 
-  it("store init stays deterministic even when a persisted bar exists", () => {
-    // Simulate a returning operator whose localStorage says 87.0 — the source
-    // of the SSR hydration mismatch (server 96.5 vs client 87.0).
-    const store = { getItem: () => "87", setItem: () => {}, removeItem: () => {} };
+  it("store init stays deterministic even when a persisted tier exists", () => {
+    // Simulate a returning operator whose localStorage says T4 — the source of
+    // the SSR hydration mismatch (server 96.5 vs client 70.0). The bar follows
+    // the tier, so it is the tier's disagreement that must not leak pre-paint.
+    const store = { getItem: () => "T4", setItem: () => {}, removeItem: () => {} };
     (globalThis as Record<string, unknown>).window = { localStorage: store };
     try {
       // Re-populate state the way a fresh page load would: module init order
-      // is deterministic (default 96.5), NOT the persisted override.
+      // is deterministic (T1 / 96.5), NOT the persisted override.
       useMarketTerminalStore.setState({
+        minTier: "T1",
         minConfidencePct: clampMinConfidencePct(undefined),
         hideBelowThreshold: false,
-      });
+      } as never);
       expect(useMarketTerminalStore.getState().minConfidencePct).toBe(96.5);
       // The persisted value is applied ONLY via the post-hydration action the
       // terminal hook calls after first paint.
       useMarketTerminalStore.getState().hydrateClientPreferences();
-      expect(useMarketTerminalStore.getState().minConfidencePct).toBe(87);
+      expect(useMarketTerminalStore.getState().minTier).toBe("T4");
+      expect(useMarketTerminalStore.getState().minConfidencePct).toBe(70);
     } finally {
       delete (globalThis as Record<string, unknown>).window;
     }

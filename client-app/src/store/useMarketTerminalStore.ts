@@ -3,18 +3,20 @@ import { OTC_FOREX_PAIRS, REAL_FOREX_PAIRS } from "@/constants/symbols";
 import type { PredictionResponse, MarketQuote } from "@/services/api";
 import {
   clampMinConfidencePct,
-  MIN_CONFIDENCE_DEFAULT_PCT,
   persistHideBelowThreshold,
-  persistMinConfidencePct,
   readPersistedHideBelowThreshold,
-  readPersistedMinConfidencePct,
 } from "@/lib/minConfidenceFilter";
 import {
   clampTierSelection,
   persistTierSelection,
   readPersistedTierSelection,
 } from "@/lib/tierFilter";
-import { DEFAULT_EXECUTION_TIER, type SignalTier, type TierSelection } from "@/lib/signalTiers";
+import {
+  DEFAULT_EXECUTION_TIER,
+  executionFloorPct,
+  type SignalTier,
+  type TierSelection,
+} from "@/lib/signalTiers";
 import {
   type AssetClass,
   type AssetClassFilter,
@@ -133,10 +135,18 @@ interface MarketTerminalState {
   cardHorizons: Record<string, HorizonMinutes>;
   filter: AssetClassFilter;
   /**
-   * Confidence Filter — minimum executable confidence (50..99%, default 96.5%).
-   * Forwarded as `min_confidence` on every predict dispatch and applied as an
-   * instant grid rule: pairs with a measurable confidence strictly below this
-   * bar render SCORED-ONLY (and can be hidden via `hideBelowThreshold`).
+   * Confidence Filter — the executable confidence bar as a PERCENTAGE.
+   *
+   * PART 31 [309]/[311]: this is DERIVED, never set independently. `setMinTier`
+   * writes `executionFloorPct(tier)` here in the same atomic `set()` that
+   * stores the tier, so the number the trader reads, the number the grid
+   * filters with, and the number forwarded as `min_confidence` are all the same
+   * value by construction. There is deliberately no setter for it — a free
+   * slider could express any value in 50..99, including below T4's 70%, which
+   * would ask the engine for a sub-LOWEST_TRADABLE_TIER bar.
+   *
+   * Applied as an instant grid rule: pairs with a measurable confidence strictly
+   * below this bar render SCORED-ONLY (and can be hidden via `hideBelowThreshold`).
    */
   minConfidencePct: number;
   /**
@@ -189,17 +199,18 @@ interface MarketTerminalState {
   setFavoritesOnly: (v: boolean) => void;
   /** Reset every asset-filter field back to the "show everything" default. */
   resetAssetFilter: () => void;
-  setMinConfidencePct: (v: number) => void;
-  /** Choose which band (T1..T5) the operator wants to trade. */
+  /** Choose which band (T1..T5) the operator wants to trade. This is the ONLY
+   *  way to change `minConfidencePct` — the bar follows the tier's floor. */
   setMinTier: (v: TierSelection) => void;
   setHideBelowThreshold: (v: boolean) => void;
   /**
-   * Hydrate localStorage-derived preferences (confidence bar + hide-below
-   * toggle) AFTER first paint — never during module init. The store is
-   * initialized DETERMINISTICALLY to the engine default on both server and
-   * client, so React hydration always sees matching values (a persisted 87.0
-   * is never rendered into the SSR tree, → no text-content mismatch, no
-   * locked UI). Call once from a client-only useEffect.
+   * Hydrate localStorage-derived preferences (tier + hide-below toggle) AFTER
+   * first paint — never during module init. The store is initialized
+   * DETERMINISTICALLY to the engine default on both server and client, so React
+   * hydration always sees matching values (a persisted T4 is never rendered
+   * into the SSR tree, → no text-content mismatch, no locked UI). The confidence
+   * bar is re-derived from the restored tier, never restored on its own. Call
+   * once from a client-only useEffect.
    */
   hydrateClientPreferences: () => void;
   setConnected: (v: boolean) => void;
@@ -227,12 +238,13 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
   globalHorizon: 1,
   cardHorizons: {},
   filter: "all",
-  // HYDRATION SAFETY: the Confidence Filter bar initializes DETERMINISTICALLY
-  // to the app default (96.5%) on BOTH the server and the client. Persisted
-  // localStorage values (e.g. 87.0) are applied only via
-  // `hydrateClientPreferences()` after first paint — never at module scope —
-  // so SSR/client HTML can never diverge (the hydration-crash root cause).
-  minConfidencePct: MIN_CONFIDENCE_DEFAULT_PCT,
+  // HYDRATION SAFETY: the Confidence Filter bar is DERIVED from the tier
+  // (PART 31 [309]), and the tier itself initializes DETERMINISTICALLY to the
+  // strict default on BOTH the server and the client. Persisted localStorage
+  // values are applied only via `hydrateClientPreferences()` after first paint —
+  // never at module scope — so SSR/client HTML can never diverge (the
+  // hydration-crash root cause).
+  minConfidencePct: executionFloorPct(DEFAULT_EXECUTION_TIER),
   // Deterministic default on both server and client (mirrors
   // minConfidencePct). The persisted selection is applied only by
   // hydrateClientPreferences() after first paint, so SSR/client HTML can
@@ -455,16 +467,21 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
   // the write before `set()` also means the store update itself stays a pure
   // state transition, which is what keeps a slider drag off the main thread's
   // slow path.
-  setMinConfidencePct: (value) => {
-    const clamped = clampMinConfidencePct(value);
-    persistMinConfidencePct(clamped);
-    set({ minConfidencePct: clamped });
-  },
-
+  //
+  // PART 31 [309]/[311] — the confidence bar is DERIVED from the tier. Selecting
+  // a band resolves its executable floor and writes BOTH fields in one atomic
+  // `set()`, so a subscriber can never observe `minTier: "T5"` beside a stale
+  // `minConfidencePct` (React 18 batches, but zustand notifies synchronously per
+  // `set()`, so a two-write implementation WOULD tear). `clampMinConfidencePct`
+  // is applied as a belt-and-braces hard floor: it makes [312]'s "never below
+  // 70.0% regardless of interaction path" hold even if the resolution changes.
   setMinTier: (value) => {
     const clamped = clampTierSelection(value);
     persistTierSelection(clamped);
-    set({ minTier: clamped });
+    set({
+      minTier: clamped,
+      minConfidencePct: clampMinConfidencePct(executionFloorPct(clamped)),
+    });
   },
 
   setHideBelowThreshold: (value) => {
@@ -477,12 +494,17 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
   hydrateClientPreferences: () => {
     if (typeof window === "undefined") return;
     const classes = readPersistedAssetClasses();
+    // PART 31 [309]: only the TIER is persisted. The bar is re-derived from it,
+    // so a returning operator can never land on a stored confidence value that
+    // contradicts their tier — the retired `terminal_min_confidence_pct` key is
+    // ignored outright rather than trusted (it could hold a sub-70% value).
+    const tier = readPersistedTierSelection();
     set((state) => ({
-      ...(readPersistedMinConfidencePct() !== state.minConfidencePct
-        ? { minConfidencePct: readPersistedMinConfidencePct() }
-        : {}),
-      ...(readPersistedTierSelection() !== state.minTier
-        ? { minTier: readPersistedTierSelection() }
+      ...(tier !== state.minTier
+        ? {
+            minTier: tier,
+            minConfidencePct: clampMinConfidencePct(executionFloorPct(tier)),
+          }
         : {}),
       ...(readPersistedHideBelowThreshold() !== state.hideBelowThreshold
         ? { hideBelowThreshold: readPersistedHideBelowThreshold() }

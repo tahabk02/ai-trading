@@ -1,122 +1,116 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { cn } from "@/utils/cn";
 import {
-  MIN_CONFIDENCE_DEFAULT_PCT,
-  MIN_CONFIDENCE_LOW_PCT,
-  MIN_CONFIDENCE_HIGH_PCT,
-} from "@/lib/minConfidenceFilter";
+  DEFAULT_EXECUTION_TIER,
+  LOWEST_TRADABLE_TIER,
+  MIN_EXECUTABLE_FLOOR_PCT,
+  TIER_LABELS,
+  type TierSelection,
+} from "@/lib/signalTiers";
+import { tierFloorClampNotice } from "@/lib/tierFilter";
 
 interface ConfidenceFilterProps {
+  /** The DERIVED executable bar (percent) — written by `setMinTier`, never dragged. */
   value: number;
+  /** The tier that produced it, so the read-out can name its own source. */
+  tier: TierSelection;
   hideBelow: boolean;
-  onCommit: (value: number) => void;
   onToggleHide: (value: boolean) => void;
 }
 
 /**
- * ConfidenceFilter — the Confidence Filter control (Alpha.5 Pro).
+ * ConfidenceFilter — the executable-bar READ-OUT (PART 31 [309]/[311]).
  *
- * A compact slider (50..99%, step 0.5) + live % readout + an optional
- * "hide below bar" toggle.
+ * This used to be a draggable slider over 50..99%. It no longer is, and that is
+ * deliberate: `resolveExecutionFloor` already derives the bar from the selected
+ * tier, so an independently draggable value could contradict the tier it sat
+ * next to — and could be parked BELOW T4's 70%, asking the engine for a bar
+ * under LOWEST_TRADABLE_TIER. Same hazard as PART 34's force-override finding,
+ * one layer up: the UI had become a back door around the engine's floor.
  *
- * DRAG HANDOFF: the thumb and the numeric readout track the pointer
- * INSTANTLY through a local `draft` value, but the store commit is DEFERRED
- * to pointer/key release. Committing every `onChange` meant ~98 synchronous
- * store writes plus 98 grid re-filters for one full-width drag (50.0 -> 99.0
- * at step 0.5), each one notifying all 44 quote cards. The operator now gets
- * the same zero-latency visual feedback for one write per gesture.
+ * So the control renders the floor and states where it came from. The TIER
+ * selector is the only input; this is the honest consequence of it, with a
+ * non-draggable meter so the bar's position on 0..100 stays legible.
  *
- * A 250ms trailing debounce is kept as a safety net for input methods that
- * never fire a release event (assistive tech, synthetic events).
+ * The "hide below bar" toggle is unaffected — it is a VIEW concern (physical
+ * removal of demoted cards), not an executable-bar control.
+ *
+ * NOTE — this file's old DOM suite (`confidence-filter.dom.test.tsx`, 11 tests:
+ * local draft, release-commits, 250ms trailing debounce, one-write-per-drag) was
+ * DELETED with the drag, not kept as a signpost. A vitest file with no tests
+ * fails the run ("No test suite found"), so a documentation-only file cannot
+ * live here; and the only assertions it could carry were either vacuous
+ * (`propTypes` is undefined on an arrow component whether or not the slider
+ * exists) or already duplicated in the real replacements below. The two guards
+ * that actually matter now live where they test something real:
+ *   • `src/components/terminal/__tests__/tier-floor-readout.dom.test.tsx`
+ *     — clicks the real tier buttons, asserts the DOM has no `range` input and
+ *     no `role="slider"`, and that T5 reads 70.0% with the clamp copy visible;
+ *   • `src/lib/__tests__/tierConfidenceSync.test.ts`
+ *     — asserts the store exposes no `setMinConfidencePct` action at all.
  */
 export const ConfidenceFilter: React.FC<ConfidenceFilterProps> = ({
   value,
+  tier,
   hideBelow,
-  onCommit,
   onToggleHide,
 }) => {
   // HYDRATION SAFETY: client-derived / persisted values (localStorage) are
   // invisible until mounted. The first SSR + first client frames BOTH render
   // the deterministic default, so React never sees mismatching text content
   // (the 96.5 vs 87.0 crash) and the interactive controls attach immediately.
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => setMounted(true), []);
 
-  const committed = mounted ? value : MIN_CONFIDENCE_DEFAULT_PCT;
-  const isCustom = mounted && value !== MIN_CONFIDENCE_DEFAULT_PCT;
-
-  // Local optimistic thumb value: moves with the pointer at frame rate while
-  // the (expensive) store commit waits for the gesture to end.
-  const [draft, setDraft] = useState<number | null>(null);
-  const effective = draft ?? committed;
-  const display = effective.toFixed(1);
-
-  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearDebounce = () => {
-    if (debounceRef.current !== null) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-  };
-
-  // Pointer/key release: publish the draft and drop the trailing timer.
-  const commit = React.useCallback(() => {
-    clearDebounce();
-    setDraft((current) => {
-      if (current !== null && current !== committed) onCommit(current);
-      return null;
-    });
-  }, [committed, onCommit]);
-
-  // Every movement updates the local value only.
-  const handleInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const next = parseFloat(e.target.value);
-    setDraft(next);
-    clearDebounce();
-    debounceRef.current = setTimeout(() => {
-      debounceRef.current = null;
-      setDraft((current) => {
-        if (current !== null && current !== committed) onCommit(current);
-        return null;
-      });
-    }, 250);
-  };
-
-  useEffect(() => clearDebounce, []);
+  const effectiveTier = mounted ? tier : DEFAULT_EXECUTION_TIER;
+  const display = value.toFixed(1);
+  const clampNotice = mounted ? tierFloorClampNotice(effectiveTier) : "";
+  const isCustom = mounted && effectiveTier !== DEFAULT_EXECUTION_TIER;
+  // Non-draggable meter: the fill is the bar's position on a 0..100 scale, so
+  // "how permissive is this floor" is legible without implying it can be moved.
+  const fillPct = Math.min(100, Math.max(0, value));
 
   return (
     <div className="flex items-center gap-2 select-none">
       <div
         className={cn(
-          "relative flex items-center gap-1 pl-2 pr-3 py-1 rounded-chip border transition-colors",
+          "relative flex items-center gap-1.5 pl-2 pr-3 py-1 rounded-chip border transition-colors",
           isCustom
             ? "border-st-warn/70 bg-st-warn/10 text-st-warn"
             : "border-term-line bg-term-panel/60 text-term-ink-dim",
         )}
-        title="Confidence Filter — minimum executable confidence. Below-bar pairs are demoted to SCORED-ONLY (engine floors the bar at 70%)."
+        title={
+          `Executable confidence bar — read from the ${effectiveTier} (${
+            TIER_LABELS[effectiveTier]
+          }) floor, not set by hand. Signals under ${display}% are demoted to ` +
+          `SCORED-ONLY. The bar can never fall below ${LOWEST_TRADABLE_TIER} ` +
+          `(${MIN_EXECUTABLE_FLOOR_PCT}%), so a WEAK band is never executable.`
+        }
       >
         <span className="text-[8px] font-bold uppercase tracking-wider whitespace-nowrap">
           Conf
         </span>
-        <input
-          type="range"
-          min={MIN_CONFIDENCE_LOW_PCT}
-          max={MIN_CONFIDENCE_HIGH_PCT}
-          step={0.5}
-          value={effective}
-          onChange={handleInput}
-          onPointerUp={commit}
-          onPointerCancel={commit}
-          onKeyUp={commit}
-          onBlur={commit}
-          aria-label="Minimum executable confidence"
-          className="w-20 sm:w-24 cursor-pointer accent-amber-500"
-        />
+        <span
+          role="meter"
+          aria-label={`Executable confidence floor from ${effectiveTier}`}
+          aria-valuenow={value}
+          aria-valuemin={MIN_EXECUTABLE_FLOOR_PCT}
+          aria-valuemax={100}
+          aria-valuetext={`${display} percent, from the ${effectiveTier} ${TIER_LABELS[effectiveTier]} floor`}
+          className="relative block w-20 sm:w-24 h-1.5 rounded-full bg-term-line overflow-hidden"
+        >
+          <span
+            className="absolute inset-y-0 left-0 rounded-full bg-amber-500"
+            style={{ width: `${fillPct}%` }}
+          />
+        </span>
         <span className="num-fig text-[10px] font-black whitespace-nowrap tabular-nums">
           {display}%
+        </span>
+        <span className="text-[8px] font-bold uppercase tracking-wider whitespace-nowrap opacity-70">
+          {effectiveTier}
         </span>
       </div>
 
@@ -138,6 +132,16 @@ export const ConfidenceFilter: React.FC<ConfidenceFilterProps> = ({
       >
         Hide&lt;{display}
       </button>
+
+      {/* PART 31 [310] — a widened selection says so, in words, where the number is. */}
+      {clampNotice && (
+        <span
+          className="text-[8px] font-bold uppercase tracking-wider px-1.5 py-1 rounded-chip border border-slate-500/50 bg-slate-500/10 text-slate-400 whitespace-nowrap"
+          title={clampNotice}
+        >
+          {clampNotice}
+        </span>
+      )}
     </div>
   );
 };

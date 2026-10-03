@@ -120,9 +120,14 @@ describe("store setters keep localStorage out of the Zustand updater", () => {
     ).toBe(false);
   });
 
-  it("still persists the tier and confidence selections", () => {
+  it("still persists the tier selection — the one operator preference left", () => {
     // The optimization above must not silently drop persistence.
-    expect(store).toMatch(/persistMinConfidencePct\(/);
+    //
+    // PART 31 [311] removed `persistMinConfidencePct` deliberately: the bar is
+    // no longer an operator preference, it is DERIVED from the tier. Persisting
+    // it was the desync vector — a stored value could outlive the tier that
+    // contradicts it. So its absence is now part of the contract.
     expect(store).toMatch(/persistTierSelection\(/);
+    expect(store).not.toMatch(/persistMinConfidencePct\(/);
   });
 });

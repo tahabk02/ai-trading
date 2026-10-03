@@ -42,10 +42,11 @@ export function useMarketTerminal() {
   const latestSymbolsRef = useRef<string[]>(ALL_MARKET_SYMBOLS);
 
   // ── HYDRATION SAFETY (Confidence Filter — P1-2026-09-24) ──
-  // The store initializes DETERMINISTICALLY to the engine default (96.5%) on
-  // server AND client so React can always hydrate a matching DOM tree. The
-  // persisted localStorage value (e.g. 87.0) is layered on ONLY here — after
-  // first paint — and the grid re-filters the instant it lands.
+  // The store initializes DETERMINISTICALLY to the engine default (T1 / 96.5%)
+  // on server AND client so React can always hydrate a matching DOM tree. The
+  // persisted localStorage TIER (e.g. "T4") is layered on ONLY here — after
+  // first paint — and the confidence bar is re-derived from it, so SSR/client
+  // HTML can never disagree.
   useEffect(() => {
     useMarketTerminalStore.getState().hydrateClientPreferences();
   }, []);
@@ -220,22 +221,13 @@ export function useMarketTerminal() {
     [scheduleRefresh],
   );
 
-  // ── CONFIDENCE FILTER ──
-  // Changing the bar is applied INSTANTLY to the grid (store update re-renders
-  // demotion) and schedules a debounced /multi-predict re-dispatch so the
-  // ENGINE re-evaluates with the new `min_confidence` (below-bar → SCORED-ONLY).
-  const setMinConfidencePct = useCallback(
-    (value: number) => {
-      useMarketTerminalStore.getState().setMinConfidencePct(value);
-      latestSymbolsRef.current = ALL_MARKET_SYMBOLS;
-      scheduleRefresh();
-    },
-    [scheduleRefresh],
-  );
-
-  // Same contract for the tier selector: persist the choice and re-dispatch so
-  // the ENGINE re-evaluates against the new `min_tier` floor. Every tier is
-  // still emitted either way — this only changes which are executable.
+  // ── TIER SELECTOR (the Confidence Filter's only input) ──
+  // PART 31 [309]/[311]: choosing a band resolves its executable floor and
+  // writes `minConfidencePct` in the same atomic store update, so there is no
+  // separate confidence setter to drift out of sync — that is why `setMinTier`
+  // is the only callback here. The debounced /multi-predict re-dispatch makes
+  // the ENGINE re-evaluate against the new `min_tier`/`min_confidence`; every
+  // tier is still emitted either way, this only changes which are executable.
   const setMinTier = useCallback(
     (value: TierSelection) => {
       useMarketTerminalStore.getState().setMinTier(value);
@@ -262,7 +254,6 @@ export function useMarketTerminal() {
     setGlobalHorizon,
     setCardHorizon,
     refreshNow,
-    setMinConfidencePct,
     setMinTier,
     toggleHideBelowThreshold,
   };

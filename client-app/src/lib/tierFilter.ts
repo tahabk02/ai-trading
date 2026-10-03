@@ -75,6 +75,29 @@ export function tierSelectionLabel(selection: TierSelection): string {
   return `${s} ${TIER_LABELS[s]}`;
 }
 
+/**
+ * PART 31 [310] — the sentence the UI must SHOW when a selection was widened
+ * for safety, or "" when the selection stands as chosen.
+ *
+ * Selecting T5 looks like a no-op on a bar that reads 70.0%: the trader clicks
+ * WEAK and the number does not move, with nothing on screen saying why. Left
+ * unexplained that reads as a broken control or a silently ignored click. The
+ * copy names both the clamp and its consequence, so the design choice is legible
+ * instead of merely happening.
+ *
+ *   "T5 selected — floor clamped to T4 (70.0%) · WEAK signals are visible but
+ *    never executable"
+ */
+export function tierFloorClampNotice(selection: TierSelection): string {
+  const floor = resolveExecutionFloor(selection);
+  if (!floor.floored) return "";
+  const pct = (floor.barFrac * 100).toFixed(1);
+  return (
+    `${floor.selected} selected — floor clamped to ${floor.effective} (${pct}%) · ` +
+    `${TIER_LABELS[floor.selected]} signals are visible but never executable`
+  );
+}
+
 /** Short explanation of what selecting a band means for the operator. */
 export function tierSelectionHint(selection: TierSelection): string {
   switch (clampTierSelection(selection)) {
