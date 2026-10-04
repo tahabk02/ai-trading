@@ -71,4 +71,95 @@ drifts silently. The "exclusion" is an artifact of its pre-pytest script shape.
 suite actually executes its assertions, then reconcile the stale expectations
 (gate enum naming; whether the bearish tape should gate or dispatch; the fast
 path's 200-instead-of-400 contract).
+
+---
+
+## TRACKED FOLLOW-UP — PART 32.5a [263] note (queued; low risk, do NOT fix in 32.5a scope)
+
+A local validation throw in `timeframeMs` is misattributed to the AI Engine.
+Found during PART 32.5a ([263]); logged here so it is not silently forgotten.
+
+**Location:** `core-backend/src/controllers/signal.controller.ts:39`
+
+```ts
+const token = String(timeframe || "1m").toLowerCase().replace("+", "");
+const amount = Number.parseInt(token, 10);
+if (!Number.isFinite(amount) || amount <= 0)
+  throw new Error(`Invalid timeframe: ${timeframe}`);
+```
+
+The backend accepts numeric-prefixed forms (`1m`, `5m`, `1h`, `1d`) and rejects
+the chart-style labels (`M1`, `M5`, `S5`) with a bare local `throw`. That throw
+is caught by the AI-Engine handler, so a **request-validation** failure is
+reported as a **downstream dependency** failure:
+
+- logged as `AI Engine failed persistently after extended timeout + retries`
+- classified `kind: "unknown"`, `code: ""` (it is not an Axios error, so
+  `classifyAiEngineFailure` falls through to its `unknown` branch)
+- `attempts: 3` — the retry ladder runs even though the failure is permanent
+  and local
+
+**Measured cost:** 16,687 / 17,043 / 17,987ms (`elapsedMs`) on concurrent
+requests carrying `"timeframe": "M5"`. The engine itself answers the equivalent
+call in 3-5ms with a 400, so the 17s is entirely proxy-side retry/stall.
+
+**Confirmed low risk — no urgency:** the real client never sends these labels,
+so this is not a live user-facing path today. It is a trap for any future caller,
+script, or manual probe that reuses the chart's timeframe vocabulary. (I hit it
+myself while measuring [262], and it briefly looked like the [262] fix had
+regressed to 18s — it had not; the payload was invalid.)
+
+**Not caused by PART 32.5a.** Verified against the tree after `1b7c96e`: valid
+payloads return in 727-1053ms, and the [262] offline fast-fail is unaffected
+(`ECONNREFUSED` still short-circuits at 137ms). [262] only made this path
+*visible* by fixing the genuinely-dead-engine case next to it.
+
+**Scope for a future part (not now):**
+1. Reject an unparseable timeframe at the request boundary with a real `400`
+   (a `readTimeframeMs`-style validator alongside the existing `readMinConfidence`
+   / `readHorizonMinutes`), so it never reaches the AI-Engine handler.
+2. Narrow the catch so a local validation error cannot be recorded by
+   `recordEngineFailure` or logged as a persistent engine failure — engine-health
+   accounting should only see engine-origin failures.
+3. Optional: map the `catch` classification so `kind: "unknown"` never reports
+      `code: ""` (the empty code is what made this hard to spot in the logs).
+
+---
+
+## TRACKED FOLLOW-UP — browser-automation `window.*` readback (known false-alarm; do NOT "fix" the chart)
+
+`window.__chartDebug` reads back `undefined` / `null` through the
+browser-automation skill's `page.evaluate`. This is a **tooling artifact, not a
+dead debug surface.** Found during PART 37; logged here so it is not silently
+forgotten — and so this exact dead end is not chased again.
+
+**Root cause: isolated-world visibility.** The skill's `--eval` / `--script`
+handlers run `page.evaluate(...)` in a Playwright **isolated world** — a separate
+JS realm from the page under test. Page globals (`window.__chartDebug`,
+`window.__PHASE`, `window.__DIFF`, …) live in the page realm and are simply not
+addressable from the handler realm. Every such read returns `undefined`/`null`
+whether or not the page actually set it.
+
+**Confirmed during PART 37:** `/dashboard/pro` mounted 8 chart canvases and
+`writeChartDebug` had already written its baseline, yet the probe reported
+`__chartDebug: null`. A DOM round-trip proved the surface was live the whole
+time — no chart bug existed.
+
+Two related traps hit in the same PART 37 harness, worth keeping in mind:
+- a `<script>` appended **after `</html>`** never executes — inject before `</body>`.
+- `var top = ...` at top level silently loses to the pre-existing `window.top`
+  binding, so it reads back as `[object Window]`.
+
+**Default going forward when using this skill:**
+1. Have the page write the value into the DOM (e.g. a `<pre>` `textContent`),
+   then read it back with
+   `page.evaluate(() => document.getElementById('...').textContent)`.
+   The isolated world **can** read rendered text — only page globals are invisible.
+2. Do not assert liveness from `window.*` globals, and never add chart code that
+   exists only to satisfy such a probe.
+
+**Scope for a future part (not now):** no chart change is warranted. If the skill
+ever gains a same-realm read path, prefer it; otherwise keep the DOM round-trip.
   </content>
+
+- PART 34.2/34.3: do not bare-commit (git commit with no pathspec) until the 426-line WIP is ready and properly scoped; index is not coherent for a stray commit.
