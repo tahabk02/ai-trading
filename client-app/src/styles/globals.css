@@ -54,6 +54,11 @@
     --tp-chart-border: #2a3448;
     --tp-crosshair: rgba(148, 163, 184, 0.35);
     --tp-price-line: rgba(148, 163, 184, 0.85);
+    /* PART 37 — vertical EXPIRY boundary. Deliberately NOT the price-line hue:
+       it is a TIME marker, and it shares the grid layer (z-order "bottom"), so
+       tinting it like the horizontal TGT/ANC/STOP/LIVE lines would imply it
+       belongs to the price axis. */
+    --tp-expiry-line: rgba(148, 163, 184, 0.72);
 
     /* ── PART 16 TERMINAL BLOTTER (channel triplets, dark only) ──
        Flat-obsidian matrix: canvas = page air, panel = cell bed, line =
@@ -146,6 +151,10 @@
     --tp-chart-border: #e2e8f0;
     --tp-crosshair: rgba(15, 23, 42, 0.3);
     --tp-price-line: rgba(15, 23, 42, 0.7);
+    /* PART 37 — see the dark-theme note. Light needs more alpha than it looks
+       like it does: the line is 1px and dashed, so it is read as a hairline
+       against white rather than as a solid rule. */
+    --tp-expiry-line: rgba(51, 65, 85, 0.62);
 
     /* ── PART 16 TERMINAL BLOTTER — LIGHT OVERRIDES ──
        CRITICAL: these eight tokens are declared ONLY in :root above. Because

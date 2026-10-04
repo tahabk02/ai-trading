@@ -26,6 +26,8 @@ import {
   targetColorFor,
   targetIntervalsFor,
   targetDurationMinutes,
+  expiryMarkerBucketSec,
+  expiryMarkerClockLabel,
   targetViewportNeedsReanchor,
   buildSignalView,
   targetViewportRange,
@@ -59,6 +61,7 @@ import {
 } from "@/lib/chartDebug";
 import { useSignalViewStore } from "@/lib/signalViewStore";
 import { normalizeProjectionAtr, clampTargetToAnchor } from "@/lib/projectionAtr";
+import { ExpiryTimeMarker, type ExpiryMarkerTheme } from "@/lib/verticalTimeMarker";
 
 /**
  * ── COHERENCE PUBLISHER ──────────────────────────────────────────────────
@@ -182,6 +185,20 @@ function cssVar(name: string, fallback: string): string {
   } catch {
     return fallback;
   }
+}
+
+/**
+ * PART 37 — resolve the expiry-marker theme from the same `--tp-*` tokens the
+ * rest of the canvas reads, so the marker flips with the dark/light toggle
+ * instead of hard-coding the institutional dark values.
+ */
+function expiryMarkerTheme(): ExpiryMarkerTheme {
+  return {
+    line: cssVar("--tp-expiry-line", "#94a3b8"),
+    labelBg: cssVar("--tp-elevated", "#171c28"),
+    labelInk: cssVar("--tp-text", "#f8fafc"),
+    labelMuted: cssVar("--tp-text-2", "#94a3b8"),
+  };
 }
 
 type GridCandle = Candle & {
@@ -519,6 +536,18 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // resolves to the SAME count + forming-candle values, the repaint is skipped
   // entirely (no series updates, no target-layer projection/markers).
   const lastPaintedTipKeyRef = useRef("");
+  /**
+   * PART 37 [313]-[316] — the vertical EXPIRY boundary, as a native
+   * lightweight-charts series primitive on the CANDLE series. Created lazily on
+   * first paint so it never exists without an attached series to hold it.
+   */
+  const expiryMarkerRef = useRef<ExpiryTimeMarker | null>(null);
+  /**
+   * Theme for the marker, resolved ONCE per chart build (the effect re-runs on
+   * `resolvedTheme`). Reading `getComputedStyle` inside the paint loop would
+   * force a style recalculation on every animation frame of the live tape.
+   */
+  const expiryMarkerThemeRef = useRef<ExpiryMarkerTheme | null>(null);
   const [hasCandles, setHasCandles] = useState(false);
   const [targetLayerActive, setTargetLayerActive] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
@@ -783,6 +812,44 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     [],
   );
 
+  /**
+   * PART 37 [316]-[318] — position the vertical EXPIRY boundary.
+   *
+   * The marker NEVER derives a time of its own. `expiryMarkerBucketSec` resolves
+   * the projection's own last slot (`targetSlots`/`targetIntervalsFor`), which is
+   * exactly `liveTipBucketSec + expirationSeconds` for every expiry on the
+   * 60/120/300/600 ladder across the 5s..60s grids, and stays glued to the last
+   * projected candle on coarser grids instead of drifting inside the zone.
+   *
+   * SHOWN FOR ANY SIGNAL AND TIER: this is time information, not a projection
+   * verdict, so it is deliberately NOT gated on `targetCandlesEnabled(tier)` or
+   * on BUY/SELL — a HOLD at T5 still has an expiry horizon, and hiding it there
+   * would make the horizon the one surface that disappears exactly when the
+   * operator is least oriented.
+   *
+   * NOT gated on PART 24 either: that module made expiry selection permanently
+   * un-gatable by design (its `suppressed` field is deleted, and `actionReady`/
+   * `regimeBlocked` are render-only). So there is no PART 24 state in which an
+   * expiry "is disabled" — the set to suppress on is empty, and inventing one
+   * would re-create the circular deadlock `expirySelection.ts` documents.
+   *
+   * `0` hides the marker: the honest rendering of "there is no expiry boundary
+   * yet", i.e. no live tip bucket to anchor to.
+   */
+  const syncExpiryMarker = useCallback(
+    (tipSec: number, tfSec: number, expSec: number): void => {
+      const marker = expiryMarkerRef.current;
+      if (!marker) return;
+      const bucket = expiryMarkerBucketSec(tipSec, expSec, tfSec);
+      marker.set(
+        bucket,
+        bucket > 0 ? expiryMarkerClockLabel(bucket) : "",
+        expiryMarkerThemeRef.current ?? undefined,
+      );
+    },
+    [],
+  );
+
   const syncChartDebug = useCallback(
     (
       rows: GridCandle[],
@@ -868,6 +935,14 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         ),
         targetAlphaStart: 0.95,
         targetAlphaMin: 0.35,
+        // PART 37 — the expiry marker is CANVAS-drawn, so the DOM cannot assert
+        // it. Exposed on the same verification surface as everything else: the
+        // bucket it resolved to, the media x it is painting at, and its label.
+        // `expiryMarkerX` is the value a reader can compare against
+        // `tipBucketSec + expirationSec` — the [318] assertion, live.
+        expiryMarkerBucketSec: expiryMarkerRef.current?.markerBucketSec ?? 0,
+        expiryMarkerX: expiryMarkerRef.current?.markerX() ?? null,
+        expiryMarkerLabel: expiryMarkerRef.current?.markerLabel ?? "",
         projectionKey: projectionRef.current.currentKey,
         projectionAnchorClose: projectionRef.current.currentAnchor,
       });
@@ -930,6 +1005,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         tip && tip.timestamp > 0 ? bucketStart(tip.timestamp, bw) : 0;
       const tipSec = tipGridMs > 0 ? Math.floor(tipGridMs / 1000) : 0;
       const intervals = targetIntervalsFor(expSec, tfSec);
+      // PART 37 — positioned BEFORE the projection-suppression branch below, so
+      // the boundary is anchored to the live tip even when the target series is
+      // blanked. A time marker must not disappear because a price is missing.
+      syncExpiryMarker(tipSec, tfSec, expSec);
 
       // ── SUPPRESSION: candles ALWAYS render when live tip + target exist ──
       // The 96.5% confidence gate ONLY affects the BUY/SELL label, never the
@@ -1033,7 +1112,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         syncChartDebug(rows, bw, tipSec, intervals, snap.candles, signalValue);
       }
     },
-    [reanchor, syncMarkers, syncChartDebug, currentSignalView],
+    [reanchor, syncMarkers, syncChartDebug, syncExpiryMarker, currentSignalView],
     );
 
   useEffect(() => {
@@ -1173,6 +1252,19 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     candleSeriesRef.current = candleSeries;
     volumeRef.current = volume;
     targetSeriesRef.current = targetSeries;
+    // ── PART 37: attach the EXPIRY boundary to the CANDLE series ──
+    // Created here (not at ref-init) because a primitive only gets its
+    // `attached()` — and therefore its chart/timeScale handles — once a series
+    // holds it. Attached to the CANDLES, which are added before the target
+    // overlay, so the marker paints under the projection it annotates.
+    const expiryMarker = new ExpiryTimeMarker(expiryMarkerTheme());
+    expiryMarkerRef.current = expiryMarker;
+    expiryMarkerThemeRef.current = expiryMarkerTheme();
+    try {
+      candleSeries.attachPrimitive(expiryMarker);
+    } catch {
+      expiryMarkerRef.current = null;
+    }
     // ── DEBUG SURFACE BASELINE (zero-data parity) ──
     // `writeChartDebug` is otherwise only reachable through `updateTargetLayer`,
     // which requires at least one rendered candle. On a cold/offline start (no
@@ -1213,6 +1305,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       candleSeriesRef.current = null;
       volumeRef.current = null;
       targetSeriesRef.current = null;
+      expiryMarkerRef.current = null;
+      expiryMarkerThemeRef.current = null;
       rawRef.current = [];
       dataRef.current = [];
       rejectedCountRef.current = 0;

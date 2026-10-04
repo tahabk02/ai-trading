@@ -306,6 +306,60 @@ export function targetSlots(
   return slots;
 }
 
+// ── PART 37: EXPIRY MARKER CLOCK ──
+
+/**
+ * The bucket the chart's vertical EXPIRY marker anchors to: the LAST slot the
+ * projection actually occupies.
+ *
+ * WHY THIS IS `targetSlots` AND NOT `liveTipBucketSec + expirationSeconds`:
+ * those are the same number for every real expiry/timeframe pair, but they are
+ * not the same RULE. The projection spans `ceil(exp / tf)` buckets
+ * (`targetIntervalsFor`), so its last slot is
+ *
+ *     liveTipBucketSec + ceil(exp / tf) * tf        >=  liveTipBucketSec + exp
+ *
+ * and the inequality is STRICT whenever `tf` does not divide `exp` — e.g. a 60s
+ * expiry on the M3 (180s) grid draws ONE projected candle at +180s, and a
+ * marker at +60s would sit inside the zone, to the LEFT of the last candle it
+ * is supposed to terminate. Every ladder expiry (60/120/300/600) divides every
+ * sub-minute/M1 grid, so on the charts an operator actually uses this returns
+ * `liveTipBucketSec + expirationSeconds` bit-for-bit; deriving it from the
+ * projection instead means a future off-grid expiry can never silently drift
+ * the marker off the candles it annotates. `src/lib/__tests__/expiryMarker.test.ts`
+ * pins BOTH facts.
+ */
+export function expiryMarkerBucketSec(
+  liveTipBucketSec: number,
+  expirationSeconds: number,
+  timeframeSeconds: number,
+): number {
+  const tip = Number(liveTipBucketSec);
+  const exp = Number(expirationSeconds);
+  const tf = Number(timeframeSeconds);
+  if (!Number.isFinite(tip) || tip <= 0) return 0;
+  if (!Number.isFinite(exp) || exp <= 0) return 0;
+  if (!Number.isFinite(tf) || tf <= 0) return 0;
+  const slots = targetSlots(tip, tf, targetIntervalsFor(exp, tf));
+  const last = slots[slots.length - 1];
+  return last ? last.timeSec : 0;
+}
+
+/**
+ * UTC `HH:MM:SS` for the marker label. UTC because `formatAxisTime` — the
+ * chart's own axis formatter — is UTC: a local-time label next to a UTC axis
+ * would put the marker and its own axis reading in different zones.
+ */
+export function expiryMarkerClockLabel(expiryBucketSec: number): string {
+  const sec = Math.round(Number(expiryBucketSec));
+  if (!Number.isFinite(sec) || sec <= 0) return "";
+  const d = new Date(sec * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
 // ── Axis Time Formatter ──
 
 export function formatAxisTime(timestampSec: number, bucketWidthMs: number): string {
