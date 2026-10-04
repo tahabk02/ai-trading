@@ -26,6 +26,8 @@ import { logger } from "../utils/logger";
 import { secrets } from "../config/secrets";
 import { websocketService } from "./websocket.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { clampMinTierToEngineSet } from "../lib/signalTiers";
+import type { SignalTier } from "../lib/signalTiers";
 
 const buildAiEngineTickSignalUrl = (baseUrl: string): string => {
   const cleaned = baseUrl.replace(/\/+$/, "");
@@ -98,6 +100,22 @@ interface LastBroadcastState {
   waiting: boolean;
 }
 
+/**
+ * Mirrors the engine's resolve_horizon_minutes() (ai-engine/app/services/
+ * horizon_engine.py), including its floor bias on ties, so the fast 1Hz path
+ * evaluates the SAME horizon the operator selected on the Pro Expiry Bar.
+ */
+export const TICK_HORIZON_OPTIONS_MINUTES = [1, 2, 3, 5, 10] as const;
+
+export function clampTickHorizonMinutes(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return TICK_HORIZON_OPTIONS_MINUTES.reduce((best, opt) =>
+    Math.abs(opt - n) < Math.abs(best - n) ? opt : best,
+  );
+}
+
 class LiveTickSignalDispatcher {
   private static instance: LiveTickSignalDispatcher;
   /** Last /tick-signal POST time per symbol (coalescing anchor). */
@@ -106,6 +124,21 @@ class LiveTickSignalDispatcher {
   private pendingTimers: Map<string, NodeJS.Timeout> = new Map();
   /** Last meaningful verdict broadcast per symbol (change-gate). */
   private lastBroadcast: Map<string, LastBroadcastState> = new Map();
+  /**
+   * Operator-selected target-expiry horizon per symbol, learned from the
+   * Socket.IO "subscribe" payload. Without this the 1Hz quant path always
+   * evaluated the engine's 1m default, so the live tick verdict ignored the
+   * chosen expiry even though /predict honoured it.
+   */
+  private selectedHorizons: Map<string, number> = new Map();
+  /**
+   * Operator-selected minimum signal tier per symbol, learned from the
+   * Socket.IO "subscribe" payload. Without this the 1Hz quant path silently
+   * fell back to the engine's strict T1 default, so selecting a wider tier had
+   * NO effect on the live tick verdict — the surface the terminal actually
+   * watches. Mirrors `selectedHorizons` deliberately.
+   */
+  private selectedMinTiers: Map<string, SignalTier> = new Map();
 
   private constructor() {}
 
@@ -114,6 +147,54 @@ class LiveTickSignalDispatcher {
       LiveTickSignalDispatcher.instance = new LiveTickSignalDispatcher();
     }
     return LiveTickSignalDispatcher.instance;
+  }
+
+  /** Records the horizon the operator selected for `symbol` (subscribe event). */
+  public setSelectedHorizonMinutes(symbol: string, minutes: unknown): void {
+    const key = String(symbol ?? "").trim().toUpperCase();
+    const hz = clampTickHorizonMinutes(minutes);
+    if (!key || hz === null) return;
+    this.selectedHorizons.set(key, hz);
+  }
+
+  /** The horizon to evaluate for `symbol`, or null to defer to the engine default. */
+  public getSelectedHorizonMinutes(symbol: string): number | null {
+    const key = String(symbol ?? "").trim().toUpperCase();
+    return this.selectedHorizons.get(key) ?? null;
+  }
+
+  /** Drops the learned horizon when a symbol is fully unsubscribed. */
+  public clearSelectedHorizonMinutes(symbol: string): void {
+    const key = String(symbol ?? "").trim().toUpperCase();
+    this.selectedHorizons.delete(key);
+  }
+
+  /**
+   * Records the minimum tier the operator selected for `symbol` (subscribe
+   * event). Garbage is dropped rather than coerced: an unparseable value must
+   * leave the engine on its own strict default rather than widen the bar.
+   */
+  public setSelectedMinTier(symbol: string, tier: unknown): void {
+    const key = String(symbol ?? "").trim().toUpperCase();
+    if (!key) return;
+    const resolved = clampMinTierToEngineSet(tier);
+    if (resolved === null) {
+      this.selectedMinTiers.delete(key);
+      return;
+    }
+    this.selectedMinTiers.set(key, resolved);
+  }
+
+  /** The minimum tier to score `symbol` against, or null for the engine default. */
+  public getSelectedMinTier(symbol: string): SignalTier | null {
+    const key = String(symbol ?? "").trim().toUpperCase();
+    return this.selectedMinTiers.get(key) ?? null;
+  }
+
+  /** Drops the learned tier when a symbol is fully unsubscribed. */
+  public clearSelectedMinTier(symbol: string): void {
+    const key = String(symbol ?? "").trim().toUpperCase();
+    this.selectedMinTiers.delete(key);
   }
 
   /**
@@ -160,6 +241,15 @@ class LiveTickSignalDispatcher {
 
     const spread = realtimeTickBuffer.getLatestSpread(symbol);
     const prices = window.map((w) => Number(w.price));
+    // Forward the operator's selected expiry so the fast path can score the
+    // SAME horizon as /predict. Absent -> the engine's own default (never
+    // invented here).
+    const horizonMinutes = this.getSelectedHorizonMinutes(symbol);
+    // Same reasoning for the tier floor: without forwarding it the live tick
+    // verdict is always scored at the engine's strict T1 default and the
+    // operator's selection is invisible on the live surface. Absent -> the
+    // engine's own default (never invented here).
+    const minTier = this.getSelectedMinTier(symbol);
     const payload = {
       symbol,
       timeframe: "1m",
@@ -174,6 +264,8 @@ class LiveTickSignalDispatcher {
         spread.ask != null && Number.isFinite(spread.ask) && spread.ask > 0
           ? Number(spread.ask)
           : undefined,
+      ...(horizonMinutes !== null ? { horizon_minutes: horizonMinutes } : {}),
+      ...(minTier !== null ? { min_tier: minTier } : {}),
     };
 
     try {
