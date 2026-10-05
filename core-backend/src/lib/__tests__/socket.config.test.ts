@@ -37,12 +37,12 @@ describe("MASTER MISSION part 2 — socket.io stability", () => {
     return Promise.all([
       expect(resolve(FRONTEND_ORIGIN)).resolves.toBe(true),
       // [351] an unconfigured tunnel is a stranger like any other origin.
+      // [355] denial resolves false rather than throwing, so the real response
+      // status stays visible to the browser instead of a 500 from the handler.
       expect(
         resolve("https://b3lrfrj9-4000.uks1.devtunnels.ms"),
-      ).rejects.toThrow(/not allowed by CORS/),
-      expect(resolve("https://evil.example.test")).rejects.toThrow(
-        /not allowed by CORS/,
-      ),
+      ).resolves.toBe(false),
+      expect(resolve("https://evil.example.test")).resolves.toBe(false),
     ]);
   });
 

@@ -1,14 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
+import { logger } from "../utils/logger";
 
 // Local dev only. Everything else must be listed EXPLICITLY below or via env.
 // No wildcard/pattern matching: a reflected origin combined with
 // `credentials: true` lets any site that can register a matching hostname read
 // authenticated responses. Dev Tunnels hand out `*.devtunnels.ms` subdomains to
 // whoever asks, so "any *.devtunnels.ms" is equivalent to "any origin".
-const BASE_ALLOWED_ORIGINS = [
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-];
+const BASE_ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"];
 
 function originFromValue(value: string): string | null {
   try {
@@ -57,6 +55,26 @@ export function isAllowedCorsOrigin(origin: string): boolean {
   return allowedOrigins.includes(origin);
 }
 
+/** Rate-limit for rejected-origin logs (one line per origin per window). */
+const REJECT_LOG_INTERVAL_MS = 60_000;
+const lastRejectLoggedAt: Map<string, number> = new Map();
+
+/**
+ * Dynamic origin resolver.
+ *
+ * `origin: "*"` is ILLEGAL together with `credentials: true` — browsers reject
+ * `Access-Control-Allow-Origin: *` on a credentialed request, so a wildcard
+ * "fix" makes the failure worse. The correct pattern is to REFLECT the caller's
+ * exact origin, which is what this resolver does for allowlisted origins only:
+ * the configured localhost/production origins plus any tunnel origin explicitly
+ * registered in `CORS_ALLOWED_TUNNEL_ORIGINS`.
+ *
+ * A rejected origin resolves to `false` (no CORS headers) instead of throwing.
+ * Throwing pushed the error into the global handler, which answered 500 with no
+ * CORS headers — the browser then reported only "missing
+ * Access-Control-Allow-Origin", hiding the real request/response. Denying keeps
+ * the actual status visible in the network tab while still blocking the read.
+ */
 export function corsOriginResolver(
   origin: string | undefined,
   callback: (err: Error | null, allow?: boolean) => void,
@@ -66,7 +84,16 @@ export function corsOriginResolver(
     callback(null, true);
     return;
   }
-  callback(new Error(`Origin ${origin} not allowed by CORS`));
+  const now = Date.now();
+  const lastLogged = lastRejectLoggedAt.get(origin) ?? 0;
+  if (now - lastLogged >= REJECT_LOG_INTERVAL_MS) {
+    lastRejectLoggedAt.set(origin, now);
+    logger.warn("[CORS] Origin rejected — no CORS headers sent", {
+      origin,
+      allowed: allowedOrigins,
+    });
+  }
+  callback(null, false);
 }
 
 export function privateNetworkMiddleware(
@@ -91,4 +118,12 @@ export const corsOptions = {
     "Access-Control-Allow-Origin",
     "Access-Control-Request-Private-Network",
   ],
+  /**
+   * Preflight handling: answer the browser's OPTIONS probe directly (do not
+   * continue into routing/handlers) with a bare 204, and let the browser cache
+   * the preflight so a 1Hz dashboard does not re-preflight every request.
+   */
+  optionsSuccessStatus: 204,
+  preflightContinue: false,
+  maxAge: 86_400,
 };
