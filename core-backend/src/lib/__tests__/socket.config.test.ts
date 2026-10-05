@@ -36,9 +36,10 @@ describe("MASTER MISSION part 2 — socket.io stability", () => {
     expect(cors.credentials).toBe(true);
     return Promise.all([
       expect(resolve(FRONTEND_ORIGIN)).resolves.toBe(true),
+      // [351] an unconfigured tunnel is a stranger like any other origin.
       expect(
-        resolve("https://b3lrfrj9-3000.uks1.devtunnels.ms"),
-      ).resolves.toBe(true),
+        resolve("https://b3lrfrj9-4000.uks1.devtunnels.ms"),
+      ).rejects.toThrow(/not allowed by CORS/),
       expect(resolve("https://evil.example.test")).rejects.toThrow(
         /not allowed by CORS/,
       ),
