@@ -163,3 +163,50 @@ ever gains a same-realm read path, prefer it; otherwise keep the DOM round-trip.
   </content>
 
 - PART 34.2/34.3: do not bare-commit (git commit with no pathspec) until the 426-line WIP is ready and properly scoped; index is not coherent for a stray commit.
+
+---
+
+## TRACKED FOLLOW-UP — PART 36: Next.js 14 → 15/16 major bump (queued; NOT a patch, do NOT do inside a security-fix PART)
+
+Logged from PART 35.1 [353]. `next` is pinned to `^14.2.35`. The patch line is
+exhausted for the two critical advisories below, so this needs its own part
+with its own review — deliberately **not** smuggled in as a "fix".
+
+### Why it is still open
+
+`npm audit --omit=dev` on `client-app` still reports **2 critical**, both
+unauthenticated RCE, both requiring `next >= 15.5.24`:
+
+1. **Windows-hosted server RCE** — `GHSA-p293-qw3h-jr36`, range `>=13.4.0 <15.5.24`.
+2. **Image Optimization AVIF RCE** — range `>=10.0.0 <15.5.24` (served by the
+   `/_next/image` path).
+
+npm's own advice was misleading: it suggested `14.2.35` first, which clears a
+long list of *other* advisories but neither of these. It then offered
+`fixAvailable: 16.3.8` with `isSemVerMajor: true`. `^14.2.35` is set precisely
+so a major bump cannot land silently through a `npm audit fix`.
+
+Already cleared at 14.2.35 (do not re-verify): cache poisoning, SSRF, authz
+bypass, request smuggling, RSC DoS.
+
+### Architecture surfaces the bump touches (scope upfront)
+
+- **`client-app/server.js`** — custom Node server wrapping Next. The custom-server
+  contract and the `http`/`socket.io` upgrade handling are the highest-risk item.
+- **CSP / CORS / proxy layer** — headers are currently permissive
+  (`unsafe-inline`, `unsafe-eval`, `http:`, `https:`), and `api.ts` proxies
+  `/api`. Next 15+ changes caching/`fetch` defaults that interact with both.
+- **socket.io wiring** — client socket + the server-side CORS allowlist hardened
+  in PART 35.2 [355] (`CORS_ALLOWED_TUNNEL_ORIGINS`, exact-match only). The bump
+  must not regress that back into a reflected wildcard.
+- **middleware auth** — route protection/auth middleware behavior changes.
+- **React 18 → 19** — a transitive requirement of the Next major; expect
+  third-party component friction beyond Next itself.
+
+### Baseline to re-verify after the bump
+
+`693 tests / 44 files`, `npx tsc --noEmit`, `next lint`, and
+`npm run build` (15 static pages, 31 manifest references) were all green at
+`14.2.35`. Re-run all four, then re-run the PART 35 browser pass on
+`/dashboard` and `/dashboard/pro`, and re-run the PART 35.2 origin-regression
+table to confirm CORS still denies unlisted tunnel origins.

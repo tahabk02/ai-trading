@@ -87,10 +87,10 @@ export interface PredictionResponse {
   symbol: string;
   signal: "BUY" | "SELL";
   /**
-   * PART 19.2 — the 0-100 number is BOOK AGREEMENT (a 10-book confluence
-   * score), NOT a calibrated probability. This numeric pipeline identifier
-   * is kept for compatibility; see `book_agreement` / `book_agreement_detail`
-   * for the HONESTLY LABELED surface the UI renders.
+   * PART 19.2 — the 0-100 number is STRATEGY BOOK AGREEMENT (a 10-book
+   * confluence score), NOT a calibrated probability. This numeric pipeline
+   * identifier is kept for compatibility; see `book_agreement` /
+   * `book_agreement_detail` for the HONESTLY LABELED surface the UI renders.
    */
   confidence: number;
   book_agreement?: number;
@@ -217,6 +217,22 @@ export interface PredictionResponse {
     aligned_count?: number;
     factors?: Record<string, number>;
     detail?: Record<string, unknown>;
+    /**
+     * PART 35.3 [359][360] — the authoritative depth flag from
+     * `compute_multiplicative_confluence`. `order_book_verified` is TRUE only
+     * when a genuine one-sided book actually contributed to this score;
+     * `verified_lift` is how much it moved it (0 when depth was not used).
+     *
+     * This is already present in the API payload — PART 35.3 only surfaces it.
+     * When depth is NOT verified the order-book factor is excluded from BOTH
+     * the numerator and the denominator, so the score is pure strategy-book
+     * confluence and must not be read as order-book evidence.
+     */
+    confluence?: {
+      order_book_verified?: boolean;
+      verified_lift?: number;
+      score?: number;
+    };
   };
   /**
    * Market-waiting flag — true when the combined confluence did NOT meet the

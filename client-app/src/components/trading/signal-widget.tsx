@@ -10,6 +10,7 @@ import { formatPairPrice } from "@/utils/format";
 import { getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TierBadge } from "@/components/shared/tier-badge";
+import { BookAgreementDepthNote } from "@/components/shared/book-agreement-depth-note";
 import {
   useTradingStore,
   selectCurrentPrice,
@@ -30,7 +31,8 @@ interface SignalProps {
     confidence?: number | null;
     /**
      * PART 19.2 [118] — raw confluence internals + "n/n books aligned" label.
-     * The 0-100 number is BOOK AGREEMENT, not a calibrated probability.
+     * PART 35.3 [358] — the 0-100 number is STRATEGY BOOK AGREEMENT, not a
+     * calibrated probability and not order-book evidence.
      */
     book_agreement_detail?: {
       convergence_index?: number;
@@ -66,6 +68,21 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
 
   const setActiveSymbol = useTradingStore(selectSetActiveSymbol);
   const getPrediction = useTradingStore(selectGetPrediction);
+  /** PART 35.3 [359][360] — engine's order-book depth flag for this score. */
+  const bookConfluence = useTradingStore((s) => s.predictionData?.book_confluence);
+  // PART 35.3 [360] — the rail renders ONE WIDGET PER LIVE SIGNAL, but
+  // `predictionData` is the REST prediction for the ACTIVE symbol only. Left
+  // ungated, every widget in the rail inherits that one symbol's depth evidence
+  // and stamps it onto other instruments' scores. Only the widget whose symbol
+  // IS the predicted symbol may claim the evidence; the others render nothing.
+  const predictionSymbol = useTradingStore(
+    (s) => s.predictionData?.symbol ?? null,
+  );
+  const normalizeSymbol = (v: string | null | undefined) =>
+    (v ?? "").replace(/[\/\s_-]/g, "").toUpperCase();
+  const ownsDepthEvidence =
+    !!normalizeSymbol(predictionSymbol) &&
+    normalizeSymbol(predictionSymbol) === normalizeSymbol(symbol);
 
   const unifiedPrice = useTradingStore(selectCurrentPrice);
   const price = unifiedPrice > 0 ? unifiedPrice : 0;
@@ -158,7 +175,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
         </div>
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
           <p className="text-ink-muted text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
-            Book Agreement
+            Strategy Book Agreement
           </p>
           {/* ── REAL DYNAMIC BOOK AGREEMENT — tier colors reflect the exact ──
               ── floating-point value returned by the unbiased engine. This  ──
@@ -177,6 +194,12 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
               {booksA}/{booksN} books
             </p>
           ) : null}
+          {/* PART 35.3 [359][360] — depth provenance, visible not tooltip-only. */}
+          <div className="mt-1 flex justify-end">
+            <BookAgreementDepthNote
+              bookConfluence={ownsDepthEvidence ? bookConfluence : null}
+            />
+          </div>
         </div>
       </div>
 

@@ -104,7 +104,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "AI Analysis",
     awaitingPrediction: "Awaiting prediction data for analysis...",
-    signalConfidence: "Book Agreement",
+    signalConfidence: "Strategy Book Agreement",
     technicalReasoning: "Technical Reasoning",
     trendDuration: "Trend Duration",
     volatility: "Volatility",
@@ -139,13 +139,13 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Projected downside: -{pct}% to target {price}",
     volatilityLevel: "Volatility: {level} (ATR: {atr})",
     highConfidenceNote:
-      "Strong book agreement — all strategy books aligned",
+      "Strong strategy book agreement — all strategy books aligned",
     moderateConfidenceNote:
-      "Partial book agreement — most strategy books aligned",
+      "Partial strategy book agreement — most strategy books aligned",
     lowConfidenceNote:
-      "Weak book agreement — divergent indicators, trade with caution",
-    // High-confidence toast (PART 19.2 — the number is BOOK AGREEMENT now)
-    highConfidenceTitle: "BOOK AGREEMENT SIGNAL",
+      "Weak strategy book agreement — divergent indicators, trade with caution",
+    // High-confidence toast (PART 19.2 — the number is STRATEGY BOOK AGREEMENT now)
+    highConfidenceTitle: "STRATEGY BOOK AGREEMENT SIGNAL",
     highConfidenceBody: "strong confluence — actionable setup",
     buySignal: "BUY",
     sellSignal: "SELL",
@@ -166,8 +166,11 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Execution Price",
-    aiConfidence: "Book Agreement",
+    aiConfidence: "Strategy Book Agreement",
     bookAgreementBooks: "{aligned}/{active} books aligned",
+    // PART 35.3 [359][360] — depth provenance of the displayed score.
+    bookDepthUnverifiedNote: "L1 quote only — no order-book depth in this score",
+    bookDepthVerifiedChip: "+ order-book confirmed",
     highFrequencyAnalysis: "High Frequency Analysis",
     viewChart: "View Chart",
 
@@ -241,7 +244,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     noHistoryYet: "No history yet",
     historyEmptyHint: "Trading signals will appear here once generated.",
     noTradesMatch: "No trades match the current filters.",
-    confidence: "Book Agreement",
+    confidence: "Strategy Book Agreement",
 
     // Risk rules page
     riskRules: "Risk Rules",
@@ -432,7 +435,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "Analyse IA",
     awaitingPrediction: "En attente des données de prédiction...",
-    signalConfidence: "Accord des signaux",
+    signalConfidence: "Accord des livres de stratégie",
     technicalReasoning: "Raisonnement technique",
     trendDuration: "Durée de la tendance",
     volatility: "Volatilité",
@@ -467,11 +470,11 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Baisse projetée : -{pct}% vers l'objectif {price}",
     volatilityLevel: "Volatilité : {level} (ATR : {atr})",
     highConfidenceNote:
-      "Fort accord des signaux — tous les signaux alignés",
+      "Fort accord des livres de stratégie — tous les livres alignés",
     moderateConfidenceNote:
-      "Accord partiel des signaux",
+      "Accord partiel des livres de stratégie",
     lowConfidenceNote:
-      "Faible accord des signaux — indicateurs divergents, négociez avec prudence",
+      "Faible accord des livres de stratégie — indicateurs divergents, négociez avec prudence",
     buySignal: "ACHAT",
     sellSignal: "VENTE",
     holdSignal: "CONSERVER",
@@ -491,7 +494,7 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Prix d'exécution",
-    aiConfidence: "Confiance IA",
+    aiConfidence: "Accord des livres de stratégie",
     highFrequencyAnalysis: "Analyse haute fréquence",
     viewChart: "Voir le graphique",
 
@@ -539,7 +542,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "SIGNAL — ACCORD DES SIGNAUX",
+    highConfidenceTitle: "SIGNAL — ACCORD DES LIVRES DE STRATÉGIE",
     highConfidenceBody: "confluence détectée — configuration exploitable",
     dismiss: "Fermer",
 
@@ -571,8 +574,12 @@ export const translations: Record<Lang, Record<string, string>> = {
     historyEmptyHint:
       "Les signaux de trading apparaîtront ici une fois générés.",
     noTradesMatch: "Aucune transaction ne correspond aux filtres actuels.",
-    confidence: "Accord des signaux",
+    confidence: "Accord des livres de stratégie",
     bookAgreementBooks: "{aligned}/{active} signaux alignés",
+    // PART 35.3 [359][360] — profondeur du carnet d'ordres dans le score affiché.
+    bookDepthUnverifiedNote:
+      "Cours L1 seul — aucune profondeur de carnet d'ordres dans ce score",
+    bookDepthVerifiedChip: "+ carnet d'ordres confirmé",
 
     // Risk rules page
     riskRules: "Règles de risque",
@@ -766,7 +773,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "تحليل الذكاء الاصطناعي",
     awaitingPrediction: "بانتظار بيانات التنبؤ للتحليل...",
-    signalConfidence: "اتفاق الإشارات",
+    signalConfidence: "اتفاق كتب الاستراتيجية",
     technicalReasoning: "التحليل الفني",
     trendDuration: "مدة الاتجاه",
     volatility: "التقلب",
@@ -798,9 +805,9 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedUpside: "الارتفاع المتوقع: +{pct}% نحو الهدف {price}",
     projectedDownside: "الانخفاض المتوقع: -{pct}% نحو الهدف {price}",
     volatilityLevel: "التقلب: {level} (ATR: {atr})",
-    highConfidenceNote: "اتفاق إشارات قوي — جميع الإشارات متوافقة",
-    moderateConfidenceNote: "اتفاق جزئي للإشارات",
-    lowConfidenceNote: "اتفاق إشارات ضعيف — مؤشرات متباينة، تداول بحذر",
+    highConfidenceNote: "اتفاق قوي بين كتب الاستراتيجية — جميع الكتب متوافقة",
+    moderateConfidenceNote: "اتفاق جزئي بين كتب الاستراتيجية",
+    lowConfidenceNote: "اتفاق ضعيف بين كتب الاستراتيجية — مؤشرات متباينة، تداول بحذر",
     buySignal: "شراء",
     sellSignal: "بيع",
     holdSignal: "انتظار",
@@ -820,7 +827,7 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "سعر التنفيذ",
-    aiConfidence: "ثقة الذكاء الاصطناعي",
+    aiConfidence: "اتفاق كتب الاستراتيجية",
     highFrequencyAnalysis: "تحليل عالي التردد",
     viewChart: "عرض الرسم",
 
@@ -868,7 +875,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "إشارة — اتفاق الإشارات",
+    highConfidenceTitle: "إشارة — اتفاق كتب الاستراتيجية",
     highConfidenceBody: "تم رصد تقارب — فرصة قابلة للتنفيذ",
     dismiss: "إغلاق",
 
@@ -899,8 +906,12 @@ export const translations: Record<Lang, Record<string, string>> = {
     noHistoryYet: "لا يوجد سجل بعد",
     historyEmptyHint: "ستظهر إشارات التداول هنا بمجرد إنشائها.",
     noTradesMatch: "لا توجد صفقات تطابق عوامل التصفية الحالية.",
-    confidence: "اتفاق الإشارات",
+    confidence: "اتفاق كتب الاستراتيجية",
     bookAgreementBooks: "{aligned}/{active} إشارات متوافقة",
+    // PART 35.3 [359][360] — عمق دفتر الأوامر في النتيجة المعروضة.
+    bookDepthUnverifiedNote:
+      "سعر L1 فقط — لا يوجد عمق دفتر أوامر في هذه النتيجة",
+    bookDepthVerifiedChip: "+ تم تأكيد دفتر الأوامر",
 
     // Risk rules page
     riskRules: "قواعد المخاطر",
@@ -1089,7 +1100,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "Análisis IA",
     awaitingPrediction: "Esperando datos de predicción para el análisis...",
-    signalConfidence: "Acuerdo de Señales",
+    signalConfidence: "Acuerdo de libros de estrategia",
     technicalReasoning: "Razonamiento técnico",
     trendDuration: "Duración de la tendencia",
     volatility: "Volatilidad",
@@ -1124,11 +1135,11 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Baja proyectada: -{pct}% hacia el objetivo {price}",
     volatilityLevel: "Volatilidad: {level} (ATR: {atr})",
     highConfidenceNote:
-      "Fuerte acuerdo de señales — todas las señales alineadas",
+      "Fuerte acuerdo de libros de estrategia — todos los libros alineados",
     moderateConfidenceNote:
-      "Acuerdo parcial de señales",
+      "Acuerdo parcial de libros de estrategia",
     lowConfidenceNote:
-      "Acuerdo débil de señales — indicadores divergentes, opere con precaución",
+      "Acuerdo débil de libros de estrategia — indicadores divergentes, opere con precaución",
     buySignal: "COMPRA",
     sellSignal: "VENTA",
     holdSignal: "MANTENER",
@@ -1148,7 +1159,7 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Precio de ejecución",
-    aiConfidence: "Confianza IA",
+    aiConfidence: "Acuerdo de libros de estrategia",
     highFrequencyAnalysis: "Análisis de alta frecuencia",
     viewChart: "Ver gráfico",
 
@@ -1196,7 +1207,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "SEÑAL — ACUERDO DE SEÑALES",
+    highConfidenceTitle: "SEÑAL — ACUERDO DE LIBROS DE ESTRATEGIA",
     highConfidenceBody: "confluencia detectada — configuración accionable",
     dismiss: "Cerrar",
 
@@ -1228,8 +1239,12 @@ export const translations: Record<Lang, Record<string, string>> = {
     historyEmptyHint:
       "Las señales de trading aparecerán aquí una vez generadas.",
     noTradesMatch: "Ninguna operación coincide con los filtros actuales.",
-    confidence: "Acuerdo de Señales",
+    confidence: "Acuerdo de libros de estrategia",
     bookAgreementBooks: "{aligned}/{active} señales alineadas",
+    // PART 35.3 [359][360] — profundidad del libro de órdenes en la puntuación.
+    bookDepthUnverifiedNote:
+      "Solo cotización L1 — sin profundidad de libro de órdenes en esta puntuación",
+    bookDepthVerifiedChip: "+ libro de órdenes confirmado",
 
     // Risk rules page
     riskRules: "Reglas de riesgo",

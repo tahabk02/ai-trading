@@ -382,7 +382,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
           {confPct != null && (
             <div
               className="mt-1 h-[3px] w-full bg-term-line/60 overflow-hidden rounded-full"
-              title={`Book Agreement ${confPct}%`}
+              title={`Strategy Book Agreement ${confPct}%`}
             >
               <div
                 className={cn(

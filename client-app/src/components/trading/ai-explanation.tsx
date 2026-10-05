@@ -21,6 +21,7 @@ import { cn } from "@/utils/cn";
 import { getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TierBadge } from "@/components/shared/tier-badge";
+import { BookAgreementDepthNote } from "@/components/shared/book-agreement-depth-note";
 import {
   sanitizeConfidence,
   formatNumber,
@@ -73,10 +74,13 @@ export const AIExplanation: React.FC = () => {
     [predictionData?.confidence],
   );
   const confidenceNum = parseFloat(confidenceStr);
-  // PART 19.2 [118] — the 0-100 number is BOOK AGREEMENT (confluence among
-  // the ten strategy books on the same tape), not a calibrated probability.
+  // PART 19.2 [118] — the 0-100 number is STRATEGY BOOK AGREEMENT (confluence
+  // among the ten strategy books on the same tape), not a calibrated
+  // probability. PART 35.3 [359] — not order-book evidence either.
   const booksA = predictionData?.book_agreement_detail?.aligned_count ?? null;
   const booksN = predictionData?.book_agreement_detail?.active_count ?? null;
+  /** PART 35.3 [359][360] — carries the engine's order-book depth flag. */
+  const bookConfluence = predictionData?.book_confluence ?? null;
 
   // Generate reasoning text based on technical indicators
   const reasoning = useMemo(() => {
@@ -148,20 +152,27 @@ export const AIExplanation: React.FC = () => {
     }
 
     // Book-agreement level statement (PART 19.2 — a confluence score, not a
-    // probability; the wording says what the number IS).
+    // probability; PART 35.3 — "strategy books" so it cannot be read as the
+    // order book).
     if (confidenceNum >= 96.5)
-      reasons.push("Strong book agreement — all strategy books aligned");
+      reasons.push(
+        "Strong strategy book agreement — all strategy books aligned",
+      );
     else if (confidenceNum >= 80)
-      reasons.push("Partial book agreement — most strategy books aligned");
+      reasons.push(
+        "Partial strategy book agreement — most strategy books aligned",
+      );
     else
-      reasons.push("Weak book agreement — divergent indicators, trade with caution");
+      reasons.push(
+        "Weak strategy book agreement — divergent indicators, trade with caution",
+      );
 
     // ── GATED-DIRECTION NOTICE ──
     // When the engine emitted a raw BUY/SELL below the 96.5% gate, say so
     // explicitly instead of quietly showing nothing.
     if (signalView.gated && confidenceNum > 0) {
       reasons.push(
-        `Signal gate: book agreement ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
+        `Signal gate: strategy book agreement ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
       );
     }
 
@@ -296,11 +307,11 @@ export const AIExplanation: React.FC = () => {
         />
       </div>
 
-      {/* ── Signal + Book Agreement Bar ── */}
+      {/* ── Signal + Strategy Book Agreement Bar ── */}
       <div className="mb-4">
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
-            Book Agreement
+            Strategy Book Agreement
           </span>
           <span
             className={cn(
@@ -324,6 +335,10 @@ export const AIExplanation: React.FC = () => {
             )}
             style={{ width: `${confidenceNum}%` }}
           />
+        </div>
+        {/* PART 35.3 [359][360] — visible provenance of the number above. */}
+        <div className="mt-1.5">
+          <BookAgreementDepthNote bookConfluence={bookConfluence} />
         </div>
       </div>
 
