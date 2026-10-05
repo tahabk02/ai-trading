@@ -30,6 +30,9 @@
     "ws": "^8.21.3",
     "zod": "^3.23.8"
   },
+  "overrides": {
+    "tar": "^7.5.22"
+  },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/cors": "^2.8.17",
