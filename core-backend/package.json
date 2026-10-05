@@ -12,6 +12,8 @@
     "publish:data:dry": "ts-node --transpile-only scripts/publishMarketData.ts --dry",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "postinstall": "node scripts/ensure-native.js",
+    "verify:install": "node scripts/ensure-native.js",
     "test": "vitest run"
   },
   "dependencies": {
