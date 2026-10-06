@@ -166,6 +166,52 @@ ever gains a same-realm read path, prefer it; otherwise keep the DOM round-trip.
 
 ---
 
+## TRACKED FOLLOW-UP — PART 35.2/35.3 [362] findings (queued; do NOT fix in 35.x scope)
+
+Found during PART 35.2/35.3 verification; logged here so neither is silently
+forgotten. Both are **pre-existing**, neither was introduced by `11c5624` or
+`2774212`, and neither blocks the pushed work.
+
+### 1. On-disk `node_modules` / `package.json` drift from HEAD's pushed CVE fixes
+
+HEAD (pushed) carries the PART 35.1 fixes; the working tree's uncommitted WIP
+predates them and still shadows them on disk:
+
+| | HEAD (pushed) | working tree (WIP, what is actually installed) |
+|---|---|---|
+| `client-app/package.json` | `"next": "^14.2.35"` | `"next": "14.2.3"` |
+| `client-app` installed | — | `node_modules/next` = **14.2.3** (lockfile agrees) |
+| `core-backend/package.json` | `postinstall: scripts/ensure-native.js`, `overrides: { "tar": "^7.5.22" }` | **both absent** |
+| `core-backend/scripts/ensure-native.js` | tracked | **deleted** on disk |
+
+So `[352]`/`[353]` are committed and pushed but **not in effect on this
+machine**: `npm audit` run here still reports the two critical Next advisories
+and the `tar` traversal, because it audits the installed tree, not the commit.
+This is *not* a local-dev-only cosmetic mismatch — the same drift would bite
+anywhere that provisions from this working tree instead of from a clean clone.
+
+**Scope for a future part (not now):** reconcile the WIP with the pushed
+`package.json`/lockfile, then prove the fix where it matters — a clean
+`npm ci` **on the actual deployment target** (not just a re-install here)
+must produce `next ^14.2.35` + the `tar` override + a passing
+`verify:install`, with `npm audit --omit=dev` still showing 0 critical in
+core-backend. Re-run the PART 36 baseline (`TODO.md` §PART 36) after that.
+
+### 2. Stale comment in `socket.config.ts` still names the wildcard pattern
+
+`core-backend/src/config/socket.config.ts` (header comment above
+`SOCKET_SERVER_OPTIONS`) still reads "…and every `*.devtunnels.ms` origin with
+credentials" — wording left over from before `[351]`. The comment describes the
+policy `[351]` deliberately removed.
+
+**Code path is correct**, so this is cosmetic and zero-risk: the socket engine
+imports the shared `corsOptions` from `config/cors.ts`, which is exact-match
+allowlist only, and `socket.config.test.ts` pins that they cannot drift.
+**Scope (not now):** one-line comment correction the next time that file is
+touched for a real reason — do not open a commit for the comment alone.
+
+---
+
 ## TRACKED FOLLOW-UP — PART 36: Next.js 14 → 15/16 major bump (queued; NOT a patch, do NOT do inside a security-fix PART)
 
 Logged from PART 35.1 [353]. `next` is pinned to `^14.2.35`. The patch line is
