@@ -14,6 +14,7 @@ import {
 import {
   DEFAULT_EXECUTION_TIER,
   executionFloorPct,
+  isTier,
   type SignalTier,
   type TierSelection,
 } from "@/lib/signalTiers";
@@ -64,9 +65,13 @@ export type { AssetClassFilter } from "@/lib/assetFilter";
 export type { MarketQuote } from "@/services/api";
 
 /**
- * Fields a quote CARD actually renders. `ageMs` is deliberately excluded: it
- * advances on every frame by construction and is only consumed by the latency
- * probe, so including it would defeat reference sharing entirely.
+ * Fields a quote CARD actually renders. `ageMs` / `freshAgeMs` are deliberately
+ * excluded: they advance on every frame by construction and are only consumed
+ * by the latency probe / staleness math at render time, so including them would
+ * defeat reference sharing entirely. `source`, `stale` and `staleLive` change
+ * only when the provenance actually changes, so they are cheap to compare and
+ * MUST be here — a card that silently keeps a stale identity would keep painting
+ * a held price as live.
  */
 const QUOTE_RENDER_FIELDS = [
   "price",
@@ -76,6 +81,9 @@ const QUOTE_RENDER_FIELDS = [
   "tickCount",
   "payout",
   "digits",
+  "source",
+  "stale",
+  "staleLive",
 ] as const satisfies readonly (keyof MarketQuote)[];
 
 /**
@@ -311,6 +319,22 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
             waiting_reason: payload.waiting_reason ?? null,
             waiting_detail: payload.waiting_detail ?? null,
             book_confluence: payload.book_confluence,
+            // ── HONEST BAND (PART 38.1 [377]) ──
+            // `LiveVerdict` has declared tier / tier_label / dispatchable /
+            // scored_only / executable since the flexible-tier work, and the
+            // socket hook passes them in — this reducer was simply never
+            // writing them, so every live verdict reached the card bandless
+            // and `resolveCardTier` had to re-derive a tier from a micro-quant
+            // confidence. `isTier` keeps a malformed wire value from inventing
+            // a band; unrecognised → null (the documented "older/partial
+            // payload" state), never a silently widened one.
+            tier: isTier(payload.tier)
+              ? ((payload.tier as string).trim().toUpperCase() as SignalTier)
+              : null,
+            tier_label: payload.tier_label ?? null,
+            dispatchable: payload.dispatchable === true,
+            scored_only: payload.scored_only === true,
+            executable: payload.executable === true,
             timestamp: payload.timestamp ?? new Date().toISOString(),
           },
         },

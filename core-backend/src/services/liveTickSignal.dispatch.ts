@@ -23,11 +23,13 @@
 
 import axios from "axios";
 import { logger } from "../utils/logger";
+import { AI_ENGINE_HTTP_AGENT } from "../utils/aiEngineHttp";
 import { secrets } from "../config/secrets";
 import { websocketService } from "./websocket.service";
-import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { clampMinTierToEngineSet } from "../lib/signalTiers";
 import type { SignalTier } from "../lib/signalTiers";
+import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { publishDurableSignal } from "../messaging/signalStream";
 
 const buildAiEngineTickSignalUrl = (baseUrl: string): string => {
   const cleaned = baseUrl.replace(/\/+$/, "");
@@ -98,6 +100,8 @@ interface LastBroadcastState {
   direction: string | null;
   confidence: number;
   waiting: boolean;
+  /** Honest band last emitted (or null when the engine sent none). */
+  tier: string | null;
 }
 
 /**
@@ -122,6 +126,25 @@ class LiveTickSignalDispatcher {
   private lastSentAt: Map<string, number> = new Map();
   /** Trailing-edge timers (fire the dispatch for the remainder of the 1s beat). */
   private pendingTimers: Map<string, NodeJS.Timeout> = new Map();
+  /**
+   * Symbols with a /tick-signal request currently outstanding.
+   *
+   * `dispatch` is fire-and-forget (`void this.dispatch(...)`), so a slow engine
+   * could previously let two requests for the SAME symbol overlap: the 1s
+   * coalescing gate is measured from request START, while the response can take
+   * up to TICK_SIGNAL_TIMEOUT_MS. Two overlapping responses then race, and the
+   * SLOWER (older) one can land last — broadcasting a stale verdict and
+   * corrupting the change-gate state machine in `broadcast`. Serializing per
+   * symbol makes out-of-order delivery structurally impossible instead of
+   * filtering for it after the fact.
+   */
+  private inFlight: Set<string> = new Set();
+  /**
+   * Symbols that received a tick while a request was outstanding. The tick is
+   * not discarded: when the in-flight request settles we re-arm immediately so
+   * the freshest window is scored without ever stacking requests.
+   */
+  private rescan: Set<string> = new Set();
   /** Last meaningful verdict broadcast per symbol (change-gate). */
   private lastBroadcast: Map<string, LastBroadcastState> = new Map();
   /**
@@ -163,8 +186,8 @@ class LiveTickSignalDispatcher {
     return this.selectedHorizons.get(key) ?? null;
   }
 
-  /** Drops the learned horizon when a symbol is fully unsubscribed. */
-  public clearSelectedHorizonMinutes(symbol: string): void {
+/** Drops the learned horizon when a symbol is fully unsubscribed. */
+public clearSelectedHorizonMinutes(symbol: string): void {
     const key = String(symbol ?? "").trim().toUpperCase();
     this.selectedHorizons.delete(key);
   }
@@ -206,6 +229,16 @@ class LiveTickSignalDispatcher {
   public enqueue(symbol: string): void {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm) return;
+    // A request is already outstanding for this symbol. Record that the tape
+    // moved and return: the settle handler re-arms IMMEDIATELY, which is
+    // strictly better than arming the trailing timer below — that timer would
+    // hold this tick for up to a full coalescing beat on top of the request
+    // that is already in flight, i.e. up to 2s of staleness under a slow
+    // engine, for a feed that is supposed to be zero-latency.
+    if (this.inFlight.has(norm)) {
+      this.rescan.add(norm);
+      return;
+    }
     const now = Date.now();
     const last = this.lastSentAt.get(norm) ?? 0;
     if (now - last >= DISPATCH_INTERVAL_MS) {
@@ -223,6 +256,39 @@ class LiveTickSignalDispatcher {
   }
 
   private async dispatch(symbol: string): Promise<void> {
+    // ── PER-SYMBOL SERIALIZATION ──
+    // A request is already outstanding for this symbol. Do NOT stack another
+    // one: record that the tape moved and let the settle handler re-arm, which
+    // keeps the freshest window scored while guaranteeing that the response we
+    // broadcast is always the newest one.
+    if (this.inFlight.has(symbol)) {
+      this.rescan.add(symbol);
+      return;
+    }
+    this.inFlight.add(symbol);
+    try {
+      await this.runDispatch(symbol);
+    } finally {
+      this.inFlight.delete(symbol);
+      // Cancel any trailing timer armed while this request was outstanding:
+      // the re-arm below supersedes it, and leaving it alive would fire a
+      // redundant second follow-up dispatch a beat later.
+      const pending = this.pendingTimers.get(symbol);
+      if (pending) {
+        clearTimeout(pending);
+        this.pendingTimers.delete(symbol);
+      }
+      if (this.rescan.delete(symbol)) {
+        // The tape advanced while we were waiting. Re-arm now rather than at
+        // the next 1s beat edge, and clear the coalescing anchor so `enqueue`
+        // treats this as a fresh leading-edge dispatch (no added latency).
+        this.lastSentAt.delete(symbol);
+        this.enqueue(symbol);
+      }
+    }
+  }
+
+  private async runDispatch(symbol: string): Promise<void> {
     this.lastSentAt.set(symbol, Date.now());
 
     // ── SUBSCRIBER GATE ──
@@ -236,19 +302,22 @@ class LiveTickSignalDispatcher {
     const window = realtimeTickBuffer.getRecentWindow(
       symbol,
       FORWARD_WINDOW_TICKS,
+      // Fresh-only: held prints keep the ring contiguous for charts but must
+      // never drive the scorer. If every observed entry is held, this window is
+      // empty and no signal is produced (honest: no real prices ⇒ no signal).
+      { freshOnly: true },
     );
     if (window.length < 2) return; // honest: need ≥2 real prices
 
     const spread = realtimeTickBuffer.getLatestSpread(symbol);
     const prices = window.map((w) => Number(w.price));
-    // Forward the operator's selected expiry so the fast path can score the
-    // SAME horizon as /predict. Absent -> the engine's own default (never
-    // invented here).
+    // Forward the operator's selected expiry so the fast path scores the SAME
+    // horizon as /predict. Absent → the engine's own default (never invented).
     const horizonMinutes = this.getSelectedHorizonMinutes(symbol);
     // Same reasoning for the tier floor: without forwarding it the live tick
-    // verdict is always scored at the engine's strict T1 default and the
-    // operator's selection is invisible on the live surface. Absent -> the
-    // engine's own default (never invented here).
+    // verdict would always be scored at the engine's strict T1 default and the
+    // operator's selection would be invisible on the live surface. Absent →
+    // the engine's own default (never invented here).
     const minTier = this.getSelectedMinTier(symbol);
     const payload = {
       symbol,
@@ -274,6 +343,7 @@ class LiveTickSignalDispatcher {
         payload,
         {
           timeout: TICK_SIGNAL_TIMEOUT_MS,
+          httpAgent: AI_ENGINE_HTTP_AGENT,
           headers: {
             "Content-Type": "application/json",
             "X-API-Key": secrets.AI_ENGINE_API_KEY,
@@ -380,6 +450,17 @@ class LiveTickSignalDispatcher {
     const confidence = Number(data?.confidence ?? 0);
     if (!Number.isFinite(confidence)) return;
     const waiting = data?.market_waiting === true;
+    // ── HONEST BAND (PART 38.1 [377]) ──
+    // The engine already stamps `tier`/`tier_label`/`executable`/`scored_only`/
+    // `dispatchable` on every /tick-signal response (signal_gatekeeper.
+    // apply_strict_execution_gate -> signals._strict_execution_surface). They
+    // are part of the verdict, not decoration: dropping them here left the
+    // terminal's LiveVerdict contract (`tier` "present for every tier") reading
+    // null for every live verdict, so the card had to re-derive a band from a
+    // micro-quant confidence. `clampMinTierToEngineSet` validates the same
+    // T1..T5 set the ladder owns, so garbage resolves to null rather than
+    // inventing a band.
+    const tier = clampMinTierToEngineSet(data?.tier);
     const prev = this.lastBroadcast.get(symbol);
     if (prev) {
       const stepped = Math.abs(confidence - prev.confidence);
@@ -388,6 +469,7 @@ class LiveTickSignalDispatcher {
       if (
         prev.direction === direction &&
         prev.waiting === waiting &&
+        prev.tier === tier &&
         stepped < BROADCAST_CONFIDENCE_STEP &&
         !crossedGate
       ) {
@@ -397,8 +479,14 @@ class LiveTickSignalDispatcher {
 
     const price = Number(data?.current_price ?? data?.tick ?? 0);
     const targetPrice =
-      Number(data?.target_price) > 0 ? Number(data?.target_price) : price;
+      Number(data?.target_price) > 0 ? Number(data.target_price) : price;
     const timestamp = data?.timestamp ?? new Date().toISOString();
+    // The horizon this verdict was actually evaluated at, so the client never
+    // has to guess which expiry a live tick belongs to.
+    const horizonMinutes =
+      Number(data?.horizon_minutes) > 0
+        ? Number(data.horizon_minutes)
+        : this.getSelectedHorizonMinutes(symbol);
 
     const payload = {
       symbol,
@@ -414,8 +502,25 @@ class LiveTickSignalDispatcher {
       waiting_reason: data?.waiting_reason ?? null,
       waiting_detail: data?.waiting_detail ?? null,
       book_confluence:
-        Number(data?.book_confluence) > 0 ? Number(data?.book_confluence) : null,
+        Number(data?.book_confluence) > 0 ? Number(data.book_confluence) : null,
       dataSource: "live_tick_quant",
+      // Honest execution surface (PART 38.1 [377]) — forwarded verbatim so the
+      // card's `LiveVerdict` contract (tier / tier_label / scored_only /
+      // dispatchable / executable) stays true across the socket hop instead of
+      // being declared on the type and then silently dropped by the builder.
+      tier,
+      tier_label: typeof data?.tier_label === "string" ? data.tier_label : null,
+      status: typeof data?.status === "string" ? data.status : null,
+      dispatchable: data?.dispatchable === true,
+      scored_only: data?.scored_only === true,
+      executable: data?.executable === true,
+      regime_gate:
+        typeof data?.regime_gate === "string" ? data.regime_gate : null,
+      suppressed_reason:
+        typeof data?.suppressed_reason === "string"
+          ? data.suppressed_reason
+          : null,
+      ...(horizonMinutes !== null ? { horizon_minutes: horizonMinutes } : {}),
       ...(data?.aiEngine ? { aiEngine: data.aiEngine } : {}),
       timestamp,
     };
@@ -424,9 +529,18 @@ class LiveTickSignalDispatcher {
       direction,
       confidence,
       waiting,
+      tier,
     });
 
     websocketService.broadcastLiveQuantSignal(payload);
+
+    // ── DURABLE HALF ──
+    // The socket emit above is the HOT path: sub-millisecond, best-effort, and
+    // lossy by design (if nobody is connected the operator was not watching).
+    // The stream append is the DURABLE path: at-least-once, so a crash between
+    // here and the database write still leaves a recoverable record. It is
+    // fire-and-forget and can never slow down or fail the broadcast above.
+    void publishDurableSignal(payload as Record<string, unknown>);
 
     if (direction && confidence >= HIGH_CONFIDENCE_THRESHOLD) {
       websocketService.broadcastHighConfidenceSignal({

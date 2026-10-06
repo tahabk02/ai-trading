@@ -24,6 +24,13 @@ import axios, { AxiosInstance } from "axios";
 import { logger } from "../utils/logger";
 import { renderFallbackChainLog } from "../lib/feedResilience";
 import { canonicalizeSymbol } from "../utils/symbolFormat";
+import {
+  applyPrintToBar,
+  isUsablePrice,
+  normalizeOhlc,
+  normalizeSeries,
+  openBucket,
+} from "../lib/ohlcNormalizer";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TYPES
@@ -49,6 +56,14 @@ export interface ForexSpotResult {
   ask?: number;
   source: string;
   error?: string;
+  /**
+   * True ONLY when the returned price is a real previously-observed print that
+   * is being held past its freshness window. Consumers must surface it as stale
+   * and must never bootstrap a signal from it.
+   */
+  stale?: boolean;
+  /** Age (ms) of the underlying observation when `stale` is true. */
+  ageMs?: number;
 }
 
 export interface GitHubForexTick {
@@ -77,7 +92,54 @@ interface ComputeAtrOptions {
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REQUEST_TIMEOUT_MS = 5_000;
+/** Clamp a possibly-missing/NaN env value into a sane [min, max] window. */
+function envMs(name: string, fallback: number, min = 100, max = 60_000): number {
+  const raw = Number(process.env[name]);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.min(Math.max(raw, min), max);
+}
+
+/** Default budget for the primary client (PO-mirrored HTTP tier, Yahoo, GitHub). */
+const REQUEST_TIMEOUT_MS = envMs("FOREX_HTTP_TIMEOUT_MS", 5_000);
+/**
+ * Per-tier budget for the LOW-priority fallback APIs (Frankfurter, open.er-api,
+ * CoinGecko). The tick ingestion loop probes every 1s, so the tail of the
+ * cascade must never spend a full primary budget per tier: three serial
+ * fallbacks at 5s each starved the poll window for ~15s and piled up overlapping
+ * probes. 2s per fallback bounds the exhausted-cascade worst case while still
+ * giving these free endpoints room. Raise it via FOREX_FALLBACK_TIMEOUT_MS when
+ * the host sits behind a slow egress proxy.
+ */
+const FALLBACK_TIMEOUT_MS = envMs("FOREX_FALLBACK_TIMEOUT_MS", 2_000);
+/**
+ * Circuit-breaker cooldown: a fallback tier that failed
+ * FOREX_SOURCE_COOLDOWN_FAILURES times in a row is SKIPPED (no socket, no
+ * timeout wait) for FOREX_SOURCE_COOLDOWN_MS. The source is re-probed after the
+ * cooldown, so a recovered endpoint self-heals without a restart and a dead one
+ * cannot block the ingestion loop on every single poll.
+ */
+const SOURCE_COOLDOWN_FAILURES = Math.max(
+  1,
+  Math.floor(envMs("FOREX_SOURCE_COOLDOWN_FAILURES", 3, 1, 100)),
+);
+const SOURCE_COOLDOWN_MS = envMs("FOREX_SOURCE_COOLDOWN_MS", 15_000, 1_000, 600_000);
+
+/**
+ * How long a broker print is considered FRESH. Past this, any print we serve
+ * is being HELD, and must be reported as `stale` with its real `ageMs` so no
+ * consumer (chart, signal.controller) mistakes a cold stream for a live one.
+ * Mirrors the 15s freshness check used by the primary PO path.
+ */
+const PO_FRESH_WINDOW_MS = envMs("FOREX_PO_FRESH_WINDOW_MS", 15_000, 1_000, 600_000);
+
+/** Rate-limit for the "serving last known good price" / exhaustion audit logs. */
+const CHAIN_AUDIT_LOG_INTERVAL_MS = envMs(
+  "FOREX_CHAIN_AUDIT_LOG_INTERVAL_MS",
+  30_000,
+  1_000,
+  600_000,
+);
+
 const DEFAULT_POLLING_INTERVAL_MS = 10_000;
 /**
  * Max age (ms) of a held "last real" spot price before it is refused as live.
@@ -100,7 +162,7 @@ const GITHUB_PRICES_FILE =
   process.env.FOREX_GITHUB_PRICES_FILE || "data/fx_spot.json";
 
 /** Known free public forex rate API base URLs (tiered fallback). */
-const FRANKFURTER_BASE = "https://api.frankfurter.app";
+const FRANKFURTER_BASE = "https://api.frankfurter.dev/v1";
 const OPEN_ER_API_BASE = "https://open.er-api.com/v6/latest";
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
@@ -234,6 +296,8 @@ class ForexDataService {
   /** Timestamp of the last successful fresh spot fetch from ANY live API
    *  (not held/cached). Used to detect partial recovery. */
   private lastFreshApiSuccessAt = 0;
+  /** Per-symbol last chain-audit emit (rate limiting only). */
+  private chainAuditLastLogAt: Map<string, number> = new Map();
 
   // ── PART 28: Yahoo Finance intraday forex tier ──
   // Per-symbol throttle so the 1-second poll loop re-serves the last genuine
@@ -455,12 +519,23 @@ class ForexDataService {
         typeof po.ask === "number" && Number.isFinite(po.ask) && po.ask > 0
           ? po.ask
           : undefined;
+      // The module's own invariant (see the LiveSpot contract near the top of
+      // this file) is that a held price must NEVER look fresh when the stream
+      // has actually gone cold. Returning the bare shape here gave a consumer
+      // no way to tell a 200ms-old print from a 59s-old one, and
+      // signal.controller.ts then fed it to signal generation as though it were
+      // live. `held_stale_real` already reports `stale` + `ageMs`; this path
+      // must too. The flag is only true once the print is past the fresh
+      // window, so genuinely live PO ticks stay unflagged.
+      const heldAgeMs = Date.now() - po.ts;
+      const isStale = heldAgeMs >= PO_FRESH_WINDOW_MS;
       return {
         success: true,
         price: po.price,
         ...(poBid !== undefined ? { bid: poBid } : {}),
         ...(poAsk !== undefined ? { ask: poAsk } : {}),
         source: "pocket_option_held",
+        ...(isStale ? { stale: true, ageMs: heldAgeMs } : {}),
       };
     }
 
@@ -498,27 +573,35 @@ class ForexDataService {
     // API_CALL_THROTTLE_MS would delay recovery by 250ms per tier. In
     // recovery mode we bypass the throttle so the cascade runs at network
     // speed — a recovered API is re-anchored instantly.
-    const wasThrottled = this.recoveryMode;
-
     // Tier 1: Frankfurter (ECB published rates, free)
-    const frankResult = await this.fetchFrankfurterSpot(norm);
-    this.recordSourceHealth(
-      "frankfurter",
-      frankResult.success,
-      frankResult.error,
-    );
+    const frankCooldown = this.sourceCooldownReason("frankfurter");
+    const frankResult: ForexSpotResult = frankCooldown
+      ? { success: false, price: null, source: "frankfurter", error: frankCooldown }
+      : await this.fetchFrankfurterSpot(norm);
+    if (!frankCooldown) {
+      this.recordSourceHealth(
+        "frankfurter",
+        frankResult.success,
+        frankResult.error,
+      );
+    }
     if (frankResult.success) {
       this.recoveryMode = false;
       return frankResult;
     }
 
     // Tier 2: Open Exchange Rates API (free tier)
-    const openErResult = await this.fetchOpenErSpot(norm);
-    this.recordSourceHealth(
-      "open_er_api",
-      openErResult.success,
-      openErResult.error,
-    );
+    const openErCooldown = this.sourceCooldownReason("open_er_api");
+    const openErResult: ForexSpotResult = openErCooldown
+      ? { success: false, price: null, source: "open_er_api", error: openErCooldown }
+      : await this.fetchOpenErSpot(norm);
+    if (!openErCooldown) {
+      this.recordSourceHealth(
+        "open_er_api",
+        openErResult.success,
+        openErResult.error,
+      );
+    }
     if (openErResult.success) {
       this.recoveryMode = false;
       return openErResult;
@@ -527,60 +610,84 @@ class ForexDataService {
     // Tier 3: CoinGecko (crypto pairs only)
     let cgResult: ForexSpotResult | undefined;
     if (norm === "BTC/USD" || norm === "ETH/USD") {
-      cgResult = await this.fetchCoinGeckoSpot(norm);
-      this.recordSourceHealth("coingecko", cgResult.success, cgResult.error);
+      const cgCooldown = this.sourceCooldownReason("coingecko");
+      cgResult = cgCooldown
+        ? { success: false, price: null, source: "coingecko", error: cgCooldown }
+        : await this.fetchCoinGeckoSpot(norm);
+      if (!cgCooldown) {
+        this.recordSourceHealth("coingecko", cgResult.success, cgResult.error);
+      }
       if (cgResult.success) {
         this.recoveryMode = false;
         return cgResult;
       }
     }
 
-    const held = this.lastSpotCache.get(norm);
+    const nowMs = Date.now();
+    const poNow = this.pocketOptionCache.get(norm);
+    const cachedNow = this.lastSpotCache.get(norm);
+    const chain = renderFallbackChainLog([
+      {
+        source: "pocket_option_ssot",
+        ok: !!(poNow && poNow.price > 0 && nowMs - poNow.ts < 15_000),
+        reason:
+          poNow && poNow.price > 0
+            ? nowMs - poNow.ts < 15_000
+              ? undefined
+              : `stale_${Math.round((nowMs - poNow.ts) / 1000)}s_held`
+            : "no_ssot_cache",
+      },
+      {
+        source: "github_repo_cached",
+        ok: !!(cachedNow && nowMs - cachedNow.ts < 15_000),
+        reason: cachedNow
+          ? `age_${Math.round((nowMs - cachedNow.ts) / 1000)}s`
+          : "no_cache",
+      },
+      { source: "frankfurter", ok: false, reason: frankResult.error },
+      { source: "open_er_api", ok: false, reason: openErResult.error },
+      ...(cgResult
+        ? [{ source: "coingecko", ok: false, reason: cgResult.error }]
+        : []),
+    ]);
+
+    // ── LAST KNOWN GOOD: keep the tape alive instead of withholding a real
+    // print. The value below is a genuinely observed price, never synthesised;
+    // it is returned with stale=true + its real age so every consumer can
+    // refuse it as a fresh quote while charts/ring/replay keep continuity.
+    // Beyond STALE_HOLD_MAX_AGE_MS it is refused outright, so a cold feed can
+    // never masquerade as live indefinitely.
+    const held = cachedNow;
     if (
       held &&
       Number.isFinite(held.price) &&
       held.price > 0 &&
-      Date.now() - held.ts < STALE_HOLD_MAX_AGE_MS
+      nowMs - held.ts < STALE_HOLD_MAX_AGE_MS
     ) {
-      logger.warn("[ForexData] All live sources failed; stale price withheld", {
-        symbol: norm,
-        ageMs: Date.now() - held.ts,
+      const ageMs = nowMs - held.ts;
+      this.recoveryMode = true;
+      this.logChainAudit("warn", norm, chain, {
+        heldPrice: held.price,
+        heldAgeMs: ageMs,
+        maxHoldAgeMs: STALE_HOLD_MAX_AGE_MS,
       });
+      return {
+        success: true,
+        price: held.price,
+        source: "held_stale_real",
+        stale: true,
+        ageMs,
+      };
     }
 
-    // All sources exhausted and no real baseline — enter recovery mode and
-    // return honest failure. Recovery mode ensures the next poll cycle
-    // bypasses throttle delays and retries all tiers at network speed.
-    // Log the FULL fallback chain with per-source reason (mission [4]) so
-    // operators see exactly which tier died and why (timeout/429/500/DNS).
-    logger.error("[ForexData] All spot rate sources exhausted — chain audit", {
-      symbol: norm,
-      chain: renderFallbackChainLog([
-        {
-          source: "pocket_option_ssot",
-          ok: !!(po && po.price > 0 && Date.now() - po.ts < 15_000),
-          reason:
-            po && po.price > 0 && Date.now() - po.ts < 15_000
-              ? undefined
-              : po && po.price > 0
-                ? `stale_${Math.round((Date.now() - po.ts) / 1000)}s_held`
-                : "no_ssot_cache",
-        },
-        {
-          source: "github_repo_cached",
-          ok: !!(cached && Date.now() - cached.ts < 15_000),
-          reason: cached
-            ? `age_${Math.round((Date.now() - cached.ts) / 1000)}s`
-            : "no_cache",
-        },
-        { source: "frankfurter", ok: false, reason: frankResult.error },
-        { source: "open_er_api", ok: false, reason: openErResult.error },
-        ...((norm === "BTC/USD" || norm === "ETH/USD") && cgResult
-          ? [{ source: "coingecko", ok: false, reason: cgResult.error }]
-          : []),
-      ]),
-    });
+    // All sources exhausted AND no real baseline within the hold window —
+    // return honest failure. Recovery mode ensures the next poll cycle bypasses
+    // throttle delays and retries all tiers at network speed.
     this.recoveryMode = true;
+    this.logChainAudit("error", norm, chain, {
+      heldPrice: held && Number.isFinite(held.price) ? held.price : null,
+      heldAgeMs: held ? nowMs - held.ts : null,
+    });
     return {
       success: false,
       price: null,
@@ -666,6 +773,7 @@ class ForexDataService {
       const url = `${YAHOO_CHART_BASE}/${encodeURIComponent(ticker)}?interval=1m&range=1d&includePrePost=false`;
       const response = await this.client.get(url, {
         headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+        timeout: REQUEST_TIMEOUT_MS,
       });
 
       const result = response.data?.chart?.result?.[0];
@@ -750,7 +858,9 @@ class ForexDataService {
       }
 
       const url = `${FRANKFURTER_BASE}/latest?from=${base}&to=${quote}`;
-      const response = await this.client.get(url);
+      const response = await this.client.get(url, {
+        timeout: FALLBACK_TIMEOUT_MS,
+      });
 
       if (response.status === 200 && response.data?.rates?.[quote]) {
         const price = Number(response.data.rates[quote]);
@@ -797,7 +907,9 @@ class ForexDataService {
       }
 
       const url = `${OPEN_ER_API_BASE}/${base}`;
-      const response = await this.client.get(url);
+      const response = await this.client.get(url, {
+        timeout: FALLBACK_TIMEOUT_MS,
+      });
 
       if (response.status === 200 && response.data?.rates?.[quote]) {
         const price = Number(response.data.rates[quote]);
@@ -850,7 +962,9 @@ class ForexDataService {
       }
 
       const url = `${COINGECKO_BASE}/simple/price?ids=${coinId}&vs_currencies=usd`;
-      const response = await this.client.get(url);
+      const response = await this.client.get(url, {
+        timeout: FALLBACK_TIMEOUT_MS,
+      });
 
       if (response.status === 200 && response.data?.[coinId]?.usd) {
         const price = Number(response.data[coinId].usd);
@@ -1344,6 +1458,10 @@ class ForexDataService {
     price: number,
     now: number,
   ): void {
+    // Reject unusable prints at the door. A single non-finite tick would
+    // otherwise poison a bucket permanently (see applyPrintToBar).
+    if (!isUsablePrice(price)) return;
+
     const bucketMs = this.timeframeToMs(timeframe);
     const bucketTs = now - (now % bucketMs);
 
@@ -1353,20 +1471,26 @@ class ForexDataService {
 
     if (lastBar && lastBar.timestamp === bucketTs) {
       // Update existing (in-progress) bucket — candle breathes live.
-      lastBar.high = Math.max(lastBar.high, price);
-      lastBar.low = Math.min(lastBar.low, price);
-      lastBar.close = price;
-      lastBar.volume += 1;
+      // Re-derived (not mutated in place) so a legacy NaN-poisoned bar can
+      // recover instead of propagating forever.
+      const next = applyPrintToBar(lastBar, price);
+      if (next) bars[bars.length - 1] = next;
+      else bars.pop();
     } else {
       // Bucket rollover → close the previous candle, open a brand-new one.
-      bars.push({
-        timestamp: bucketTs,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-        volume: 1,
-      });
+      //
+      // The new bar OPENS AT THE PREVIOUS BAR'S CLOSE, not at the first tick
+      // of the new bucket. This is the fix for the "flat red block" defect:
+      // a bucket holding a single tick used to be stored as
+      // open=high=low=close, i.e. a zero-height body. With a 10s poll feeding
+      // a 1s bucket, EVERY tick opened a fresh single-tick bucket, so the
+      // whole 1s series rendered flat. Carrying the prior close makes the
+      // body real using only the previous bar's own close — no fabricated
+      // price action.
+      const prevClose = isUsablePrice(lastBar?.close) ? lastBar.close : null;
+      const opened = openBucket(bucketTs, price, prevClose);
+      if (!opened) return;
+      bars.push(opened as ForexCandle);
       this.candleEmissionCount += 1;
 
       // Trim old bars (keep last 500 per timeframe).
@@ -1395,28 +1519,16 @@ class ForexDataService {
   ): ForexCandle | null {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm) return null;
-    if (
-      !Number.isFinite(time) ||
-      !Number.isFinite(ohlc.open) ||
-      !Number.isFinite(ohlc.high) ||
-      !Number.isFinite(ohlc.low) ||
-      !Number.isFinite(ohlc.close)
-    ) {
-      return null;
-    }
-    if (ohlc.open <= 0 || ohlc.high <= 0 || ohlc.low <= 0 || ohlc.close <= 0) {
-      return null;
-    }
+
+    // Single authority on validity — same gate the tick path and the read
+    // boundary use, so the three producers cannot drift apart again.
+    const checked = normalizeOhlc({ timestamp: time, ...ohlc, volume: 1 });
+    if (!checked) return null;
 
     const candle: ForexCandle = {
-      timestamp: time,
-      open: ohlc.open,
-      high: Math.max(ohlc.high, ohlc.open, ohlc.close),
-      low: Math.min(ohlc.low, ohlc.open, ohlc.close),
-      close: ohlc.close,
-      volume: 1,
+      ...checked,
       ...(assetType ? { assetType } : {}),
-    };
+    } as ForexCandle;
 
     // Write into the 1m bucket (M20 bars roll up into 1m for the expiry
     // decision matrix) matching PO's own bucket-start timestamp so the merge
@@ -1449,14 +1561,27 @@ class ForexDataService {
     const bars = this.candleBuffer.get(bufferKey) ?? [];
     const idx = bars.findIndex((b) => b.timestamp === bucketTs);
 
+    // Validate the incoming bar before it can mutate a stored one. The
+    // in-place `Math.max(existing.high, candle.high)` below is a NaN sink:
+    // one bad merge poisons that bucket permanently.
+    const incoming = normalizeOhlc(candle);
+    if (!incoming) return;
+
     if (idx >= 0) {
       // Roll OHLC up into the existing bucket (preserve low/high extremes).
-      const existing = bars[idx];
-      existing.high = Math.max(existing.high, candle.high);
-      existing.low = Math.min(existing.low, candle.low);
-      existing.close = candle.close;
-      existing.volume += 1;
-      bars[idx] = existing;
+      // Re-derived rather than mutated so a legacy poisoned bucket heals.
+      const existing = normalizeOhlc(bars[idx]);
+      if (!existing) {
+        bars.splice(idx, 1, incoming as ForexCandle);
+      } else {
+        bars[idx] = {
+          ...existing,
+          high: Math.max(existing.high, incoming.high),
+          low: Math.min(existing.low, incoming.low),
+          close: incoming.close,
+          volume: (existing.volume ?? 0) + 1,
+        } as ForexCandle;
+      }
     } else {
       bars.push({
         timestamp: bucketTs,
@@ -1480,7 +1605,11 @@ class ForexDataService {
     const bufferKey = `${norm}|${timeframe}`;
     const bars = this.candleBuffer.get(bufferKey);
     if (!bars || bars.length === 0) return [];
-    return bars.slice(-300);
+    // Sanitise at the READ boundary. This is the last line of defence before
+    // bars reach the chart: a malformed bar rendered as a zero-height or
+    // full-height slab (the "flat red block" artifact), and a non-finite one
+    // poisons every downstream aggregate (ATR, confluence) that touches it.
+    return normalizeSeries(bars, { limit: 300 }) as ForexCandle[];
   }
 
   /**
@@ -1491,7 +1620,9 @@ class ForexDataService {
     const bufferKey = `${norm}|${timeframe}`;
     const bars = this.candleBuffer.get(bufferKey);
     if (!bars || bars.length === 0) return null;
-    return bars[bars.length - 1];
+    const cleaned = normalizeSeries(bars);
+    if (cleaned.length === 0) return null;
+    return cleaned[cleaned.length - 1] as ForexCandle;
   }
 
   /**
@@ -1703,6 +1834,44 @@ class ForexDataService {
   }
 
   /**
+   * Circuit-breaker gate for a fallback tier. Returns a non-null reason while
+   * the source is cooling down (skip the socket entirely so the poll loop is
+   * never blocked on a dead endpoint), or null when it must be probed.
+   */
+  private sourceCooldownReason(source: string): string | null {
+    const health = this.sourceHealth.get(source);
+    if (!health || health.ok) return null;
+    if (health.failCount < SOURCE_COOLDOWN_FAILURES) return null;
+    const sinceLastCheckMs = Date.now() - health.lastCheck;
+    if (sinceLastCheckMs >= SOURCE_COOLDOWN_MS) return null;
+    const remainingS = Math.ceil((SOURCE_COOLDOWN_MS - sinceLastCheckMs) / 1000);
+    return `cooldown_${remainingS}s_after_${health.failCount}_failures`;
+  }
+
+  /**
+   * Rate-limited chain-audit emit. The cascade can be re-probed every second per
+   * symbol; without throttling a multi-symbol outage produced the same error
+   * line hundreds of times per second. The first occurrence of an incident is
+   * always logged, then once per CHAIN_AUDIT_LOG_INTERVAL_MS per symbol.
+   */
+  private logChainAudit(
+    level: "warn" | "error",
+    symbol: string,
+    chain: string,
+    meta: Record<string, unknown>,
+  ): void {
+    const now = Date.now();
+    const lastAt = this.chainAuditLastLogAt.get(symbol) ?? 0;
+    if (lastAt > 0 && now - lastAt < CHAIN_AUDIT_LOG_INTERVAL_MS) return;
+    this.chainAuditLastLogAt.set(symbol, now);
+    const line =
+      level === "warn"
+        ? "[ForexData] Spot sources exhausted — serving last known good price"
+        : "[ForexData] All spot rate sources exhausted — chain audit";
+    logger[level](line, { symbol, chain, ...meta });
+  }
+
+  /**
    * True when the system should aggressively retry all API tiers because
    * the last poll cycle fell back to stale-cache or failed entirely.
    * Recovery mode is cleared on the first successful fresh API fetch.
@@ -1726,6 +1895,8 @@ class ForexDataService {
         success: true,
         price: cached.price,
         source: "last_known_real",
+        stale: true,
+        ageMs: Date.now() - cached.ts,
       };
     }
     const po = this.pocketOptionCache.get(norm);
@@ -1734,6 +1905,8 @@ class ForexDataService {
         success: true,
         price: po.price,
         source: "pocket_option_last_known",
+        stale: true,
+        ageMs: Date.now() - po.ts,
       };
     }
     return {
@@ -1775,13 +1948,22 @@ class ForexDataService {
 
   /**
    * Update the spot price cache for a symbol.
+   *
+   * The observation timestamp is refreshed on EVERY accepted print, even when
+   * the price itself is unchanged. The old change-only write left `ts` frozen at
+   * the first sighting of a flat rate, so a perfectly healthy source (a quiet
+   * weekend tape, an unchanged repo snapshot) aged out of the 15s/30s/120s
+   * freshness gates and reported FAIL in the chain audit while still being up.
    */
   private updateSpotCache(symbol: string, price: number): void {
     if (!Number.isFinite(price) || price <= 0) return;
     const norm = symbol.trim().toUpperCase();
     const prev = this.lastSpotCache.get(norm);
-    // Only update if price actually changed (dedup)
-    if (prev && prev.price === price) return;
+    if (prev && prev.price === price) {
+      // Same value re-observed: keep the price, advance the freshness clock.
+      this.lastSpotCache.set(norm, { price, ts: Date.now() });
+      return;
+    }
     this.lastSpotCache.set(norm, { price, ts: Date.now() });
   }
 
@@ -1806,11 +1988,10 @@ class ForexDataService {
       ...(ask !== undefined && Number.isFinite(ask) && ask > 0 ? { ask } : {}),
       ts: now,
     });
-    // Mirror into the generic spot cache (change-only) so every downstream
-    // reader that looks at lastSpotCache sees the same live value.
-    if (this.lastSpotCache.get(norm)?.price !== price) {
-      this.lastSpotCache.set(norm, { price, ts: now });
-    }
+    // Mirror into the generic spot cache, ALWAYS advancing the freshness clock
+    // so the 15s/30s/120s gates stay aligned with the PO heartbeat. The previous
+    // change-only mirror let a re-asserted (unchanged) PO rate look stale.
+    this.lastSpotCache.set(norm, { price, ts: now });
   }
 
   /** True when the PO bridge has delivered a price for this symbol recently. */
@@ -1864,13 +2045,20 @@ class ForexDataService {
 
   /**
    * Deduplicate an array of bars by timestamp, keeping the latest entry.
+   *
+   * Also drops bars that are not renderable. This runs immediately before the
+   * signal pipeline, so an unvalidated bar here would silently skew ATR,
+   * confluence and every RF feature computed from the series — and would show
+   * on the chart as a zero-height or full-height slab.
    */
   private deduplicateBars(bars: ForexCandle[]): ForexCandle[] {
     const byTimestamp = new Map<number, ForexCandle>();
     for (const bar of bars) {
-      const existing = byTimestamp.get(bar.timestamp);
-      if (!existing || bar.timestamp >= existing.timestamp) {
-        byTimestamp.set(bar.timestamp, bar);
+      const clean = normalizeOhlc(bar);
+      if (!clean) continue;
+      const existing = byTimestamp.get(clean.timestamp);
+      if (!existing || clean.timestamp >= existing.timestamp) {
+        byTimestamp.set(clean.timestamp, clean as ForexCandle);
       }
     }
     return Array.from(byTimestamp.values()).sort(
@@ -1884,6 +2072,13 @@ class ForexDataService {
   private timeframeToMs(timeframe: string): number {
     const tf = (timeframe || "").toLowerCase().trim();
     const map: Record<string, number> = {
+      // NOTE: "1s" was missing from this map while `AGGREGATE_TIMEFRAMES`
+      // listed it, so the silent `|| 60_000` fallback made the "1s" buffer a
+      // byte-for-byte duplicate of the "1m" buffer — two buffers, one series,
+      // and any "1s" request silently answered with 1m-aligned buckets.
+      // The socket/chart path is unaffected (it streams S5 and coarser via
+      // realtimeCandleAggregator); only the tick-quant heartbeat buffer is.
+      "1s": 1_000,
       "5s": 5_000,
       "20s": 20_000,
       "30s": 30_000,

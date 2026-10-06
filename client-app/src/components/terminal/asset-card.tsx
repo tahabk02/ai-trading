@@ -15,6 +15,7 @@ import {
   isBelowConfidenceBar,
 } from "@/lib/minConfidenceFilter";
 import { resolveCardTier, tierClearsSelection } from "@/lib/tierFilter";
+import { quoteProvenance } from "@/lib/quoteProvenance";
 import { TierBadge } from "@/components/shared/tier-badge";
 
 interface AssetCardProps {
@@ -222,6 +223,10 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
     </span>
   ) : null;
 
+  // ── PART 38.2 QUOTE PROVENANCE — WHICH FEED WROTE THIS PRICE, AND IS IT
+  // LIVE? A held/fallback print must never paint like a genuine PO tick.
+  const provenance = quote ? quoteProvenance(quote) : null;
+
   return (
     <div
       data-testid="asset-card"
@@ -293,6 +298,25 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
         </div>
       </div>
 
+      {/* ── ROW 2b (PART 38.2) — data provenance / staleness strip ── */}
+      {provenance && (
+        <div className="mt-0.5 flex items-center justify-between gap-1 min-w-0">
+          <span
+            data-testid="quote-provenance"
+            title={provenance.title}
+            className={cn(
+              "num-fig text-[8px] leading-none truncate cursor-help",
+              provenance.tone === "held" && "text-bear font-semibold",
+              provenance.tone === "fallback" && "text-gold",
+              provenance.tone === "live" && "text-term-ink-faint",
+              provenance.tone === "unknown" && "text-term-ink-dim",
+            )}
+          >
+            {provenance.label}
+          </span>
+        </div>
+      )}
+
       {/* ── ROW 3 — verdict strip (LIVE + horizon) ── */}
       {scoredOnly ? (
         <div className="mt-2 flex flex-col gap-1">
@@ -315,6 +339,15 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
       ) : demotedByFilter ? (
         <div className="mt-2 flex flex-col gap-1">
           <div className="flex items-center gap-1.5 flex-wrap">
+            {/* ── HONEST DISPLAY (PART 38.1 [377]) ──
+                The bar gates TRADABILITY (row 4 pills, PRO, the link role) —
+                it must never hide what the feeds actually believe. A live
+                1Hz direction that clears 0 but not 96.5 still renders its
+                CALL/PUT here, next to the reason the card cannot be traded,
+                so "BELOW BAR" is a state of the verdict and not the absence
+                of one. */}
+            {liveBadge}
+            {horizonBadge}
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-amber-400 bg-amber-500/10 border border-amber-500/40"
               title={nonInteractiveTitle}
@@ -333,6 +366,10 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
       ) : demotedByTier ? (
         <div className="mt-2 flex flex-col gap-1">
           <div className="flex items-center gap-1.5 flex-wrap">
+            {/* Same rule as the confidence demotion: the direction stays on
+                screen, only the action is withheld. */}
+            {liveBadge}
+            {horizonBadge}
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-slate-300 bg-slate-500/10 border border-slate-500/40"
               title={nonInteractiveTitle}

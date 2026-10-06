@@ -94,6 +94,16 @@ export class LiveTickIngestionService {
     * starved chart is exactly when recovery must be zero-timeout.
    */
   private readonly FORCE_POLL_AGE_MS = 3000;
+  /**
+   * In-flight guard. The cascade can take up to its full per-tier budget, and
+   * the 1s interval (plus the age-watchdog override) will happily start a second
+   * probe for the same symbol while the first is still waiting on sockets. Those
+   * overlapping probes compounded the upstream load that caused the outage, so
+   * one probe per symbol is enforced.
+   */
+  private inFlightPolls: Set<string> = new Set();
+  /** Last time a held (stale) real print was pended into the ring, per symbol. */
+  private heldStalePendedAt: Map<string, number> = new Map();
 
   /**
    * Per-symbol last assigned tick timestamp (epoch ms), floored to the 1-second
@@ -134,7 +144,11 @@ export class LiveTickIngestionService {
         this.wsService.broadcastLiveTick(tick);
 
         // Fold into high-frequency tick buffer
-        realtimeTickBuffer.append(norm, price, { bid, ask });
+        realtimeTickBuffer.append(norm, price, {
+          bid,
+          ask,
+          source: "github_data_provider",
+        });
 
         // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
         liveTickSignalDispatcher.enqueue(norm);
@@ -230,6 +244,7 @@ export class LiveTickIngestionService {
       this.streamConsecutiveErrors.delete(norm);
       this.nextAllowedPollAt.delete(norm);
       this.streamDegraded.delete(norm);
+      this.heldStalePendedAt.delete(norm);
 
       logger.info("[TickIngestion] Stopped live tick stream", { symbol: norm });
     }
@@ -274,6 +289,9 @@ export class LiveTickIngestionService {
    * candle buffer from the authoritative PO tape.
    */
   private pollLiveTick(symbol: string): void {
+    // Never stack probes for one symbol: a slow cascade must not be joined by a
+    // second overlapping poll from the 1s interval or the age watchdog.
+    if (this.inFlightPolls.has(symbol)) return;
     // LINGER MODE: once a feed breaches the consecutive-error threshold, probes
     // are throttled by the exponential backoff ladder (never hammer a downed
     // API), but the STREAM LOOP ITSELF NEVER STOPS — recovery is zero-timeout.
@@ -283,10 +301,11 @@ export class LiveTickIngestionService {
       const nextAllowed = this.nextAllowedPollAt.get(symbol) ?? 0;
       if (now < nextAllowed) {
         // AGE WATCHDOG OVERRIDE — a starved chart must never wait out the
-        // linger throttle. If the real tick tape is older than this symbol's
-        // FORCE_POLL_AGE_MS, probe immediately.
-        const ageMs = realtimeTickBuffer.getLatestAgeMs(symbol);
-        if (!(ageMs != null && ageMs > this.FORCE_POLL_AGE_MS)) {
+        // linger throttle. Measured on the FRESH tape: a held print keeps the
+        // ring contiguous but must not mask a dead feed, so recovery stays
+        // zero-timeout exactly when it matters.
+        const freshAgeMs = realtimeTickBuffer.getLatestFreshAgeMs(symbol);
+        if (!(freshAgeMs == null || freshAgeMs > this.FORCE_POLL_AGE_MS)) {
           return;
         }
       }
@@ -299,6 +318,7 @@ export class LiveTickIngestionService {
   }
 
   private async pollOnce(symbol: string): Promise<void> {
+    this.inFlightPolls.add(symbol);
     try {
       // ════════════════════════════════════════════════════════════════
       // PO-AUTHORITY GUARD — skip HTTP polling entirely when the PO
@@ -311,13 +331,6 @@ export class LiveTickIngestionService {
         return;
       }
 
-      // ── RING REFRESH: when the tick ring is starving during LINGER mode,
-      // try to push a held price so the 2000-tick buffer never empties. ──
-      const ringAgeMs = realtimeTickBuffer.getLatestAgeMs(symbol);
-      if (ringAgeMs != null && ringAgeMs > this.FORCE_POLL_AGE_MS) {
-        this.refreshTickRingFromHeldPrice(symbol);
-      }
-
       const spot: ForexSpotResult =
         await forexDataService.getLiveSpotFresh(symbol);
 
@@ -325,6 +338,24 @@ export class LiveTickIngestionService {
         this.handleFeedFailure(
           symbol,
           spot.error || "Live feed returned null or invalid price rate",
+        );
+        return;
+      }
+
+      // ── HELD STALE PRINT (last known good): keep the tape alive WITHOUT
+      // claiming recovery. The value is a genuinely observed price, so it is
+      // pended into the ring/candle buffer for continuity, but it is NEVER
+      // broadcast as a live tick, never resets the failure counter, and never
+      // clears the DEGRADED latch. The ring entry is stamped stale so every
+      // live-freshness gate downstream refuses it.
+      if (spot.stale === true) {
+        this.holdTickFromStalePrint(symbol, spot);
+        // The feed has NOT recovered: a held print is continuity, not health.
+        // Account it as a failure so LINGER backoff, the DEGRADED broadcast and
+        // the retry metrics all stay truthful.
+        this.handleFeedFailure(
+          symbol,
+          `Holding last known good price (age ${Math.round((spot.ageMs ?? 0) / 1000)}s) — live sources exhausted`,
         );
         return;
       }
@@ -393,7 +424,11 @@ export class LiveTickIngestionService {
       this.wsService.broadcastLiveTick(tick);
 
       // Fold into the high-frequency real-tick ring (real arms only)
-      realtimeTickBuffer.append(symbol, liveMid, { bid: tick.bid, ask: tick.ask });
+      realtimeTickBuffer.append(symbol, liveMid, {
+        bid: tick.bid,
+        ask: tick.ask,
+        source: spot.source,
+      });
 
       // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
       liveTickSignalDispatcher.enqueue(symbol);
@@ -411,6 +446,8 @@ export class LiveTickIngestionService {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.handleFeedFailure(symbol, msg);
+    } finally {
+      this.inFlightPolls.delete(symbol);
     }
   }
 
@@ -507,35 +544,44 @@ export class LiveTickIngestionService {
   }
 
   /**
-   * RING REFRESH during LINGER mode — ensures the 2000-tick ring never
-   * empties when the PO bridge is down AND all HTTP APIs are temporarily
-   * exhausted. Pushes the latest held price (from forexDataService's
-   * stale-cache) into the ring so the backend's replay-on-join and the
-   * client's candle aggregator always have real ticks to work with.
+   * LAST KNOWN GOOD CONTINUITY — the lightweight "keep the tape alive" path.
    *
-   * This is called from the poll loop when the ring is starving (latest
-   * tick older than FORCE_POLL_AGE_MS) — zero fabrication, only real
-   * previously-observed prices.
+   * When every live source is exhausted, `getLiveSpotFresh` returns the last
+   * genuinely observed price stamped `stale: true` + its real age. That print is
+   * pended into the ring and the candle buffer (at most once per
+   * FORCE_POLL_AGE_MS) so charts, replay-on-join and the 2000-tick ring never
+   * empty, and it is marked `stale` in the ring so every live-freshness gate
+   * downstream (live analysis, live signal broadcast, tick-signal scoring)
+   * refuses it. Nothing is broadcast as a live tick and the LINGER accounting is
+   * left untouched, so a cold feed is never presented as a healthy one. Beyond
+   * the service's STALE_HOLD_MAX_AGE_MS the service refuses the price outright.
    */
-  private refreshTickRingFromHeldPrice(symbol: string): void {
-    const ageMs = realtimeTickBuffer.getLatestAgeMs(symbol);
-    if (ageMs == null || ageMs <= this.FORCE_POLL_AGE_MS) return;
+  private holdTickFromStalePrint(symbol: string, spot: ForexSpotResult): void {
+    const price = spot.price;
+    if (price == null || !Number.isFinite(price) || price <= 0) return;
 
-    const spot = forexDataService.getLastKnownSpot(symbol);
-    if (spot.success && spot.price != null && spot.price > 0) {
-      realtimeTickBuffer.append(symbol, spot.price);
-      liveTickSignalDispatcher.enqueue(symbol);
-      try {
-        forexDataService.appendTick(symbol, spot.price);
-      } catch {
-        /* non-fatal */
-      }
-      logger.debug("[TickIngestion] Ring refresh from held price", {
+    const now = Date.now();
+    const lastPendedAt = this.heldStalePendedAt.get(symbol) ?? 0;
+    if (now - lastPendedAt < this.FORCE_POLL_AGE_MS) return;
+    this.heldStalePendedAt.set(symbol, now);
+
+    realtimeTickBuffer.append(symbol, price, { stale: true, source: spot.source });
+    try {
+      forexDataService.appendTick(symbol, price);
+    } catch (bufErr) {
+      logger.debug("[TickIngestion] Held-print candle append failed", {
         symbol,
-        price: spot.price,
-        source: spot.source,
+        error: bufErr instanceof Error ? bufErr.message : String(bufErr),
       });
     }
+
+    logger.warn("[TickIngestion] Holding last known good price (feed not recovered)", {
+      symbol,
+      price,
+      source: spot.source,
+      priceAgeMs: spot.ageMs ?? null,
+      consecutiveErrors: this.streamConsecutiveErrors.get(symbol) ?? 0,
+    });
   }
 
   /**
@@ -648,7 +694,7 @@ export class LiveTickIngestionService {
     // real order book, so we refuse to fabricate a zero-spread quote. The
     // bidAskPressure micro-factor therefore honestly reads neutral (no_book)
     // instead of pretending there is market depth we do not actually have.
-    realtimeTickBuffer.append(norm, price);
+    realtimeTickBuffer.append(norm, price, { source: tick.source });
 
     // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
     liveTickSignalDispatcher.enqueue(norm);

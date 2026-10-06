@@ -1092,7 +1092,7 @@ export class PocketOptionBridgeService {
       // the freshness gate and the client's "WAITING FOR REAL-TIME TICK" lock
       // clear INSTANTLY on the handshake (no waiting on a quiet tape).
       forexDataService.setPocketOptionPrice(norm, heldPrice);
-      realtimeTickBuffer.append(norm, heldPrice);
+      realtimeTickBuffer.append(norm, heldPrice, { source: "pocket_option_held" });
       liveTickSignalDispatcher.enqueue(norm);
       try {
         forexDataService.appendTick(norm, heldPrice);
@@ -1169,7 +1169,7 @@ export class PocketOptionBridgeService {
       forexDataService.setPocketOptionPrice(norm, heldPrice);
       // Seed the real-tick ring so a cold backend / re-joined client gets an
       // instant fresh quote (genuine held PO print — never fabricated).
-      realtimeTickBuffer.append(norm, heldPrice);
+      realtimeTickBuffer.append(norm, heldPrice, { source: "pocket_option_held" });
       // Fold into candle buffer (tick-accumulation for the ML path).
       try {
         forexDataService.appendTick(norm, heldPrice);

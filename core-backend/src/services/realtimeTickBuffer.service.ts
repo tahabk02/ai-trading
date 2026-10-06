@@ -34,6 +34,16 @@ import { logger } from "../utils/logger";
 // Deep ring = no dropped queue payloads at live cadence.
 const MAX_TICKS_PER_SYMBOL = 2000;
 
+/**
+ * QUOTE PROVENANCE / STALENESS FLOOR — a quote whose newest genuinely-fresh
+ * tick is older than this is surfaced to the terminal as NOT live. It sits
+ * deliberately far below the 180s `STALE_HOLD_MAX_AGE_MS` ceiling: the market
+ * must tell the operator "no live print for 15s" while the cascade is still
+ * allowed to keep a held print on the tape, instead of pretending a ~59-minute
+ * held price is a current one (the pre-provenance behaviour).
+ */
+const QUOTE_STALE_AFTER_MS = 15_000;
+
 /** Per-tick micro feature snapshot built from real observed ticks. */
 export interface MicroTickFeatures {
   /** Tokens/second rate of price change over the trailing window. */
@@ -62,6 +72,14 @@ interface TickEntry {
   tsMs: number;
   bid?: number;
   ask?: number;
+  /**
+   * True when this entry is a HELD (previously observed) real print re-pended
+   * for continuity, not a genuinely fresh quote. Stale entries keep the tape
+   * contiguous for charts/replay but are refused by every live-freshness gate
+   * (live analysis, live signal broadcast, tick-signal scoring) so a held price
+   * can never be presented as a live one.
+   */
+  stale?: boolean;
 }
 
 /** Single-symbol live quote snapshot for the market terminal grid. Every field
@@ -76,6 +94,22 @@ export interface SymbolQuoteSnapshot {
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
+  /**
+   * Authoring feed of the newest entry (`pocket_option`, `frankfurter`,
+   * `open_er_api`, `github_data_provider`, `last_known_real`, …). `null` when
+   * the writer never stamped a source (legacy callers) — the consumer must
+   * render that as "unknown", never as a live PO tick.
+   */
+  source: string | null;
+  /** True when the NEWEST entry is a held (previously observed) print re-pended
+   *  for continuity — a continuity print, not a live quote. */
+  stale: boolean;
+  /** Age of the newest NON-STALE tick, or null when nothing live has been
+   *  observed recently (every entry held / empty ring). */
+  freshAgeMs: number | null;
+  /** Hysteresis-free "no live price" state for the terminal: true when there is
+   *  no genuinely fresh tick younger than QUOTE_STALE_AFTER_MS. */
+  staleLive: boolean;
 }
 
 /**
@@ -139,6 +173,8 @@ class RealtimeTickBufferService {
   private ticks: Map<string, TickRing> = new Map();
   /** Per-symbol last tick ISO timestamp (for staleness diagnostics). */
   private lastTickAt: Map<string, string> = new Map();
+  /** Per-symbol authoring feed of the newest entry (quote provenance). */
+  private lastSource: Map<string, string> = new Map();
   /**
    * Per-symbol LAST KNOWN GENUINE bid/ask arms (from any past tick). The
    * microstructure (Aldridge queue) payload must NEVER be dropped just because
@@ -170,7 +206,13 @@ class RealtimeTickBufferService {
   public append(
     symbol: string,
     price: number,
-    opts?: { tsMs?: number; bid?: number; ask?: number },
+    opts?: {
+      tsMs?: number;
+      bid?: number;
+      ask?: number;
+      stale?: boolean;
+      source?: string;
+    },
   ): void {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm || !Number.isFinite(price) || price <= 0) return;
@@ -182,10 +224,12 @@ class RealtimeTickBufferService {
       tsMs: now,
       bid: opts?.bid,
       ask: opts?.ask,
+      ...(opts?.stale ? { stale: true } : {}),
     });
     this.ticks.set(norm, ring);
     this.lastTickAt.set(norm, new Date(now).toISOString());
     this.tickCounts.set(norm, (this.tickCounts.get(norm) ?? 0) + 1);
+    if (opts?.source) this.lastSource.set(norm, opts.source);
 
     // ── LAST-KNOWN-ARMS CACHE (never drop a genuine book payload) ──
     // Only genuine quoted arms are retained (ask > bid, both finite positive).
@@ -246,15 +290,26 @@ class RealtimeTickBufferService {
   public getRecentWindow(
     symbol: string,
     maxCount = 60,
-  ): Array<{ price: number; tsMs: number; bid?: number; ask?: number }> {
+    opts?: { freshOnly?: boolean },
+  ): Array<{
+    price: number;
+    tsMs: number;
+    bid?: number;
+    ask?: number;
+    stale?: boolean;
+  }> {
     const norm = (symbol || "").trim().toUpperCase();
     const ring = this.ticks.get(norm);
-    if (!ring || ring.length === 0) return [];
-    return ring.tail(Math.max(2, maxCount)).map((t) => ({
+    if (!ring) return [];
+    const entries = opts?.freshOnly
+      ? ring.tail().filter((t) => !t.stale).slice(-maxCount)
+      : ring.tail(maxCount);
+    return entries.map((t) => ({
       price: t.price,
       tsMs: t.tsMs,
       bid: t.bid,
       ask: t.ask,
+      ...(t.stale ? { stale: true } : {}),
     }));
   }
 
@@ -289,17 +344,47 @@ class RealtimeTickBufferService {
   }
 
   /**
-   * The freshest REAL observed tick as { price, tsMs }, or undefined when no
-   * genuine tick exists yet. `tsMs` is the tick's own (server-side or PO)
-   * timestamp so freshness checks never measure against anything but the
-   * real tape.
+   * The freshest REAL observed tick as { price, tsMs, stale? }, or undefined when
+   * no genuine tick exists yet. `tsMs` is the tick's own (server-side or PO)
+   * timestamp so freshness checks never measure against anything but the real
+   * tape. `stale` marks a HELD print re-pended for continuity — callers gating
+   * on live freshness MUST refuse it.
    */
-  public getLatestEntry(symbol: string): { price: number; tsMs: number } | undefined {
+  public getLatestEntry(
+    symbol: string,
+  ): { price: number; tsMs: number; stale?: boolean } | undefined {
     const norm = (symbol || "").trim().toUpperCase();
     const ring = this.ticks.get(norm);
     const last = ring?.latest();
     if (!last) return undefined;
-    return { price: last.price, tsMs: last.tsMs };
+    return {
+      price: last.price,
+      tsMs: last.tsMs,
+      ...(last.stale ? { stale: true } : {}),
+    };
+  }
+
+  /**
+   * Age of the newest NON-STALE real tick, or null when every observed entry is
+   * held (or nothing has been observed). This is the age a live-freshness gate
+   * must measure — a held print is never a live quote no matter how recent its
+   * insertion timestamp is.
+   */
+  public getLatestFreshAgeMs(symbol: string): number | null {
+    const norm = (symbol || "").trim().toUpperCase();
+    const ring = this.ticks.get(norm);
+    if (!ring) return null;
+    // `tail()` is ordered OLDEST → NEWEST, so the walk MUST start at the end:
+    // iterating forward returned the age of the OLDEST non-stale print (a
+    // boot-seeded bar hours old), which made every live tape read as starved —
+    // the live-freshness gate it feeds then never throttled, and PART 38.2's
+    // staleness flag painted healthy cards as HELD.
+    const entries = ring.tail();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (!entry.stale) return Math.max(0, Date.now() - entry.tsMs);
+    }
+    return null;
   }
 
   /**
@@ -338,6 +423,13 @@ class RealtimeTickBufferService {
       tickCount: this.tickCounts.get(norm) ?? 0,
       lastTickAt: this.lastTickAt.get(norm) ?? null,
       ageMs: this.getLatestAgeMs(norm),
+      source: this.lastSource.get(norm) ?? null,
+      stale: last.stale === true,
+      freshAgeMs: this.getLatestFreshAgeMs(norm),
+      staleLive: (() => {
+        const fresh = this.getLatestFreshAgeMs(norm);
+        return fresh == null || fresh > QUOTE_STALE_AFTER_MS;
+      })(),
     };
   }
 
@@ -374,6 +466,7 @@ class RealtimeTickBufferService {
     const norm = (symbol || "").trim().toUpperCase();
     this.ticks.delete(norm);
     this.lastTickAt.delete(norm);
+    this.lastSource.delete(norm);
     this.lastKnownArms.delete(norm);
     this.tickCounts.delete(norm);
   }

@@ -30,6 +30,14 @@ export interface MarketQuote {
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
+  /** Authoring feed of the newest print (`pocket_option`, `frankfurter`, …). */
+  source: string | null;
+  /** True when the newest entry is a held (continuity) print, not a live one. */
+  stale: boolean;
+  /** Age of the newest genuinely-fresh tick; null = no live print recently. */
+  freshAgeMs: number | null;
+  /** Terminal-facing "this price is NOT live" flag (>15s without a fresh tick). */
+  staleLive: boolean;
 }
 
 /**
@@ -71,6 +79,10 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
         tickCount: q.tickCount,
         lastTickAt: q.lastTickAt,
         ageMs: q.ageMs,
+        source: q.source,
+        stale: q.stale,
+        freshAgeMs: q.freshAgeMs,
+        staleLive: q.staleLive,
       });
     }
     return out;

@@ -372,6 +372,16 @@ export interface MarketQuote {
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
+  /** Authoring feed of the newest print (`pocket_option`, `frankfurter`,
+   *  `open_er_api`, `github_data_provider`, `last_known_real`, …). Optional:
+   *  payloads from an older backend simply omit it (rendered "unknown"). */
+  source?: string | null;
+  /** True when the newest entry is a held (continuity) print, not a live one. */
+  stale?: boolean;
+  /** Age of the newest genuinely-fresh tick; null = no live print recently. */
+  freshAgeMs?: number | null;
+  /** Backend "no live price for >15s" flag — the terminal must say so. */
+  staleLive?: boolean;
 }
 
 export interface QuotesResponse {

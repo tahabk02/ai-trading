@@ -415,7 +415,10 @@ export class WebSocketService {
     symbol: string,
     timeframe: string,
   ): void {
-    const norm = (symbol || "").trim().toUpperCase();
+    // Canonical key ONLY — the aggregator's bucket map is keyed by
+    // canonicalizeSymbol, so a raw "EUR-USD" replay would resolve to an empty
+    // history and the chart would look dead until the next close.
+    const norm = canonicalizeSymbol(symbol);
     if (!norm) return;
 
     const tf = realtimeCandleAggregatorService.canonicalTimeframe(timeframe);
@@ -443,9 +446,10 @@ export class WebSocketService {
 
   /**
    * HIGH-CONFIDENCE SIGNAL EVENT — background WS broadcast fired whenever a
-   * dispatched signal's confidence exceeds the production threshold (90%).
-   * The frontend renders a high-priority professional toast with an alert
-   * sound on receipt of `high_confidence_signal`.
+   * dispatched signal's confidence clears the production dispatch threshold
+   * (NOTIFY_CONFIDENCE_PCT = 98 in signal.controller.ts). The frontend renders a
+   * high-priority professional toast with an alert sound on receipt of
+   * `high_confidence_signal`.
    */
   public broadcastHighConfidenceSignal(payload: HighConfidenceSignalPayload) {
     if (!this.io) return;
@@ -472,21 +476,35 @@ export class WebSocketService {
    * all-pairs grid sees every pair's live CALL/PUT without joining 34 rooms.
    */
   public broadcastLiveQuantSignal(payload: {
-    symbol: string;
-    signalType: "BUY" | "SELL" | null;
-    signal: "BUY" | "SELL" | null;
-    confidence: number;
-    current_price?: number;
-    target_price?: number;
-    timeframe: string;
-    market_waiting?: boolean;
-    waiting_reason?: string | null;
-    waiting_detail?: string | null;
-    book_confluence?: number | null;
-    dataSource?: string;
-    aiEngine?: unknown;
-    timestamp?: string;
-  }) {
+      symbol: string;
+      signalType: "BUY" | "SELL" | null;
+      signal: "BUY" | "SELL" | null;
+      confidence: number;
+      current_price?: number;
+      target_price?: number;
+      timeframe: string;
+      market_waiting?: boolean;
+      waiting_reason?: string | null;
+      waiting_detail?: string | null;
+      book_confluence?: number | null;
+      dataSource?: string;
+      aiEngine?: unknown;
+      timestamp?: string;
+      /**
+       * HONEST EXECUTION SURFACE (PART 38.1 [377]) — the engine's T1..T5 band
+       * and its executable/scored-only state travel WITH the verdict. The
+       * client's `LiveVerdict` declares them; a payload type that omitted them
+       * is what let the builder drop them and leave every live card tierless.
+       */
+      tier?: string | null;
+      tier_label?: string | null;
+      status?: string | null;
+      dispatchable?: boolean;
+      scored_only?: boolean;
+      executable?: boolean;
+      regime_gate?: string | null;
+      suppressed_reason?: string | null;
+    }) {
     if (!this.io) return;
     this.io.to(payload.symbol).emit("live_quant_signal", payload);
     this.io.to(MARKET_TERMINAL_ROOM).emit("live_quant_signal", payload);
