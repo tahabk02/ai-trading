@@ -45,11 +45,34 @@ import { targetCandlesEnabled } from "./signalTiers";
 // ── PO-Canonical Timeframe Contract ──
 // Pocket Option uses a specific set of chart intervals. We use uppercase
 // canonical keys (M1, H1, D1) matching PO's internal naming convention.
+//
+// PART 39 [371]/[373] — EVIDENCE FOR THIS SET (no guessing):
+//  • Pocket Option's own blog, "How to Read Pocket Option Charts" (19 Feb 2025):
+//    "Timeframe selector – ranges from 5 seconds to 1 month", and the FAQ
+//    "timeframes down to 5 seconds". That fixes the FLOOR (5s) and the CEILING
+//    (1 month) on PO's chart selector.
+//  • The PocketOptionAPI reference docs list the 14 intervals the PO API serves
+//    (S1, S5, S10, S15, S30, M1, M5, M15, M30, H1, H4, D1, W1, MN1).
+//  • S1 is deliberately NOT carried: PO's own copy says the chart floor is
+//    5 seconds, so S1 reads as API-only. No UI source confirms it.
+//  • PO's cabinet UI is unreachable from here (live host drops at TCP connect;
+//    the Wayback captures of /en/cabinet/* only ever redirect to /login), so
+//    the exact "twenty timeframes" a mirror claims for the full selector list
+//    could NOT be enumerated — W1 and MN1 are the only frames added on
+//    confirmed evidence (range ceiling), everything else stays as it was.
+//
+// EPOCH-FLOOR CAVEAT for the two slow frames: bucketStart() floors onto a
+// fixed ms grid, so W1 bars open on Thursday (epoch was 1970-01-01) instead of
+// PO's calendar week, and MN1 bars are fixed 30-day blocks instead of calendar
+// months. Calendar-aligning them would break every `ts % bucketMs === 0`
+// invariant (leadShiftBucket, the target-candle expiry math, historyBarCheck),
+// so they are shipped as analysis frames with this stated deviation.
 
 export type Timeframe =
   | "S5" | "S10" | "S15" | "S30"
   | "M1" | "M2" | "M3" | "M5" | "M10" | "M15" | "M30"
-  | "H1" | "H4" | "D1";
+  | "H1" | "H4" | "D1"
+  | "W1" | "MN1";
 
 /** Bucket width in milliseconds — PO canonical intervals. */
 export const TIMEFRAME_MS: Record<Timeframe, number> = {
@@ -67,6 +90,9 @@ export const TIMEFRAME_MS: Record<Timeframe, number> = {
   "H1": 3_600_000,
   "H4": 14_400_000,
   "D1": 86_400_000,
+  "W1": 604_800_000,
+  // Fixed 30-day block (epoch-floor), NOT a calendar month — see the caveat.
+  "MN1": 2_592_000_000,
 };
 
 export const SUPPORTED_TIMEFRAMES = Object.keys(TIMEFRAME_MS) as Timeframe[];
@@ -117,15 +143,46 @@ export function timeframeToSeconds(timeframe: string): number {
 
 // ── History Bar Gate (PO-parity retention table) ──
 
-/** Per-bucket-width lookback retention in ms (PO-parity). */
+/**
+ * Per-bucket-width lookback retention in ms — how far back a seeded bar may be
+ * and still be accepted for the selected grid.
+ *
+ * The six original entries are the PO-parity retention table. The ten added by
+ * PART 39 [372]/[373] were missing entirely, so those frames silently fell back
+ * to the 24h default below (S10/S15/S30/M2/M3/M10/M30/H4/W1/MN1) and a frame
+ * switch appeared to wipe the pane. They are INTERPOLATED between their
+ * neighbours — PO does not publish a retention table, so these are not claimed
+ * as PO-verified, only as sane per-frame windows that keep the gate meaningful.
+ */
 export const MAX_HISTORY_LOOKBACK: Record<string, number> = {
   [TIMEFRAME_MS["S5"]]: 3_600_000,        // 1h
+  [TIMEFRAME_MS["S10"]]: 7_200_000,       // 2h   (interpolated)
+  [TIMEFRAME_MS["S15"]]: 10_800_000,      // 3h   (interpolated)
+  [TIMEFRAME_MS["S30"]]: 21_600_000,      // 6h   (interpolated)
   [TIMEFRAME_MS["M1"]]: 86_400_000,       // 24h
+  [TIMEFRAME_MS["M2"]]: 172_800_000,      // 2d   (interpolated)
+  [TIMEFRAME_MS["M3"]]: 259_200_000,      // 3d   (interpolated)
   [TIMEFRAME_MS["M5"]]: 604_800_000,      // 7d
+  [TIMEFRAME_MS["M10"]]: 864_000_000,     // 10d  (interpolated)
   [TIMEFRAME_MS["M15"]]: 2_592_000_000,   // 30d
+  [TIMEFRAME_MS["M30"]]: 2_592_000_000,   // 30d  (interpolated)
   [TIMEFRAME_MS["H1"]]: 7_776_000_000,    // 90d
+  [TIMEFRAME_MS["H4"]]: 15_552_000_000,   // 180d (interpolated)
   [TIMEFRAME_MS["D1"]]: 31_536_000_000,   // 365d
+  [TIMEFRAME_MS["W1"]]: 63_072_000_000,   // 730d (interpolated)
+  [TIMEFRAME_MS["MN1"]]: 157_680_000_000, // 5y   (interpolated)
 };
+
+/**
+ * PART 39 [375] — the 100-close minimum.
+ *
+ * Mirrors ai-engine's `regime_detector.MIN_CLOSES = 100`: below 100 closed
+ * bars on the selected (symbol, timeframe) grid there is not enough tape for
+ * any honest period-based read, so the chart announces that it is still
+ * BUILDING HISTORY instead of implying a quiet market. The engine raises a
+ * ValueError rather than silently defaulting for the same reason.
+ */
+export const MIN_HISTORY_CLOSES = 100;
 
 /** Lookback retention in ms for a given bucket width. */
 export function historyLookbackMs(bucketWidthMs: number): number {

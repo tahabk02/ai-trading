@@ -462,3 +462,164 @@ below.
 - ai-engine: `pytest test_regime_detector test_financial_analysis
   test_strict_execution_gate test_no_force_emit_escape` **74 passed, 1 xfailed**.
 - browser session `p38fix` closed.
+
+## DONE - PART 39: full timeframe coverage for candle building [371]-[376]
+
+### [371] Pocket Option's real chart-timeframe set (evidence, no guessing)
+
+Sourcing - the live host is TCP-blocked from this box and the PO cabinet is
+only archived as a `/login` redirect, so the ladder is taken from PO's own
+public copy:
+- PO official blog `how-to-read-pocket-option-charts/` (19 Feb 2025):
+  "Timeframe selector - ranges from **5 seconds to 1 month**".
+- mirror `pocketoption.cx/settings/`: "twenty timeframes", 5s..1mo.
+- `pocketoption.cx/charts/` table names 12 labels:
+  `S5 S10 S15 S30 M1 M2 M5 M15 M30 H1 H4 D1`.
+- PocketOptionAPI docs list 14 API frames:
+  `S1 S5 S10 S15 S30 M1 M5 M15 M30 H1 H4 D1 W1 MN1`.
+- PO cabinet UI itself: Wayback `/en/cabinet/*` -> 302 `/login`; CDX only
+  surfaces `chart_settings.timeframe` and `hotkeys.increase/decrease_timeframe`.
+
+**LIMIT (do not overstate):** the exact twenty-item selector list is NOT
+recoverable from here - only the 5s..1mo range, the 12 named labels and the 14
+API frames are. The 14 we already had are all inside PO's stated range, so
+the working set is "14 known-good + the 2 slow frames PO's range requires".
+
+### [372] audit vs TIMEFRAME_MS - the gaps that actually mattered
+
+- client `realtimeCandleAggregator.ts` and server `realtimeCandleAggregator.service.ts`
+  both carried **14** frames - identical, no drift - but neither had `W1`/`MN1`,
+  which PO's own range statement ("to 1 month") guarantees exist.
+- **`MAX_HISTORY_LOOKBACK` had only 6 widths.** S10/S15/S30/M2/M3/M10/M30/H4
+  (and W1/MN1) matched no entry and fell through to the flat 24h default, so a
+  switch to those frames asked for the wrong retention window and blanked the
+  pane.
+- `selectedTimeframe` in `useTradingStore.ts` was a hand-copied string union
+  that had to be edited by hand for every new frame.
+- two hardcoded `tfOptions` lists (`settings/page.tsx`, `predictive-intelligence.tsx`).
+- **the chart's control row had no timeframe selector at all** - its buttons are
+  the LEAD projection offsets (AUTO/20S/1M/5M), not bucket widths, and the strip
+  sat inside a `pointer-events-none` status area (a first attempt to put the
+  selector in those badges was reverted).
+
+### [373] constants added - W1 + MN1, and NOT S1 (user decisions)
+
+- **W1/MN1 = epoch-floor bucketing.** `bucketStart` (`client`) / `floorBucket`
+  (`server`) already do a pure `Math.floor(ts / width) * width`; with
+  `W1 = 604_800_000` (7d) and `MN1 = 2_592_000_000` (30d) they now cut
+  Thursday-anchored weeks and fixed 30-day blocks. Documented in-code as
+  **NOT calendar-parity with PO** (PO aligns weeks/months to its own calendar);
+  a PoC that needs true calendar alignment must anchor `bucketStart` instead of
+  flooring. No new date library, no locale rules - this was the chosen trade.
+- **S1 excluded on purpose**: PO's floor is 5 seconds (see [371]), so a 1s
+  frame would be invented. `TIMEFRAME_MS` starts at `S5: 5_000`.
+- Files: `client-app/src/lib/realtimeCandleAggregator.ts` (`Timeframe`,
+  `TIMEFRAME_MS`, `MAX_HISTORY_LOOKBACK` now 16 entries - the new ones marked
+  *interpolated*, plus **new `MIN_HISTORY_CLOSES = 100`** and the evidence
+  header comment); `core-backend/src/services/realtimeCandleAggregator.service.ts`
+  (`AggregatedTimeframe`, `SERVER_CANDLE_TFS`, `TF_MS`, `TF_ALIASES` +
+  `"1w"`/`"1mo"`, so `canonicalTimeframe` resolves them for free);
+  `useTradingStore.ts` (`selectedTimeframe: Timeframe` + `PO_TO_BACKEND_TF`
+  `W1/MN1 -> "1d"`); `settings/page.tsx` and `predictive-intelligence.tsx`
+  `tfOptions` += W1/MN1; `core-backend/src/lib/__tests__/quickfix.test.ts`
+  grid contract 14 -> **16**.
+- **Why the store maps them to `1d`:** ai-engine
+  `schemas.validate_timeframe` (`app/api/v1/schemas.py:274-283`) tops out at
+  `"1d"` - sending `W1`/`MN1` to `/predict` 422s and strands the engine in HOLD.
+  `aiTimeframeFor` still returns `W1`/`MN1` for the chart label; only the
+  engine channel is coerced.
+
+### [374] chart selector - new `trading/timeframe-selector.tsx`
+
+`role="group" aria-label="Chart timeframe"`, one button per frame **derived
+from `SUPPORTED_TIMEFRAMES`** (never a second hand-written list),
+`data-testid="tf-option-${tf}"`, `aria-pressed`, no option ever disabled (so a
+trader can always leave a grid still building history), `--term-*` pill styling
+copied from `terminal/horizon-selector.tsx`. Wired into `financial-chart.tsx`
+as `<TimeframeSelector value={tf} onChange={setSelectedTimeframe} />` above the
+history chip at `top-9 left-2` - i.e. one code path that persists, re-buckets
+the aggregator and drops the stale prediction.
+
+### [375] 100 closes per timeframe + the building-history state
+
+Engine floor: `regime_detector.MIN_CLOSES = 100`
+(`ai-engine/app/services/regime_detector.py:66`, `ValueError` below it),
+mirrored client-side as `MIN_HISTORY_CLOSES = 100`.
+
+Depth reality - `BACKFILL_1M_BAR_LIMIT = 1_500` is a REQUEST cap, not depth:
+the boot backfill (`index.ts:756`) reads `historyCollector.getRecentBars()`,
+and the collector keeps a rolling **`HISTORY_WINDOW_MINUTES = 30`** window of
+1m bars (`historyCollector.service.ts:16`). Boot depth is therefore ~30
+one-minute bars regardless of the limit; sub-minute frames are never
+backfilled (1m bars cannot be split into seconds) and the server retains
+`MAX_CLOSED_PER_TF = 512` per frame.
+
+Observed close counts, live probe (EUR/USD OTC, session `p39tf`, 2.5s per
+frame, `data-testid="history-build"` text):
+
+| frame | closes | >=100? | frame | closes | >=100? |
+| --- | --- | --- | --- | --- | --- |
+| S5 | 501 | yes | M10 | 5 | builds |
+| S10 | 213 | yes | M15 | 4 | builds |
+| S15 | 143 | yes | M30 | 3 | builds |
+| S30 | 73 | builds | H1 | 2 | builds |
+| M1 | 38 | builds | H4 | 2 | builds |
+| M2 | 20 | builds | D1 | 1 | builds |
+| M3 | 13 | builds | W1 | 1 | builds |
+| M5 | 9 | builds | MN1 | 1 | builds |
+
+**Only 3 of 16 frames clear the 100-close floor right now - even M1 sits at 38.**
+The sub-minute frames clear it only because the server ring keeps up to 512
+live-tick bars (~42 min of 5s bars); everything at M1 and slower is bounded by
+the collector's 30-minute window. So "building history" is the NORMAL state,
+not an edge case, and the chip is the honest answer to it. Deepening the
+persisted store (a longer collector window, or a real history source such as
+the frankfurter/yahoo day series) is the actual fix - written up as a SEPARATE
+queued follow-up item, deliberately not bundled into PART 39.
+
+Mitigation shipped = the honest chip: `data-testid="history-build"` in
+`financial-chart.tsx` prints `BUILDING HISTORY {n}/100` (amber, plus
+`data-building="true"`) below the selector while `n < 100`, then
+`HISTORY {n} CLOSES`. `closedCount` is set to 0 on the foreign-resolution
+reset, to `rows.length` after `applyCandleData`, and to `rawArr.length` on
+every live tick.
+
+Incidental: the `BACKFILL_1M_BAR_LIMIT` doc comment
+(`realtimeCandleAggregator.service.ts:212`) reads as if 1,500 minutes of depth
+were restored on boot; it is a query limit against a 30-minute store.
+
+### [376] regression test
+
+- `client-app/src/lib/__tests__/timeframeGrid.test.ts` (8) - grid has the 16
+  frames, no `S1`, every frame has its OWN lookback entry (the [372] fallback
+  hole), `normalizeTimeframe("1w"|"w1"|"mn1")`, `aiTimeframeFor(W1|MN1) -> "1d"`,
+  `historyBarCheck` rejects a 1m bar on the W1/MN1 grid, `MIN_HISTORY_CLOSES === 100`.
+- `client-app/src/components/trading/__tests__/timeframe-selector.dom.test.tsx` (7) -
+  selector renders exactly `SUPPORTED_TIMEFRAMES` incl. W1/MN1, never S1;
+  active pill + never-disabled; click reports the frame; through
+  `setSelectedTimeframe` the switch flips the pill, sets
+  `selectedTimeframeSeconds`, drops `predictionData`, persists, and an
+  off-grid string (`"S1"`) is ignored instead of blanking the chart.
+
+### Verification run for PART 39
+
+- client-app: `npx tsc --noEmit` OK; `npx next lint` clean; `npx vitest run`
+  **52 files / 753 tests passed** (was 50/738; +8 logic, +7 DOM).
+- core-backend: `npx tsc --noEmit` OK; `npx vitest run` **33 files / 305 tests passed**.
+- ai-engine: untouched this part - `python -m pytest -q` **537 passed, 1 xfailed**.
+- live browser session `p39tf` on `http://127.0.0.1:3000/dashboard/pro/`
+  (EUR/USD OTC, engine ACTIVE):
+  - `tf-selector` renders **16** pills, `tf-option-W1`/`tf-option-MN1` present,
+    `tf-option-S1` absent; selector rect `[x25 y275 w428]` inside the pinned
+    chart shell, above the history chip.
+  - every one of the 16 frames was clicked in turn: exactly one
+    `aria-pressed="true"` pill each time, the chart header read `LIVE - <TF>`,
+    8 canvases stayed mounted, no blank pane. Switching back to M1 kept the
+    chip in sync (`BUILDING HISTORY 38/100`).
+  - S30 and H1 screenshots: `%TEMP%\p39-tf\p39-s30.png`,
+    `%TEMP%\p39-tf\p39-h1.png`. NOTE: this agent cannot read image files, so
+    the PNGs were NOT visually inspected - the DOM readouts above (chip text,
+    `LIVE - S30` / `LIVE - H1`, per-frame close counts) are the substitute
+    evidence, as in PART 38.
+  - 26 request failures were all `POST /api/v1/predict` 503 = the pre-existing
+    engine-warm issue already noted in PART 38, unrelated to this part.

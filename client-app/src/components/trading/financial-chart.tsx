@@ -36,6 +36,8 @@ import {
   INITIAL_BAR_SPACING_PX,
   MIN_BAR_SPACING_PX,
   SIGNAL_CONFIDENCE_THRESHOLD,
+  MIN_HISTORY_CLOSES,
+  type Timeframe,
   TargetProjectionEngine,
   SignalHoldBuffer,
   rawAnchorClose,
@@ -55,6 +57,7 @@ import { targetCandlesEnabled } from "@/lib/signalTiers";
 import { expiryCountdownRemainingSeconds } from "@/lib/expirySelection";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
+import { TimeframeSelector } from "@/components/trading/timeframe-selector";
 import {
   chartDebugQualityFields,
   type QualityPredictDebug,
@@ -501,6 +504,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     (s) => s.setAggregatorTimeframe,
   );
   const setLeadOffset = useTradingStore((s) => s.setLeadOffset);
+  /** PART 39 [374] — full switch (persist + aggregator + prediction). */
+  const setSelectedTimeframe = useTradingStore((s) => s.setSelectedTimeframe);
   const predictionData = useTradingStore((s) => s.predictionData);
   const { t } = useLangContext();
   const { resolvedTheme } = useTheme();
@@ -549,6 +554,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
    */
   const expiryMarkerThemeRef = useRef<ExpiryMarkerTheme | null>(null);
   const [hasCandles, setHasCandles] = useState(false);
+  /** PART 39 [375] — closed bars actually painted on the SELECTED grid. */
+  const [closedCount, setClosedCount] = useState(0);
   const [targetLayerActive, setTargetLayerActive] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
   const [hudNowMs, setHudNowMs] = useState<number>(() => Date.now());
@@ -1367,6 +1374,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       firstTickRef.current = true;
       pendingPaintRef.current = false;
       setHasCandles(false);
+      setClosedCount(0);
       return;
     }
 
@@ -1382,6 +1390,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     rawRef.current = built.raw;
     dataRef.current = rows;
     applyCandleData(candleSeries, volume, rows);
+    // PART 39 [375] — the count the BUILDING HISTORY chip reports is the bars
+    // actually painted on THIS grid, not a request count.
+    setClosedCount(rows.length);
     // ── TARGET-LAYER ANCHOR (fix: no vanish on server candle close) ──
     // `swapKey` changes whenever serverCandleVersion / data.length / dataEpoch /
     // lead offset changes. Only the STRUCTURAL part (symbol/timeframe/data
@@ -1495,6 +1506,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // buildTargetCandles, no forced reflow inside a tick handler).
       pendingPaintRef.current = true;
       setHasCandles(rawArr.length > 0);
+      // PART 39 [375] — keep the BUILDING HISTORY chip honest as live bars land.
+      setClosedCount(rawArr.length);
     });
     return unsub;
   }, [activeSymbol, swapKey]);
@@ -1739,6 +1752,38 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           </span>
         </div>
       )}
+
+      {/* PART 39 [374]/[375] — CHART TIMEFRAME SELECTOR + HISTORY BUILD STATE.
+          The strip is the chart's own resolution control (the LEAD row beside
+          it is a projection horizon, NOT a timeframe): it renders the full
+          PO ladder and writes `setSelectedTimeframe`, which persists the
+          choice, syncs the aggregator and re-subscribes the socket. The chip
+          under it states how many closed bars the selected grid actually
+          holds against the engine's 100-close minimum — below that the pane
+          is still BUILDING HISTORY, not a quiet market. */}
+      <div className="absolute top-9 left-2 z-10 flex flex-col items-start gap-0.5 max-w-[60%]">
+        <TimeframeSelector value={tf} onChange={setSelectedTimeframe} />
+        {hasCandles ? (
+          <span
+            data-testid="history-build"
+            data-building={closedCount < MIN_HISTORY_CLOSES ? "true" : "false"}
+            className={`text-[8px] font-mono uppercase tracking-widest font-bold rounded-chip px-1.5 py-0.5 border ${
+              closedCount < MIN_HISTORY_CLOSES
+                ? "text-amber-300 bg-amber-500/10 border-amber-500/30"
+                : "text-term-ink-faint bg-transparent border-term-line"
+            }`}
+            title={
+              closedCount < MIN_HISTORY_CLOSES
+                ? `Only ${closedCount} closed ${tf} bars on this grid — the engine needs ${MIN_HISTORY_CLOSES} before any period-based read is honest.`
+                : `${closedCount} closed ${tf} bars on this grid.`
+            }
+          >
+            {closedCount < MIN_HISTORY_CLOSES
+              ? `BUILDING HISTORY ${closedCount}/${MIN_HISTORY_CLOSES}`
+              : `HISTORY ${closedCount} CLOSES`}
+          </span>
+        ) : null}
+      </div>
 
       {!feedOffline && hasCandles && (feedWaiting || streamStalled) && (
         <div className="pointer-events-none absolute inset-0 flex items-end justify-center pb-2">

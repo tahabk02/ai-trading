@@ -104,6 +104,8 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
     { value: "H1", label: "H1" },
     { value: "H4", label: "H4" },
     { value: "D1", label: "D1" },
+    { value: "W1", label: "W1" },
+    { value: "MN1", label: "MN1" },
   ];
 
   if (!mounted) {

@@ -60,6 +60,12 @@ const PO_TO_BACKEND_TF: Record<string, string> = {
   H1: "1h",
   H4: "4h",
   D1: "1d",
+  // PART 39 [373] — the two slow PO frames ride the NEAREST channel the
+  // engine whitelists (schemas.validate_timeframe tops out at "1d"; there is
+  // no "1w"/"1mo"). Same coercion rationale as the sub-minute rows above: a
+  // raw "W1" /predict would 422 and strand the engine in HOLD.
+  W1: "1d",
+  MN1: "1d",
 };
 export function aiTimeframeFor(timeframe: string): string {
   const upper = (timeframe || "").trim().toUpperCase();
@@ -484,21 +490,15 @@ export interface TradingState {
   /** Internal request tracking ID to prevent race conditions */
   _lastRequestId: number;
 
-  selectedTimeframe:
-    | "S5"
-    | "S10"
-    | "S15"
-    | "S30"
-    | "M1"
-    | "M2"
-    | "M3"
-    | "M5"
-    | "M10"
-    | "M15"
-    | "M30"
-    | "H1"
-    | "H4"
-    | "D1";
+  /**
+   * CHART CANDLE-BUILD RESOLUTION. Typed as the aggregator's `Timeframe`
+   * (PART 39 [373]) instead of a hand-copied string union so every frame the
+   * grid gains — W1/MN1 today, anything PO adds later — is selectable here
+   * without a second list drifting out of sync. `setSelectedTimeframe` still
+   * normalizes through `normalizeTimeframe`, so a stale/unknown string from
+   * localStorage can never enter this state.
+   */
+  selectedTimeframe: Timeframe;
   /** Derived timeframe in seconds (e.g. "M5" → 300). Auto-synced with selectedTimeframe. */
   selectedTimeframeSeconds: number;
 

@@ -8,6 +8,13 @@ import { canonicalizeSymbol } from "../utils/symbolFormat";
 // codes (S=seconds, M=minutes, H=hours, D=days): the same codes the client
 // market terminal and the pocket-bridge emit. Legacy shorthand aliases ("5s",
 // "1m", "1h", …) still resolve via canonicalTimeframe() for back-compat.
+//
+// PART 39 [373] — W1/MN1 added because Pocket Option's own blog fixes the
+// selector range at "5 seconds to 1 month" and the PocketOptionAPI docs serve
+// W1/MN1. S1 stays out (no UI source: PO says the floor is 5 seconds). Both
+// new frames bucket by pure epoch-floor, so W1 opens on Thursday and MN1 is a
+// fixed 30-day block — an accepted, documented deviation from calendar
+// week/month boundaries (the client carries the same note).
 export type AggregatedTimeframe =
   | "S5"
   | "S10"
@@ -22,7 +29,9 @@ export type AggregatedTimeframe =
   | "M30"
   | "H1"
   | "H4"
-  | "D1";
+  | "D1"
+  | "W1"
+  | "MN1";
 
 export const SERVER_CANDLE_TFS: AggregatedTimeframe[] = [
   "S5",
@@ -39,6 +48,8 @@ export const SERVER_CANDLE_TFS: AggregatedTimeframe[] = [
   "H1",
   "H4",
   "D1",
+  "W1",
+  "MN1",
 ];
 
 const TF_MS: Record<AggregatedTimeframe, number> = {
@@ -56,10 +67,13 @@ const TF_MS: Record<AggregatedTimeframe, number> = {
   H1: 3_600_000,
   H4: 14_400_000,
   D1: 86_400_000,
+  W1: 604_800_000,
+  MN1: 2_592_000_000, // 30-day block (epoch-floor), not a calendar month
 };
 
 // Legacy shorthand → PO canonical (so "5s", "1m", "1h" still resolve after the
 // grid moved to PO codes — historical clients and stored settings keep working).
+// "1mo" (never "1m", which already means one MINUTE) covers the month frame.
 const TF_ALIASES: Record<string, AggregatedTimeframe> = {
   "5s": "S5",
   "10s": "S10",
@@ -75,6 +89,8 @@ const TF_ALIASES: Record<string, AggregatedTimeframe> = {
   "1h": "H1",
   "4h": "H4",
   "1d": "D1",
+  "1w": "W1",
+  "1mo": "MN1",
 };
 
 const TF_LABELS: Record<number, string> = Object.fromEntries(

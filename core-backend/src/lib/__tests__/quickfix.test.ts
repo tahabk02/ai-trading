@@ -1,7 +1,7 @@
 /**
  * quickfix.test.ts — QUICK FIX regression suite (EADDRINUSE + Redis + PO
  * timeframe set + Postgres). Byte-truth assertions against the live config:
- *   1. The candle grid is EXACTLY the Pocket Option timeframe set.
+ *   1. The candle grid is EXACTLY the confirmed PO timeframe ladder.
  *   2. "write EPIPE" is announced once per source then ignored.
  *   3. REDIS_URL points at the radar_bus bus.
  *   4. DATABASE_URL is Postgres (never sqlite).
@@ -27,14 +27,22 @@ const PO_TIMEFRAME_SET = [
   "H1",
   "H4",
   "D1",
+  // PART 39 [371]/[373] — the ladder ends at the ceiling PO's own blog states
+  // ("Timeframe selector – ranges from 5 seconds to 1 month"), so W1 and MN1
+  // are in and S1 is out (PO says the floor is 5 seconds). PO's exact
+  // twenty-item selector list is NOT recoverable from here — the cabinet UI
+  // only ever archives as a /login redirect — so this asserts OUR confirmed
+  // grid, not a claim about the full PO selector.
+  "W1",
+  "MN1",
 ] as const;
 
 describe("QUICK FIX configuration contract", () => {
   it("test_timeframe_set_matches_po", () => {
-    // The aggregator grid MUST equal Pocket Option's canonical ladder,
+    // The aggregator grid MUST equal the confirmed PO ladder,
     // element-for-element and in order.
     expect(SERVER_CANDLE_TFS).toEqual([...PO_TIMEFRAME_SET]);
-    expect(SERVER_CANDLE_TFS).toHaveLength(14);
+    expect(SERVER_CANDLE_TFS).toHaveLength(16);
   });
 
   it("test_epipe_is_ignored", () => {

@@ -154,6 +154,9 @@ export default function SettingsPage() {
     { value: "H1", label: `H1 (${t("hourly")})` },
     { value: "H4", label: `H4 (${t("swing")})` },
     { value: "D1", label: `D1 (${t("daily")})` },
+    // PART 39 [373] — the slow end of PO's "5 seconds to 1 month" range.
+    { value: "W1", label: "W1" },
+    { value: "MN1", label: "MN1" },
   ];
 
   const themeOptions: Array<{
