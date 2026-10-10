@@ -21,10 +21,15 @@ services:
     networks:
       - radar_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # Resolved INSIDE the container, so the probe always checks the real role
+      # and database. A hardcoded `-U postgres` reports "accepting connections"
+      # only when the role happens to be `postgres`; with DB_USER overridden it
+      # would probe the wrong identity and depend on which pg_hba rule matched.
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-trading_radar}\""]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     restart: always
 
   redis:
@@ -57,6 +62,11 @@ services:
       CONFIDENCE_THRESHOLD: 0.98
       ENVIRONMENT: production
       TZ: UTC
+      # P1-2026-09-24 — non-blocking interactive inference budget (ms): if a
+      # cold-cache RandomForest train cannot finish within it, /predict ships
+      # the fast structural verdict (inference_fallback="ml_budget_exceeded")
+      # and warms the model cache in the background. 0 = legacy unbounded.
+      AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
     depends_on:
       redis:
         condition: service_healthy
@@ -75,6 +85,11 @@ services:
       REDIS_HOST: redis
       REDIS_URL: redis://radar_bus:6379
       PORT: 4000
+      # Container-to-container path on the radar_network. A host-loopback
+      # default (127.0.0.1:8000) silently 503s every /predict inside Docker —
+      # that was the recurring EADDRINUSE-era live-503 root cause. Override
+      # from the repo-root .env if the engine is exposed elsewhere.
+      AI_ENGINE_URL: ${AI_ENGINE_URL:-http://ai-engine:8000}
       JWT_SECRET: ${JWT_SECRET:-ultra-secure-secret-key}
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: 8788

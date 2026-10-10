@@ -40,6 +40,7 @@ logging.basicConfig(level=logging.ERROR, format="%(levelname)s:%(name)s:%(messag
 
 import pytest  # noqa: E402
 
+from pocket_bridge.bridge import CONNECT_DEADLINE_GRACE  # noqa: E402
 from pocket_bridge.config import BridgeSettings, parse_ssid  # noqa: E402
 
 WAIT_SECONDS = 15
@@ -94,14 +95,30 @@ async def _probe() -> int:
 
     settings = BridgeSettings(ssid=ssid)
     client = None
+    # Exercise the SAME handshake budget the bridge uses in production — the
+    # SDK's own 60s default is what aborts the endpoint rotation with
+    # "Connection initialization timed out" on a blocked/slow handshake.
+    deadline = (
+        max(settings.connect_timeout, settings.po_init_timeout)
+        + CONNECT_DEADLINE_GRACE
+    )
     try:
-        client = PocketOptionAsync(settings.auth_payload)
+        client = PocketOptionAsync(
+            settings.auth_payload,
+            config={
+                "connection_initialization_timeout_secs": int(
+                    settings.po_init_timeout
+                ),
+                "timeout_secs": int(settings.po_request_timeout),
+                "reconnect_time": int(settings.po_reconnect_time),
+            },
+        )
     except Exception as exc:  # NOQA: BLE001
         print(f"AUTH_FAILED reason=construction failed: {exc}")
         return 1
 
     try:
-        await asyncio.wait_for(client.wait_for_assets(timeout=60), timeout=60)
+        await asyncio.wait_for(client.wait_for_assets(timeout=deadline), timeout=deadline)
         print(
             f"AUTH_OK session_len={_session_len(ssid)} "
             f"uid={settings.auth.get('uid')} isDemo={settings.auth.get('isDemo')}"

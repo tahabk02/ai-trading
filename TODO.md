@@ -463,6 +463,86 @@ below.
   test_strict_execution_gate test_no_force_emit_escape` **74 passed, 1 xfailed**.
 - browser session `p38fix` closed.
 
+## TRACKED FOLLOW-UP - [391] candle history depth: only 3/16 frames clear MIN_HISTORY_CLOSES (queued; OWN ITEM - do NOT fold into PART 39)
+
+### Finding (measured, not modelled)
+
+`historyCollector.service.ts:16` `HISTORY_WINDOW_MINUTES = 30` keeps a rolling
+**30-minute** window of 1m bars, and the boot backfill reads exactly that store
+(`index.ts:756` -> `historyCollector.getRecentBars`).
+`BACKFILL_1M_BAR_LIMIT = 1_500` (`realtimeCandleAggregator.service.ts:217`) is
+only the query cap, so boot restores ~30 one-minute bars whatever its doc
+comment implies.
+
+Live probe, EUR/USD OTC, one switch per frame (session `p39tf`, the table in
+PART 39 [375]):
+
+- clear the engine's `regime_detector.MIN_CLOSES = 100`: **S5 501, S10 213,
+  S15 143** - and only because the server ring keeps up to 512 live-tick bars
+  (~42 min of 5s bars), not because of any deep history.
+- below it: **S30 73, M1 38, M2 20, M3 13, M5 9, M10 5, M15 4, M30 3, H1 2,
+  H4 2, D1 1, W1 1, MN1 1.**
+
+So 13 of 16 frames - including plain M1 - cannot support an honest
+period-based read, the ai-engine predict path receives <100-close windows for
+them, and the chart's `history-build` chip showing `BUILDING HISTORY` is the
+normal state rather than an edge case. PART 39 only made this visible; it
+fixed no data.
+
+### Options (each changes retention/storage cost - a DECISION, not a patch)
+
+1. Widen the collector window (`HISTORY_WINDOW_MINUTES` 30 -> 1440 / 43200)
+   and confirm the prunes at `:302`/`:306` do not delete what the backfill
+   then needs. Cost = rows x symbols x minutes, plus boot time and aggregator
+   memory (each frame still capped at `MAX_CLOSED_PER_TF = 512`).
+2. Feed the SLOW frames from a day-level source that already exists in the
+   stack (frankfurter/yahoo day series used by ai-engine's collector) so
+   D1/W1/MN1/H4 get depth without touching the minute store. Note the
+   frankfurter open-ended-range quirk already logged in PART 38 (returns one
+   bar without an explicit end date).
+3. Pull history from PO once `POCKET_OPTION_SSID` is set (the bridge is still
+   `awaiting_ssid`) - blocked on credentials, not on code.
+4. Do nothing and let the chip stay honest. Defensible: the engine already
+   refuses <100 closes; the risk is a terminal that looks permanently
+   "building" on the frames a trader actually uses.
+
+### Acceptance
+
+- Fresh boot gives >= 100 closed bars on at least M1/M5/M15/M30/H1 for the
+  whitelist symbols, and `data-testid="history-build"` reads
+  `HISTORY n CLOSES` (not BUILDING) on those frames - verified with the same
+  DOM probe PART 39 used, per frame.
+- Boot cost measured (time + bytes) so option 1 is priced, not guessed.
+- If option 2/3 is chosen, the provenance chip must label the deeper bars'
+  source instead of implying they came from the live tape.
+
+### Out of scope / do NOT
+
+- Do not raise `BACKFILL_1M_BAR_LIMIT` alone - it has no effect while the
+  store holds 30 minutes.
+- Do not lower `regime_detector.MIN_CLOSES` or the client's
+  `MIN_HISTORY_CLOSES` to make the chip go away.
+- Do not touch the PART 39 grid/selector code - it is committed (`7e91727`).
+
+### Files
+
+`core-backend/src/services/historyCollector.service.ts` (window + prunes -
+NOTE: this file already carries uncommitted worktree WIP, stage it
+surgically), `core-backend/src/index.ts:753-776` (boot backfill),
+`core-backend/src/services/realtimeCandleAggregator.service.ts` (limits and
+the overstated doc comment). The client chip needs no change.
+
+## TRACKED FOLLOW-UP - W1/MN1 calendar parity (queued; OWN ITEM - discovered by [373], not fixed there)
+
+`bucketStart`/`floorBucket` floor onto a fixed ms grid, so W1 bars open on
+Thursday (epoch was 1970-01-01) and MN1 bars are fixed 30-day blocks. PO
+aligns weeks and months to its own calendar. If PO-parity of the slow frames
+ever has to be CLAIMED, the bucket must be anchored to a fixed epoch date
+instead of floored - one function, but the convention has to be pinned from
+PO's own cabinet UI first, which is exactly what [371] could not reach from
+this box. Until then the deviation is documented in code and must not be
+described as PO-identical.
+
 ## DONE - PART 39: full timeframe coverage for candle building [371]-[376]
 
 ### [371] Pocket Option's real chart-timeframe set (evidence, no guessing)

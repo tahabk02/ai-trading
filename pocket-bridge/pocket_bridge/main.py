@@ -211,7 +211,16 @@ async def amain(settings: BridgeSettings) -> None:
                     "symbols": sorted(bridge._subs),
                     "session_expired": bridge.session_expired,
                     "session_file": bool(stored_session.exists),
-                    "session_age_days": round(stored_session.age_days, 1),
+                    # `age_days` is `inf` when capturedAt is missing or
+                    # unparseable; `round(inf, 1)` stays `inf` and `json.dumps`
+                    # would then emit the non-standard `Infinity` literal,
+                    # making this health payload unparseable. Report None so the
+                    # "age unknown -> treat as expired" state is explicit.
+                    "session_age_days": (
+                        None
+                        if stored_session.age_days == float("inf")
+                        else round(stored_session.age_days, 1)
+                    ),
                     "cookies": len(stored_session.cookies),
                     "connect_epoch": bridge.connect_epoch,
                     "tick_seq": bridge._tick_seq,

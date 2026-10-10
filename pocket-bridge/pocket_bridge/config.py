@@ -22,9 +22,42 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# ── Environment file isolation ───────────────────────────────────────────────
+# `<repo>/pocket-bridge`, resolved from THIS file so it is cwd-independent.
+# Only files inside pocket-bridge/ are read; the repository-root .env is a
+# different service's configuration and is never consulted.
+POCKET_BRIDGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pocket_bridge_env_files() -> list[Path]:
+    """pocket-bridge-local env files, HIGHEST precedence first.
+
+    `load_dotenv` never overwrites an already-set variable, so loading
+    high-to-low yields the intended precedence: a real environment variable
+    (container / operator injected) beats every file, then `.env.local`, then
+    `.env.<environment>`, then `.env`.
+    """
+    environment = os.environ.get("ENVIRONMENT") or os.environ.get("NODE_ENV") or "development"
+    candidates = [
+        POCKET_BRIDGE_ROOT / ".env.local",
+        POCKET_BRIDGE_ROOT / f".env.{environment}",
+        POCKET_BRIDGE_ROOT / ".env",
+    ]
+    return [p for p in candidates if p.is_file()]
+
+
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    for _env_file in _pocket_bridge_env_files():
+        load_dotenv(_env_file, override=False)
+    _PARENT_DOTENV = POCKET_BRIDGE_ROOT.parent / ".env"
+    if _PARENT_DOTENV.is_file() and os.environ.get("POCKET_BRIDGE_ALLOW_PARENT_DOTENV") != "true":
+        logging.getLogger("pocket_bridge.config").warning(
+            "pocket-bridge: ignoring parent %s — it is another service's configuration. "
+            "Set values in %s or the real environment.",
+            _PARENT_DOTENV,
+            POCKET_BRIDGE_ROOT / ".env",
+        )
 except Exception:  # pragma: no cover - dotenv is optional at runtime
     pass
 
@@ -239,19 +272,33 @@ class StoredSession:
 
     @property
     def age_days(self) -> float:
-        """Freshness in days since ``capturedAt`` (0 when unknown)."""
+        """Freshness in days since ``capturedAt``.
+
+        FAILS CLOSED. A missing or unparseable ``capturedAt`` used to report
+        ``0.0`` - indistinguishable from "captured just now" - so the
+        ``PO_SESSION_MAX_AGE_DAYS`` guard silently accepted a session whose age
+        it could not determine, i.e. exactly the case where the token is most
+        likely to be expired. Unknown age is treated as infinitely old, so the
+        caller refuses it and demands a fresh capture.
+        """
         if not self.captured_at:
-            return 0.0
+            return float("inf")
         try:
             captured = datetime.fromisoformat(
                 self.captured_at.replace("Z", "+00:00")
             )
-            return max(
-                0.0,
-                (datetime.now(timezone.utc) - captured).total_seconds() / 86_400.0,
-            )
         except (ValueError, TypeError):
-            return 0.0
+            logger.warning(
+                "session_captured_at_unparseable age_reported=inf captured_at=%s",
+                str(self.captured_at)[:64],
+            )
+            return float("inf")
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (datetime.now(timezone.utc) - captured).total_seconds() / 86_400.0,
+        )
 
     def mask(self, value: str, head: int = 8) -> str:
         return mask_secret(value, head)
@@ -564,10 +611,31 @@ class BridgeSettings:
     #: Maximum number of M20 candles retained per symbol in the relay.
     max_m20_history: int = 500
 
-    #: Candidate Pocket Option WebSocket server URLs (falls back to default).
+    #: Candidate Pocket Option WebSocket server URLs (falls back to the SDK's
+    #: own compiled regional list when empty).
     urls: List[str] = field(default_factory=lambda: [
         u for u in os.getenv("POCKET_OPTION_WS_URLS", "").split(",") if u.strip()
     ])
+
+    #: Native SDK handshake budget (seconds). The Rust core raises
+    #: "General error: Connection initialization timed out" when the whole
+    #: endpoint rotation has not authenticated inside this window; its default
+    #: is only 60s, which a blocked/geo-sharded handshake can exhaust. MUST stay
+    #: above the bridge's own wait so Python never cancels a live handshake.
+    po_init_timeout: float = field(
+        default_factory=lambda: float(os.getenv("POCKET_OPTION_INIT_TIMEOUT", "120"))
+    )
+
+    #: Per-socket request timeout handed to the SDK (seconds).
+    po_request_timeout: float = field(
+        default_factory=lambda: float(os.getenv("POCKET_OPTION_TIMEOUT_SECS", "30"))
+    )
+
+    #: Seconds the SDK waits before rotating to the next endpoint after a failed
+    #: handshake. Kept short so a blocked host is bypassed quickly.
+    po_reconnect_time: float = field(
+        default_factory=lambda: float(os.getenv("POCKET_OPTION_RECONNECT_TIME", "3"))
+    )
 
     #: Candle aggregation interval. Accepts a timeframe token
     #: ("20ms" | "100ms" | "1s" | "20s" | "1m" | "2m" | "3m" | "5m") or a raw
@@ -614,7 +682,46 @@ class BridgeSettings:
 
     @property
     def ssid_format(self) -> str:
-        return "full" if self.ssid.startswith("42[") else "raw"
+        # Report the format actually SENT on the wire, not merely the shape of
+        # the env string. ``_auth_payload`` falls back to a full
+        # ``42["auth",{...}]`` frame built from the session cookie, so a
+        # settings-level ``ssid`` of "" does NOT mean the bridge sends a raw
+        # token - it means it sends a full frame sourced elsewhere. Reporting
+        # "raw" there made /health and the boot log understate the payload and
+        # actively misled anyone debugging an auth failure.
+        if self.ssid.strip():
+            return "full" if self.ssid.strip().startswith("42[") else "raw"
+        return "full" if self.auth else "none"
+
+    def adopt_ssid(self, raw: str) -> bool:
+        """Adopt a freshly captured/refreshed SSID at runtime.
+
+        ``BridgeSettings`` is a frozen dataclass built once from ``os.environ``
+        at import time, and ``_auth_payload`` prefers ``self.settings.ssid`` over
+        the reloaded session file. So a token rotated by ``capture_session.py`` /
+        ``refresh_ssid.py`` wrote the new value to .env, but the running process
+        kept authenticating with the token it booted with — the refresh silently
+        had no effect for the rest of the process lifetime, which is precisely
+        when a refresh matters most (the old token has expired).
+
+        Both ``ssid`` and the derived ``auth`` are replaced together so the
+        uid/isDemo/platform/isFastHistory properties stay consistent with the
+        token actually in use. Returns False when the new value is unusable, in
+        which case the caller keeps the previous credentials rather than
+        downgrading to an unauthenticated frame.
+        """
+        value = (raw or "").strip().strip("'\"").strip()
+        if not value:
+            return False
+        try:
+            parsed = parse_ssid(value)
+        except ValueError:
+            return False
+        if not parsed.get("session"):
+            return False
+        object.__setattr__(self, "ssid", value)
+        object.__setattr__(self, "auth", parsed)
+        return True
 
     @property
     def uid(self) -> int:

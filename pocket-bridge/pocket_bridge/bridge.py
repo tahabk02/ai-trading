@@ -50,6 +50,36 @@ DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket
 TRANSIENT_CONNECT_ATTEMPTS = 3
 RECONNECT_BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60)
 
+#: Extra seconds the bridge waits beyond the SDK's own handshake budget before
+#: declaring a transport failure. Without this the Python-side
+#: ``asyncio.wait_for`` deadline races the native one and cancels a handshake
+#: that was still legitimately initialising.
+CONNECT_DEADLINE_GRACE = 15.0
+
+#: Transport-level failures that mean "the socket never came up", NOT "this
+#: SSID is dead". These must never escalate to the terminal ``session_expired``
+#: state — a regional endpoint being blocked/filtered is indistinguishable
+#: from a bad credential at the SDK boundary, but only one of them is real.
+_TRANSPORT_ERROR_MARKERS = (
+    "connection initialization timed out",
+    "connection initialization timeout",
+    "timed out",
+    "timeout",
+    "timedout",
+    "handshake",
+    "dead channel",
+    "channelreceiver(closed)",
+    "channelreceiver",
+    "websocket",
+    "connection closed",
+    "connectionreset",
+    "eof occurred",
+    "tls handshake",
+    "dns",
+    "unreachable",
+    "network is unreachable",
+)
+
 
 class ModuleUnavailableError(Exception):
     """Raised when an optional third-party dependency (BinaryOptionsToolsV2)
@@ -236,6 +266,13 @@ class PocketOptionBridge:
         self.connect_epoch = 0
         #: attempts consumed by the last transient auth retry ladder.
         self._transient_connect_retries = 0
+        #: rotation offset applied to the configured endpoint list so a host
+        #: that is blocked/failing the handshake is bypassed on the very next
+        #: attempt instead of being probed first every single time.
+        self._endpoint_rotation = 0
+        #: last raw exception raised while connecting, inspected by
+        #: ``_is_transport_error`` to separate a dead socket from a dead SSID.
+        self._last_transport_error: Optional[BaseException] = None
         #: symbols armed DYNAMICALLY via a client subscription push (not in the
         #: static startup set). Survives teardowns so a credential swap /
         #: reconnect re-arms exactly the streams a browser had asked for.
@@ -339,19 +376,33 @@ class PocketOptionBridge:
             return self.client
         self._check_dependency()
         from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
-        kwargs = {}
-        # Only pin an explicit PO endpoint when POCKET_OPTION_WS_URLS is
-        # configured. Empirically the library's own default URL authenticates
-        # AND streams live ticks, whereas overriding url= to
-        # DEFAULT_PO_WS_URL broke subscriptions entirely
-        # (Core(ChannelReceiver(Closed)); auth still reported OK but the tick
-        # stream died instantly). The constant above remains the raw-socket
+        # The SDK's own compiled regional endpoint list is used whenever
+        # POCKET_OPTION_WS_URLS is unset — it authenticates AND streams live
+        # ticks, whereas pinning url= to DEFAULT_PO_WS_URL broke subscriptions
+        # entirely (Core(ChannelReceiver(Closed)); auth reported OK but the tick
+        # stream died instantly). The constant above stays the raw-socket
         # probe / health target, never a stream override here.
-        ws_url = self.settings.urls[0] if self.settings.urls else ""
-        if ws_url:
-            kwargs["url"] = ws_url
-        if len(self.settings.urls) > 1:
-            kwargs["config"] = {"urls": self.settings.urls}
+        #
+        # The config dict is ALWAYS passed so the native handshake budget is
+        # ours, not the SDK default of 60s: the Rust core aborts the whole
+        # connection with "General error: Connection initialization timed out"
+        # when the endpoint rotation has not authenticated inside
+        # connection_initialization_timeout_secs, and 60s is not enough to walk
+        # a blocked regional host through to a healthy one.
+        sdk_config: Dict[str, object] = {
+            "connection_initialization_timeout_secs": int(self.settings.po_init_timeout),
+            "timeout_secs": int(self.settings.po_request_timeout),
+            # Short rotate delay = a blocked/failing host is bypassed fast
+            # instead of costing the full handshake budget on every attempt.
+            "reconnect_time": int(self.settings.po_reconnect_time),
+        }
+        urls = list(self.settings.urls)
+        if urls:
+            if len(urls) > 1 and self._endpoint_rotation:
+                cut = self._endpoint_rotation % len(urls)
+                urls = urls[cut:] + urls[:cut]
+            sdk_config["urls"] = urls
+        kwargs: Dict[str, object] = {"config": sdk_config}
         payload = self._auth_payload()
         if self.settings.has_ssid:
             # The env SSID is the authoritative full message — byte-faithful.
@@ -361,7 +412,12 @@ class PocketOptionBridge:
             via = "session"
             auth_dict = self.session.as_auth()
         session_len = len(str(auth_dict.get("session", "")))
-        logger.info("connecting url=%s", ws_url)
+        logger.info(
+            "connecting urls=%s init_timeout=%ss rotate=%s",
+            urls or "(sdk default regional list)",
+            sdk_config["connection_initialization_timeout_secs"],
+            self._endpoint_rotation,
+        )
         logger.info(
             "auth_payload_sent via=%s session_len=%d uid=%s isDemo=%s isOptimized=%s",
             via, session_len,
@@ -517,6 +573,25 @@ class PocketOptionBridge:
     async def _is_invalid_asset_error(self, exc: Exception) -> bool:
         """True when the client reports an unknown/unsupported asset name."""
         return "invalid asset" in str(exc).lower()
+
+    @staticmethod
+    def _is_transport_error(exc: Optional[BaseException]) -> bool:
+        """True when a connect failure is a socket/handshake problem, NOT auth.
+
+        The native SDK surfaces a blocked or slow websocket as
+        ``PocketOptionError, General error: Connection initialization timed
+        out`` — textually indistinguishable from a credential rejection at the
+        boundary, but semantically a TRANSIENT transport condition. Treating it
+        as an expired SSID halts every reader and surfaces
+        ``session_expired`` for a perfectly valid credential.
+        """
+        if exc is None:
+            return False
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError,
+                            OSError)):
+            return True
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return any(marker in text for marker in _TRANSPORT_ERROR_MARKERS)
 
     async def run_reader(self, symbol: str, asset: str) -> None:
         """Subscribe to raw ticks for one asset and feed the M20 engine.
@@ -733,7 +808,22 @@ class PocketOptionBridge:
         flipping into a terminal ``session_expired`` state that could appear
         to be an SSID ban.  Only once every attempt has failed is the SSID
         declared dead and the error escalated.
+
+        A handshake that never completed (``General error: Connection
+        initialization timed out`` and friends) is TRANSPORT, not credential,
+        so it is reported as ``connection_error`` and the bounded reader backoff
+        keeps retrying with a rotated endpoint order — escalating it to
+        ``session_expired`` would wrongly declare a live SSID dead and halt
+        every reader.
         """
+        # The Python-side deadline must never be tighter than the SDK's own
+        # handshake budget, or ``asyncio.wait_for`` cancels a connection that
+        # the native core is still legitimately initialising (that race is what
+        # surfaced as a per-symbol crash loop).
+        connect_deadline = (
+            max(self.settings.connect_timeout, self.settings.po_init_timeout)
+            + CONNECT_DEADLINE_GRACE
+        )
         if self.is_connected:
             # The whole point of `ready` is that assets are initialised — the
             # Node backend gates its staged subscribes on it. A concurrent
@@ -742,13 +832,13 @@ class PocketOptionBridge:
             # an "Uninitialized, Assets not initialized yet" active_assets().
             if self._assets_ready:
                 return
-            timeout = time.monotonic() + self.settings.connect_timeout
+            timeout = time.monotonic() + connect_deadline
             while not self._assets_ready:
                 if time.monotonic() > timeout:
                     logger.warning(
                         "bridge assets not ready after %.0fs — proceeding with "
                         "subscribe-error asset resolution fallback",
-                        self.settings.connect_timeout,
+                        connect_deadline,
                     )
                     break
                 await asyncio.sleep(0.25)
@@ -775,8 +865,8 @@ class PocketOptionBridge:
             client = await self._import_client()
             try:
                 await asyncio.wait_for(
-                    client.wait_for_assets(timeout=self.settings.connect_timeout),
-                    timeout=self.settings.connect_timeout,
+                    client.wait_for_assets(timeout=connect_deadline),
+                    timeout=connect_deadline,
                 )
                 if not client.is_connected():
                     raise RuntimeError(
@@ -786,11 +876,20 @@ class PocketOptionBridge:
                 break
             except Exception as exc:  # noqa: BLE001 - retried transiently below
                 last_error = str(exc)[:500]
+                self._last_transport_error = exc
                 logger.error("auth_response=%s", last_error)
                 logger.warning(
                     "auth_attempt[%d/%d] failed reason=%s — "
                     "releasing stale client and retrying transient",
                     attempt, TRANSIENT_CONNECT_ATTEMPTS, last_error,
+                )
+                # Rotate the endpoint order so the next attempt starts on a
+                # different regional host — a handshake block is bypassed in
+                # one attempt instead of costing the full budget every time.
+                self._endpoint_rotation = (
+                    self._endpoint_rotation + 1
+                    if len(self.settings.urls) > 1
+                    else self._endpoint_rotation
                 )
                 try:
                     await client.disconnect()
@@ -802,6 +901,22 @@ class PocketOptionBridge:
                     await asyncio.sleep(self.settings.reconnect_delay * attempt)
         if not self.is_connected:
             logger.error("auth_failed reason=%s", last_error)
+            if self._is_transport_error(self._last_transport_error):
+                # TRANSPORT, not credential: a blocked/slow handshake, a
+                # filtered regional host or a dropped socket. Declaring
+                # session_expired here is what turned every reader into a
+                # silent dead task, so surface a retryable connection_error and
+                # let the reader's bounded backoff retry — the SSID is fine.
+                logger.warning(
+                    "connect_failed reason=%s — transient transport failure, "
+                    "keeping readers armed for retry (not session_expired)",
+                    last_error,
+                )
+                await self._set_status(
+                    "connection_error",
+                    f"{last_error} (handshake/transport — retrying)",
+                )
+                return
             await self._enter_session_expired(last_error or "authentication failed")
             return
         self.connected_at = time.time()
@@ -1098,6 +1213,18 @@ class PocketOptionBridge:
                 if parsed.get("session"):
                     self.session.raw_ssid = parsed["session"]
                     self.session.auth_seed = dict(parsed)
+            # Adopt it on the SETTINGS too. `self.settings.ssid` was frozen from
+            # os.environ at import time and `_auth_payload()` prefers it over
+            # `self.session`, so without this the bridge kept authenticating with
+            # the expired boot token and the refresh had no effect at all -
+            # i.e. the refresh only ever worked when the env var was empty.
+            if env_ssid and self.settings.adopt_ssid(env_ssid):
+                logger.info(
+                    "SSID_ADOPTED_FROM_ENV",
+                    uid=self.settings.uid,
+                    is_demo=self.settings.is_demo,
+                    format=self.settings.ssid_format,
+                )
             logger.info(
                 "SESSION_REFRESHED captured_at=%s",
                 self.session.captured_at or "?",

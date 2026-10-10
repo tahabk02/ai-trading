@@ -65,6 +65,15 @@ methods in `core-backend/src/services/forexData.service.ts` and the matching
 methods in `ai-engine/app/data/collector.py`; the cascade falls through
 automatically.
 
+**Real-forex regime gate (PART 28.2).** The 10 real pairs are no longer blanket
+non-tradable. Their regime gate is now data-driven from intraday closes (≥ 100)
+computed by `financial_analysis.py`: pairs that classify as `trending` or
+`mean_reverting` on the intraday tape return `regime_gate="tradable"` and unlock
+the full interactive UI (PRO terminal, target projection candles, live signals);
+`random_walk` pairs return `scored_only` and stay locked; no verdict yet renders
+as "Regime review pending". The re-audit harness
+(`ai-engine/universe_regime_audit.py`) is the review trigger per pair.
+
 ## Getting Started
 
 ### AI Engine (Port 8001)

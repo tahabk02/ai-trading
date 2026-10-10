@@ -1,74 +1,507 @@
-version: "3.8"
+# =============================================================================
+#  PRODUCTION STACK — Hetzner VPS (4 GB RAM, Ubuntu 22.04/24.04)
+# =============================================================================
+#  Deploy:
+#    cp core-backend/.env.prod.example core-backend/.env.prod   # then fill in
+#    cp ai-engine/.env.example        ai-engine/.env
+#    cp pocket-bridge/.env.example    pocket-bridge/.env
+#    docker compose -f docker-compose.prod.yml up -d --build
+#
+#  ── NETWORK POSTURE (why almost nothing is published) ──────────────────────
+#  Only the frontend is reachable from outside, and even that binds to
+#  127.0.0.1 by default: TLS is terminated by a reverse proxy on the host
+#  (Caddy/nginx), which is the only process that should face the internet.
+#
+#  postgres / redis / ai-engine / core-backend / execution-engine /
+#  pocket-bridge are reachable ONLY over the internal `radar_network` bridge.
+#  They use `expose:` (documentation-only, not a host publish) instead of
+#  `ports:`. A `ports:` mapping binds 0.0.0.0 by default, which on a public
+#  Hetzner IPv4 means the service is directly reachable from the internet —
+#  that is how Redis (no auth) and the Pocket Option bridge (no auth, holding a
+#  live trading session cookie) were exposed. This file removes that exposure
+#  rather than relying on a firewall that may not be up.
+#
+#  To debug a service from the host, use a one-off container on the network:
+#    docker compose -f docker-compose.prod.yml exec core-backend sh
+#  …or temporarily add a `127.0.0.1:`-bound mapping, never `0.0.0.0`.
+# =============================================================================
+
+name: trading-ai-platform
+
+# Reusable hardening block: no privilege escalation + bounded logs.
+# Unbounded json-file logs are a top cause of a 4 GB VPS filling its disk.
+x-hardened: &hardened
+  restart: always
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
-  # --- BACKEND SERVICE ---
-  core-backend:
-    build:
-      context: ./core-backend
-      dockerfile: Dockerfile
-    container_name: core_backend_prod
-    restart: always
+  # ===========================================================================
+  #  DATA LAYER
+  # ===========================================================================
+
+  # ── POSTGRES ──────────────────────────────────────────────────────────────
+  # ABSENT from the prod stack entirely, so every query in a "production"
+  # deploy silently hit the SQLite fallback (file:./dev.db) and returned
+  # nothing while the service looked healthy.
+  postgres:
+    image: postgres:15-alpine
+    container_name: prod_postgres
+    <<: *hardened
     environment:
-      - NODE_ENV=production
-      - PORT=4000
-      - TZ=UTC
-    ports:
-      - "4000:4000"
-    depends_on:
-      - redis
+      TZ: UTC
+      POSTGRES_USER: ${DB_USER:-postgres}
+      # `:?` fails the deploy at PARSE time with a named error instead of
+      # booting with a guessable password.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required - set it in the root .env (openssl rand -base64 24)}
+      POSTGRES_DB: ${DB_NAME:-trading_radar}
+      # Deterministic collation regardless of host locale.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    # shm_size: the default 64 MB is far too small; parallel queries and the
+    # planner exhaust it and Postgres restarts itself under real load.
+    shm_size: 256mb
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_size=1GB
+    # Internal only — see the NETWORK POSTURE note above.
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - radar_network
+    healthcheck:
+      # -d/-U target the real database: `pg_isready` alone reports ready even
+      # while the initdb/migration phase is still running.
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
-  # --- REDIS CACHE / BROKER ---
+  # ── REDIS ─────────────────────────────────────────────────────────────────
+  # Previously published as `6379:6379` with NO authentication. Redis on a
+  # public host is a full compromise primitive: an attacker uses it as an open
+  # proxy, rewrites cached prices, or injects trading signals.
   redis:
     image: redis:7-alpine
-    container_name: redis_prod
-    restart: always
-    ports:
-      - "6379:6379"
+    container_name: prod_redis
+    <<: *hardened
+    environment:
+      TZ: UTC
+      # Exposed to the container so the healthcheck can authenticate without
+      # embedding the password in the command line (visible in `ps`/inspect).
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required - set it in the root .env (openssl rand -base64 32)}
+    # Authentication + a hard memory ceiling so Redis cannot OOM the 4 GB host.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required - set it in the root .env (openssl rand -base64 32)}
+      - --maxmemory
+      - 192mb
+      # `noeviction`, NOT `allkeys-lru`: Redis carries the live tick buffer and
+      # signal bus. Silently evicting keys would drop live price data and could
+      # let a signal gate see "no data" instead of "no signal". Failing loudly
+      # on a full dataset is the correct trading-platform behaviour — tune to
+      # `allkeys-lru` only if you accept silent data loss.
+      - --maxmemory-policy
+      - noeviction
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    # Internal only — no host publish. This is the primary security fix.
+    expose:
+      - "6379"
     volumes:
       - redis_data:/data
     networks:
       - radar_network
+    healthcheck:
+      # Must authenticate, otherwise the probe reports NOAUTH as a failure
+      # (which would be correct, but the -a form keeps it explicit).
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # --- FRONTEND CLIENT APP ---
-  client-app:
+  # ===========================================================================
+  #  INTELLIGENCE LAYER
+  # ===========================================================================
+
+  # ── AI ENGINE ─────────────────────────────────────────────────────────────
+  ai-engine:
     build:
-      context: ./client-app
+      context: ./ai-engine
       dockerfile: Dockerfile
-    container_name: dashboard_ui_prod
-    restart: always
+    image: trading-ai/ai-engine:prod
+    container_name: prod_ai_engine
+    <<: *hardened
     environment:
-      - TZ=UTC
-      - NEXT_PUBLIC_API_URL=http://91.99.71.111:4000
-      - NEXT_PUBLIC_WS_URL=http://91.99.71.111:4000
+      TZ: UTC
+      ENVIRONMENT: production
+      LOG_FORMAT: JSON
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.98}
+      AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
+      # Service names, never 127.0.0.1: inside a container, loopback is THIS
+      # container — that mistake 503s every predict.
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      BACKEND_API_URL: http://core-backend:4000/api/v1
+      # Must match core-backend's AI_ENGINE_API_KEY.
+      AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:?AI_ENGINE_API_KEY is required - openssl rand -base64 48}
+      CORS_ALLOW_DEV_TUNNELS: "false"
+      FOREX_GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    env_file:
+      # Optional so a fresh `git clone` can still run `docker compose config`.
+      # Anything REQUIRED is enforced above with `:?` and fails loudly.
+      - path: ./ai-engine/.env
+        required: false
+    expose:
+      - "8000"
+    # Bound to loopback: reachable from the host for debugging, NOT from the
+    # internet. The frontend reaches it through the Next.js proxy.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:8000:8000"
     depends_on:
-      - core-backend
+      redis:
+        condition: service_healthy
+      core-backend:
+        condition: service_started
     networks:
       - radar_network
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      # urllib (not curl/wget): python:3.11-slim has no curl, and urllib raises
+      # on any non-2xx, which is exactly the signal a probe needs.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # Generous: first import pulls in sklearn/xgboost/TALib.
+      start_period: 90s
 
+  # ===========================================================================
+  #  ORCHESTRATION LAYER
+  # ===========================================================================
+
+  # ── CORE BACKEND ──────────────────────────────────────────────────────────
+  # Had NO env_file in the prod stack, so DATABASE_URL fell back to
+  # `file:./dev.db` (a local SQLite file) and every query returned no rows
+  # while the service reported healthy.
+  core-backend:
+    build:
+      context: ./core-backend
+      dockerfile: Dockerfile
+    image: trading-ai/core-backend:prod
+    container_name: prod_core_backend
+    <<: *hardened
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      TZ: UTC
+      # ── DATABASE ──
+      # postgres service name (not localhost) + the credentials from the root
+      # .env. `sslmode=disable` is correct for a private compose bridge network.
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-trading_radar}?schema=public&sslmode=disable&connection_limit=10
+      # ── REDIS ──
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      # ── AUTH ──
+      # secrets.ts now REFUSES TO BOOT in production when this is a placeholder
+      # or < 32 chars, so a weak secret is a crash-looping container, not a
+      # forgeable-token vulnerability.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - openssl rand -base64 48}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+      AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:?AI_ENGINE_API_KEY is required - openssl rand -base64 48}
+      # ── CORS ──
+      # NO `*`. The browser is same-origin behind the reverse proxy, so this
+      # must be the real public origin(s); a wildcard is both wrong and
+      # incompatible with `credentials: true`.
+      CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN is required - e.g. https://trade.example.com}
+      # ── UPSTREAMS ──
+      AI_ENGINE_URL: http://ai-engine:8000
+      # Without these the backend falls back to 127.0.0.1:8788 — which inside
+      # this container IS the backend itself, so the bridge was never reached.
+      POCKET_BRIDGE_HOST: pocket-bridge
+      POCKET_BRIDGE_PORT: "8788"
+      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
+      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # ── RATE LIMITING ──
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      # ── MARKET DATA (no hardcoded fallbacks) ──
+      ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      APCA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
+      APCA_API_SECRET_KEY: ${ALPACA_API_SECRET:-}
+      ALPACA_USE_SANDBOX: ${ALPACA_USE_SANDBOX:-true}
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://data.sandbox.alpaca.markets}
+      ALPACA_WS_ENDPOINT: ${ALPACA_WS_ENDPOINT:-wss://stream.data.sandbox.alpaca.markets/v2/sip}
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:-}
+    env_file:
+      # Per-service overrides layered UNDER the explicit `environment:` above.
+      # DATABASE_URL / REDIS_HOST / JWT_SECRET / CORS_ORIGIN are also declared
+      # here (see .env.prod.example) so the file is a complete, self-documenting
+      # description of the service's configuration.
+      - path: ./core-backend/.env.prod
+        required: false
+    expose:
+      - "4000"
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pocket-bridge:
+        # `service_started`, not healthy: the bridge runs in a clean
+        # "awaiting_ssid" state with no session, and it must NOT block the
+        # backend from booting when there is no Pocket Option account.
+        condition: service_started
+    networks:
+      - radar_network
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:4000/health', r => { process.exit(r.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  # ===========================================================================
+  #  EXECUTION LAYER  (restored — was missing from the prod stack)
+  # ===========================================================================
+
+  # ── EXECUTION ENGINE ──────────────────────────────────────────────────────
+  # Absent from docker-compose.prod.yml, so nothing consumed the
+  # `trading_signals` Redis channel: signals were produced and never acted on.
+  execution-engine:
+    build:
+      context: ./execution-engine
+      dockerfile: Dockerfile
+    image: trading-ai/execution-engine:prod
+    container_name: prod_execution_engine
+    <<: *hardened
+    environment:
+      TZ: UTC
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDIS_DB: "0"
+      EXCHANGE_ID: ${EXCHANGE_ID:-binance}
+      # Empty by default. REQUIRE_CREDENTIALS makes an unconfigured exchange a
+      # hard boot failure instead of orders failing later with an opaque 401.
+      API_KEY: ${EXCHANGE_API_KEY:-}
+      API_SECRET: ${EXCHANGE_API_SECRET:-}
+      REQUIRE_CREDENTIALS: ${REQUIRE_CREDENTIALS:-true}
+      MIN_CONFIDENCE: ${MIN_CONFIDENCE:-0.90}
+      DEFAULT_BALANCE: ${DEFAULT_BALANCE:-1000.0}
+      HEALTH_PORT: "8081"
+    env_file:
+      - path: ./execution-engine/.env
+        required: false
+    expose:
+      - "8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - radar_network
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+    healthcheck:
+      # /health answers 503 until the Redis subscription is live, so `up`
+      # ordering is truthful.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=4).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ===========================================================================
+  #  MARKET DATA LAYER (SSOT for real prices)
+  # ===========================================================================
+
+  # ── POCKET OPTION BRIDGE ──────────────────────────────────────────────────
+  # Was published as `8788:8788` on the public interface. The relay carries a
+  # live authenticated trading session (the `ssid` cookie) and accepts
+  # unauthenticated connections, so anyone who found the port could read the
+  # session and inject price ticks into the platform.
   pocket-bridge:
     build:
       context: ./pocket-bridge
       dockerfile: Dockerfile
-    container_name: pocket_option_bridge_prod
-    restart: always
+    image: trading-ai/pocket-bridge:prod
+    container_name: prod_pocket_bridge
+    <<: *hardened
     environment:
-      - POCKET_BRIDGE_HOST=0.0.0.0
-      - POCKET_BRIDGE_PORT=8788
-      - TZ=UTC
+      TZ: UTC
+      # Bind INSIDE the container only. The bridge must never be reachable from
+      # outside the compose network; core-backend is its only client.
+      POCKET_BRIDGE_HOST: 0.0.0.0
+      POCKET_BRIDGE_PORT: "8788"
+      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
+      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
     env_file:
-      - ./pocket-bridge/.env
+      - path: ./pocket-bridge/.env
+        required: false
+    volumes:
+      # Captured browser session (read-only). The bridge authenticates with the
+      # stored `ssid` cookie; the backend never reads this file.
+      - ./pocket-bridge/session:/app/session:ro
+    # Internal only. 8789 (relay_port + 1) is additionally bound to loopback
+    # so an operator/monitoring agent can scrape /health without exposing the
+    # relay itself.
+    expose:
+      - "8788"
+      - "8789"
     ports:
-      - "8788:8788"
+      - "127.0.0.1:8789:8789"
     networks:
       - radar_network
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8789/health', timeout=4).status==200 else 1)"
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      # The bridge is healthy in a clean "awaiting_ssid" state by design.
+      start_period: 30s
 
+  # ===========================================================================
+  #  VISUALIZATION LAYER
+  # ===========================================================================
+
+  # ── CLIENT APP (Next.js) ──────────────────────────────────────────────────
+  client-app:
+    build:
+      context: ./client-app
+      dockerfile: Dockerfile
+    image: trading-ai/client-app:prod
+    container_name: prod_client_app
+    <<: *hardened
+    environment:
+      TZ: UTC
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: 0.0.0.0
+      # ── RUNTIME PROXY TARGETS ──
+      # Read by client-app/server.js on EVERY REQUEST, not baked in at build
+      # time. `next.config.js` `rewrites()` is evaluated during `next build`
+      # and frozen into .next/routes-manifest.json, so these values were
+      # previously ignored entirely and the build-time fallback
+      # (http://localhost:4000 — client-app ITSELF) was used, looping every
+      # /api request back into Next and 404ing it.
+      API_PROXY_URL: http://core-backend:4000
+      AI_PROXY_URL: http://ai-engine:8000
+      PROXY_ENABLED: "true"
+      # NO NEXT_PUBLIC_* HERE, deliberately. Those are inlined into the browser
+      # bundle at build time and would make the browser call the backend
+      # cross-origin, requiring CORS and breaking behind the reverse proxy
+      # (which forwards only its own origin). Unset keeps the browser strictly
+      # same-origin; server.js resolves the upstreams.
+    expose:
+      - "3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      core-backend:
+        condition: service_healthy
+      ai-engine:
+        condition: service_healthy
+    networks:
+      - radar_network
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      # /api/healthz is answered LOCALLY by Next (reserved in server.js), so a
+      # slow backend cannot mark the frontend unhealthy and trigger a restart
+      # loop. Dependency health is enforced by depends_on above.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/api/healthz', r => { process.exit(r.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+# =============================================================================
+#  PERSISTENT VOLUMES  (named volumes survive `docker compose down`)
+#  A bare `down` keeps them; `down -v` DESTROYS the database.
+# =============================================================================
 volumes:
+  postgres_data:
+    driver: local
   redis_data:
+    driver: local
 
 networks:
   radar_network:
     driver: bridge
+    # Encrypted container-to-container traffic. Cheap on a dedicated host and
+    # removes any risk of an unrelated container on the bridge sniffing the
+    # trading payload.
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
