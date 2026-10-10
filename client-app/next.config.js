@@ -1,5 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Trace/bundle from client-app's own lockfile — the host home dir contains an
+  // unrelated package-lock.json (C:\Users\hp) and Next's workspace-root
+  // inference selects the wrong root without this.
+  outputFileTracingRoot: __dirname,
+
   assetPrefix: process.env.NEXT_PUBLIC_ASSET_PREFIX || "",
 
   // ── Build-Time Client Env Inlining ──
