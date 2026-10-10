@@ -17,6 +17,10 @@ export default defineConfig({
           name: "logic",
           include: ["src/lib/__tests__/**/*.test.ts"],
           environment: "node",
+          // This dev host runs the full 58-file suite with setup/collect
+          // measured in the hundreds of seconds (disk-starved). File-scanning
+          // tests that take ~2.5s isolated intermittently blow the 5s default.
+          testTimeout: 30_000,
         },
       },
       {
@@ -34,6 +38,10 @@ export default defineConfig({
           // vi.fn() created inside a vi.mock() factory — the stub then returns
           // undefined at call time. clearMocks only clears call history.
           clearMocks: true,
+          // See the logic project: the default 5s is too tight for the full
+          // suite on this disk-starved host (the 44-card registry mount is
+          // ~1.8s isolated but ~7s under contention).
+          testTimeout: 30_000,
         },
       },
     ],
