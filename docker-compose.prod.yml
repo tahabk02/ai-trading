@@ -202,11 +202,15 @@ services:
     healthcheck:
       # urllib (not curl/wget): python:3.11-slim has no curl, and urllib raises
       # on any non-2xx, which is exactly the signal a probe needs.
+      # PART 43 [432]: probe LIVENESS (/health/live), not /health/ready — the
+      # engine is healthy as soon as the process serves; it must NOT be marked
+      # unhealthy while the model cache warms. Readiness is consumed by the
+      # routing layer, not by this container healthcheck.
       test:
         - CMD
         - python
         - -c
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=5).status==200 else 1)"
       interval: 15s
       timeout: 10s
       retries: 5

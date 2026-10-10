@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 
 from app.core.runtime_state import (
     last_health_error,
@@ -22,7 +22,7 @@ from app.services.signal_gatekeeper import (
 )
 from app.services.accuracy_tracker import accuracy_report, get_accuracy_tracker
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 from pydantic import BaseModel, Field
 from typing import Optional
 
@@ -53,6 +53,22 @@ def health_report() -> Dict[str, Any]:
     }
 
 
+def health_live_report() -> Dict[str, Any]:
+    """Liveness — the process is up and serving.
+
+    Deliberately INDEPENDENT of warmup/cache state: a warming engine is alive
+    and must not be killed by an orchestrator liveness probe. Readiness, which
+    DOES depend on warmup, is ``health_report``.
+    """
+    return {
+        "status": "alive",
+        "healthy": True,
+        "service": "ai-engine",
+        "version": "1.0.0",
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
 # The core-backend probes ${AI_ENGINE_URL}/api/v1/health — this router is
 # mounted at the api_router root (no prefix), so these become
 # /api/v1/health (+ /api/v1/health/ai and /api/v1/health/health aliases).
@@ -69,6 +85,26 @@ async def health_check_ai() -> Dict[str, Any]:
 @router.get("/health/health")
 async def health_check_legacy() -> Dict[str, Any]:
     return health_report()
+
+
+@router.get("/health/live")
+async def health_check_live() -> Dict[str, Any]:
+    """Liveness probe — 200 whenever the process is serving (warmup-agnostic)."""
+    return health_live_report()
+
+
+@router.get("/health/ready")
+async def health_check_ready(response: Response) -> Dict[str, Any]:
+    """Readiness probe — 200 only when the model cache is hot and no warmup is
+    running; 503 while cold/warming so routing waits for a warm engine.
+
+    The body is the full ``health_report`` in both cases, so a 503 still carries
+    ``status``/``model_cache_size``/``warmup_progress`` instead of a bare error.
+    """
+    report = health_report()
+    if not report["healthy"]:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return report
 
 
 def gate_report() -> Dict[str, Any]:

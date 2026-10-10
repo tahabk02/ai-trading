@@ -123,3 +123,62 @@ class TestHealthRouteStatus:
         _force_cache_size(monkeypatch, 5)
         parsed = datetime.fromisoformat(health_report()["timestamp"])
         assert parsed.tzinfo == UTC
+
+
+class TestLivenessReadinessSplit:
+    """Liveness ≠ readiness: warming must never fail liveness, and must fail
+    readiness until the cache is hot."""
+
+    def test_live_is_http_200_even_cold_and_warming(self, monkeypatch):
+        _force_cache_size(monkeypatch, 0)
+        runtime_state.set_warmup_running(True)
+
+        r = CLIENT.get("/api/v1/health/live")
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "alive"
+
+    def test_ready_is_http_503_when_cold(self, monkeypatch):
+        _force_cache_size(monkeypatch, 0)
+        runtime_state.set_warmup_running(False)
+
+        r = CLIENT.get("/api/v1/health/ready")
+
+        assert r.status_code == 503
+        assert r.json()["status"] == "degraded"
+
+    def test_ready_is_http_503_while_warming(self, monkeypatch):
+        _force_cache_size(monkeypatch, 5)
+        runtime_state.set_warmup_running(True)
+
+        r = CLIENT.get("/api/v1/health/ready")
+
+        assert r.status_code == 503
+        assert r.json()["warmup_running"] is True
+
+    def test_ready_is_http_200_when_hot(self, monkeypatch):
+        _force_cache_size(monkeypatch, 5)
+        runtime_state.set_warmup_running(False)
+
+        r = CLIENT.get("/api/v1/health/ready")
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "healthy"
+
+    def test_root_namespace_mirrors_the_split(self, monkeypatch):
+        # docker-compose probes the ROOT /health/live; the readiness split must
+        # exist there too, not only under /api/v1.
+        _force_cache_size(monkeypatch, 0)
+        runtime_state.set_warmup_running(True)
+
+        assert CLIENT.get("/health/live").status_code == 200
+        assert CLIENT.get("/health/ready").status_code == 503
+
+    def test_plain_health_stays_200_while_warming(self, monkeypatch):
+        # Backward compatibility: /health (and /api/v1/health) must remain 200 —
+        # core-backend's observational probe depends on it.
+        _force_cache_size(monkeypatch, 0)
+        runtime_state.set_warmup_running(True)
+
+        assert CLIENT.get("/health").status_code == 200
+        assert CLIENT.get("/api/v1/health").status_code == 200

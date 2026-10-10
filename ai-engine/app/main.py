@@ -7,7 +7,7 @@ IMPORTANT: Prediction endpoint is defined in signals.py (mounted via api_router)
 DO NOT duplicate POST /api/v1/predict here.
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -29,7 +29,7 @@ from .messaging.publisher import RedisPublisher
 from .data.cache import data_cache
 from .services.ml_predictor import predict_with_rf, _model_cache
 from .api.v1.endpoints import api_router
-from .api.v1.health import health_report, gate_report
+from .api.v1.health import health_live_report, health_report, gate_report
 
 setup_logging()
 logger = structlog.get_logger(__name__)
@@ -371,6 +371,22 @@ async def validation_exception_handler(
 @app.get("/health")
 async def health_check():
     return health_report()
+
+
+@app.get("/health/live")
+async def health_check_live():
+    """Liveness — 200 while the process serves (warmup-agnostic). The container
+    healthcheck probes THIS so a cold/warming engine is never marked unhealthy."""
+    return health_live_report()
+
+
+@app.get("/health/ready")
+async def health_check_ready(response: Response):
+    """Readiness — 200 only once the model cache is hot; 503 while warming."""
+    report = health_report()
+    if not report["healthy"]:
+        response.status_code = 503
+    return report
 
 
 @app.get("/health/gate")
