@@ -213,8 +213,8 @@ const signalLock = new ExpirySignalLock();
 // backend / quote stream recovers, the retry lands, predictionData refreshes
 // and signal generation resumes — no manual refresh, no error spam.
 //
-//   delay = min(30s, 1s · 2^(attempt-1))  →  1s, 2s, 4s, 8s, 16s, 30s…
-const PREDICT_RETRY_BASE_MS = 1_000;
+//   delay = min(30s, 5s · 2^(attempt-1))  →  5s, 10s, 20s, 30s…
+const PREDICT_RETRY_BASE_MS = 5_000;
 const PREDICT_RETRY_MAX_MS = 30_000;
 const predictionRetryTimers = new Map<string, unknown>();
 const predictionRetryAttempts = new Map<string, number>();

@@ -10,6 +10,8 @@ import { describe, it, expect } from "vitest";
 
 import {
   quoteProvenance,
+  isPoOfflineOtc,
+  isPocketOptionSource,
   QUOTE_PROVENANCE_STALE_MS,
 } from "@/lib/quoteProvenance";
 
@@ -111,5 +113,43 @@ describe("[384] quoteProvenance", () => {
     expect(p.label).toBe("MARKET CLOSED");
     expect(p.title).toMatch(/last close \(20:59 UTC\)/);
     expect(p.label).not.toContain("HELD");
+  });
+});
+
+describe("[469] isPocketOptionSource / isPoOfflineOtc", () => {
+  it("recognises a genuine PO print (any tier, held included)", () => {
+    expect(isPocketOptionSource("pocket_option")).toBe(true);
+    expect(isPocketOptionSource("pocket_option_ssot:live")).toBe(true);
+    expect(isPocketOptionSource("pocket_option_held")).toBe(true);
+    expect(isPocketOptionSource("frankfurter")).toBe(false);
+    expect(isPocketOptionSource(null)).toBe(false);
+  });
+
+  it("flags an OTC pair priced by a non-PO proxy as PO OFFLINE", () => {
+    // EUR/USD is an OTC instrument; Frankfurter is a market proxy.
+    expect(isPoOfflineOtc("EUR/USD", { source: "frankfurter:live" })).toBe(true);
+    expect(isPoOfflineOtc("EUR/USD", { source: "last_known_real" })).toBe(true);
+  });
+
+  it("does NOT flag a genuine PO OTC print", () => {
+    expect(isPoOfflineOtc("EUR/USD", { source: "pocket_option_ssot" })).toBe(false);
+    expect(isPoOfflineOtc("EUR/USD", { source: "pocket_option_held" })).toBe(false);
+  });
+
+  it("does NOT flag real-forex / crypto fallbacks or unknown sources", () => {
+    // EUR/SEK is a real-forex pair; a Frankfurter rate is the legitimate source.
+    expect(isPoOfflineOtc("EUR/SEK", { source: "frankfurter" })).toBe(false);
+    expect(isPoOfflineOtc("BTC/USD", { source: "coingecko" })).toBe(false);
+    expect(isPoOfflineOtc("EUR/USD", { source: null })).toBe(false);
+    expect(isPoOfflineOtc("EUR/USD", null)).toBe(false);
+  });
+
+  it("defers to MARKET CLOSED (its own state), never PO OFFLINE", () => {
+    expect(
+      isPoOfflineOtc("EUR/USD", {
+        source: "market_closed_last_close",
+        marketClosed: true,
+      }),
+    ).toBe(false);
   });
 });

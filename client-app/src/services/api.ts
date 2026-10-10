@@ -6,6 +6,7 @@ import axios, {
 import { getApiBaseUrl } from "@/utils/getBaseUrl";
 import { OTC_WHITELIST } from "@/constants/symbols";
 import { logDebounced503 } from "@/lib/logDebouncer";
+import { isRecoverablePredictFailure } from "@/lib/predictFailure";
 import { installPredictBudget, PREDICT_ABORT_MS } from "@/lib/predictBudget";
 import { isTier, type TierSelection } from "@/lib/signalTiers";
 
@@ -646,9 +647,11 @@ api.interceptors.response.use(
     // temporary conditions. The retry is exponential-backoff so the UI
     // auto-recovers the moment the backend / quote stream is back.
     //   • 429 retries ANY method (the request was never accepted).
-    //   • 502/503/504 + timeouts retry only idempotent probes (GETs + the
-    //     /predict read) — the server MAY have started the request, and a
-    //     blind retry of a mutating POST (trade execution) could double-submit.
+    //   • 502/503/504 + timeouts retry only idempotent GETs — the server MAY
+    //     have started the request, and a blind retry of a mutating POST (trade
+    //     execution) could double-submit. /predict is deliberately EXCLUDED:
+    //     the store owns its own per-symbol backoff (5s→30s), so retrying the
+    //     POST here too would double the request rate into a storm.
     const reqStatus = error.response?.status;
     const timedOut = error.code === "ECONNABORTED";
     const retryableState =
@@ -657,10 +660,8 @@ api.interceptors.response.use(
     const lowerMethod = (config?.method ?? "get").toLowerCase();
     // 429 means the request was NOT accepted by the rate limiter, so a retry
     // is safe for ANY method. 502/503/504 + live-quote timeouts mean the
-    // server MAY have started the request → retry only idempotent probes
-    // (GETs + the /predict read).
-    const isIdempotent =
-      lowerMethod === "get" || String(config?.url ?? "").startsWith("/predict");
+    // server MAY have started the request → retry only idempotent GETs.
+    const isIdempotent = lowerMethod === "get";
     if (
       retryableState &&
       (reqStatus === 429 || isIdempotent) &&
@@ -721,11 +722,13 @@ export interface OrderBookResponse {
 /**
  * Enhanced prediction error carrying a classifier so the STORE can decide how
  * to surface it:
- *   - `recoverable === true` → 5xx / 429 / network failure / live-quote
- *     timeout. NOT a hard application error: the store keeps the last good
- *     prediction, flips a calm "waiting for live asset stream" banner and
- *     schedules an exponential-backoff re-poll.
- *   - otherwise → a real 4xx / payload validation failure the UI should show.
+ *   - `recoverable === true` → the engine's transient "awaiting live data" 503
+ *     (no fresh tick / not enough real bars yet), 429, a live-quote timeout or
+ *     a transport/network failure. NOT a hard application error: the store
+ *     keeps the last good prediction, flips a calm "waiting for live asset
+ *     stream" banner and schedules an exponential-backoff re-poll.
+ *   - otherwise → a REAL 5xx (500/502/504), a 503 without the awaiting marker,
+ *     or a 4xx payload validation failure the UI should show.
  */
 export interface PredictionError extends Error {
   status?: number;
@@ -827,8 +830,9 @@ const apiClient = {
       return data;
     } catch (proxyError) {
       // ── RECOVERABLE vs HARD FAILURE CLASSIFIER ──
-      // Budget/timeout, 503 and transport failures are TRANSIENT (carry
-      // `recoverable = true` so the store re-polls instead of alarming).
+      // Budget/timeout, the awaiting-live-data 503, 429 and transport failures
+      // are TRANSIENT (carry `recoverable = true` so the store re-polls instead
+      // of alarming). A real 5xx stays a hard error.
       //
       // ══ PREDICT BUDGET ABORT (FIRST branch — must precede all AxiosError
       // classification: aborts surface as ERR_CANCELED) ══
@@ -880,10 +884,15 @@ const apiClient = {
               `Prediction service returned ${status}. Please verify the symbol and try again.`,
           ) as PredictionError;
           err.status = status;
-          // 5xx (including 503 Service Unavailable) and 429 are transient by
-          // nature; 4xx validation errors are NOT retryable.
-          err.recoverable =
-            typeof status === "number" && (status >= 500 || status === 429);
+          // PART 43.4 [470] — ONLY the engine's transient "awaiting live data"
+          // 503 (no fresh tick / not enough real bars yet) and 429 are
+          // recoverable. A real 5xx (500/502/504), a 503 WITHOUT the awaiting
+          // marker (cache/db unavailable) and every 4xx are HARD errors the
+          // store surfaces — never silently swallowed into the waiting banner.
+          err.recoverable = isRecoverablePredictFailure(
+            status,
+            proxyError.response.data,
+          );
           throw err;
         }
       }

@@ -792,3 +792,61 @@ live print. Closed is now a first-class state, derived from the New York clock
 - No new timezone dependency (built-in `Intl` only).
 - OTC/crypto paths are never gated; only `assetSubType === "forex"`.
 - No hard-coded UTC close hour - the schedule is always the New York clock.
+
+## DONE - PART 43.4: no-session state is honest + quiet [469]-[471]
+
+### [469] OTC priced by a market proxy = PO OFFLINE (dim, never tradeable)
+
+An OTC pair is 24/7 and normally fed by Pocket Option. When PO is offline the
+backend prices it from a REST "market proxy" (Frankfurter / ER-API / GitHub /
+last-known-real). That proxy used to paint exactly like a PO tick.
+
+- `lib/quoteProvenance.ts` - `isPocketOptionSource()` (any PO tier, held
+  included) and `isPoOfflineOtc(symbol, quote)` -> true only when the symbol is
+  `assetSubType === "otc"`, the quote is not market-closed, and its source is
+  not a PO print. Real-forex fallbacks and crypto feeds are NOT this state.
+- `components/terminal/asset-card.tsx` - price dimmed (`opacity-60` +
+  faint ink, no tick flash, `data-po-offline`) and a
+  `po-offline-chip` "PO OFFLINE · market proxy" (the provenance strip still
+  names the exact proxy feed). MARKET CLOSED takes precedence.
+- `components/trading/signal-widget.tsx` (rail) - "Execution Price" -> `--` +
+  a `rail-po-offline-marker`.
+- `components/trading/trading-panel.tsx` - price -> `---` +
+  `panel-po-offline-marker`, sourced from the same per-symbol quote map.
+- Tests: `quoteProvenance.test.ts` +5, `asset-card.po-offline.dom` (4),
+  `signal-widget.po-offline.dom` (2), `trading-panel.po-offline.dom` (2).
+
+### [470] /predict "awaiting tick" 503 is a handled state, not an error
+
+- `lib/predictFailure.ts` (new, pure) - `isAwaitingLiveData()` recognises the
+  engine's transient 503 (`Awaiting real-time tick` / `Awaiting live market
+  data`, or `connecting`/`collecting`), and `isRecoverablePredictFailure()`
+  returns true ONLY for that 503 and 429. A real 5xx (500/502/504), a 503
+  without the awaiting marker (cache/db unavailable) and every 4xx are hard
+  errors the UI surfaces. `api.ts` classifier now uses it; budget/timeout and
+  transport failures stay recoverable as before.
+- `services/api.ts` - the axios interceptor no longer retries `/predict` (the
+  store owns the backoff); 502/503/504 + timeouts retry only idempotent GETs.
+- `store/useTradingStore.ts` - per-symbol backoff base 1s -> **5s**
+  (`5s, 10s, 20s, 30s`), so a waiting tick cannot cause a retry storm. No
+  `console.error` on the path (only the debounced 10s `console.warn`).
+- Test: `predictFailure.test.ts` (9).
+
+### [471] `content.js` error = browser extension, not the app
+
+Loaded the app in the browser-automation skill's clean headless profile (no
+extensions, throwaway cookies): HTTP 200, title + body rendered, **0 console
+errors/warnings, 0 failed requests** - no `content.js` line. A project-wide
+search finds no `content.js` in this repo. Confirmed the error is injected by a
+browser extension in the operator's own profile; no app change.
+
+### Verification run for PART 43.4
+
+- client-app: `npx tsc --noEmit` OK; `npm run lint` "No ESLint warnings or
+  errors". Targeted `npx vitest run`: `predictFailure` (9),
+  `quoteProvenance` (13), `asset-card.po-offline.dom` (4),
+  `asset-card.quote-provenance.dom` (5), `signal-widget.po-offline.dom` (2),
+  `signal-widget.rail-price.dom` (8), `trading-panel.po-offline.dom` (2),
+  `trading-panel.dom` (10), `verdict-state` (13),
+  `predictVsSocketLock.dom` (5), `predictCoalescing.singleFlight.dom` (3) - all passed.
+- backend / ai-engine: untouched this part.

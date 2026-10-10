@@ -7,6 +7,7 @@ import {
   stopRiskPolling,
   realtimeAggregator,
 } from "@/store/useTradingStore";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 import { useLangContext } from "@/hooks/useLangContext";
 import { useSocket } from "@/hooks/useSocket";
 import {
@@ -33,6 +34,7 @@ import {
 } from "@/lib/realtimeCandleAggregator";
 import { expirySelectorState } from "@/lib/expirySelection";
 import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
+import { isPoOfflineOtc } from "@/lib/quoteProvenance";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
 // Mirrors the backend PO expiration whitelist exactly (seconds). The chart
@@ -95,6 +97,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   const { connected: socketConnected } = useSocket();
   const activeSymbol = useTradingStore((s) => s.activeSymbol);
   const currentPrice = useTradingStore((s) => s.currentPrice);
+  // PART 43.4 [469] — for an OTC pair priced by a NON-PO feed the market proxy
+  // is not a tradeable execution price: the panel shows "---" and names the
+  // state. The source comes from the same per-symbol quote map the card uses.
+  const activeQuote = useMarketTerminalStore((s) => s.quotes[activeSymbol]);
+  const poOffline = isPoOfflineOtc(activeSymbol, activeQuote ?? null);
   const feedStatus = useTradingStore((s) => s.feedStatus);
   const lastPriceUpdate = useTradingStore((s) => s.lastPriceUpdate);
   const predictionData = useTradingStore((s) => s.predictionData);
@@ -299,10 +306,20 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           <span className="text-[9px] sm:text-[10px] text-slate-500 uppercase font-bold tracking-wider">
             {t("price")}
           </span>
-          <span className="text-xs sm:text-sm text-white font-bold font-mono tabular-nums">
-            {currentPrice > 0
-              ? `$${formatPairPrice(currentPrice, activeSymbol)}`
-              : "---"}
+          <span className="flex items-center gap-1.5 min-w-0">
+            {poOffline && (
+              <span
+                data-testid="panel-po-offline-marker"
+                className="text-[9px] sm:text-[10px] text-amber-400 font-bold uppercase tracking-wider whitespace-nowrap"
+              >
+                PO OFFLINE
+              </span>
+            )}
+            <span className="text-xs sm:text-sm text-white font-bold font-mono tabular-nums">
+              {currentPrice > 0 && !poOffline
+                ? `$${formatPairPrice(currentPrice, activeSymbol)}`
+                : "---"}
+            </span>
           </span>
         </div>
       </div>
@@ -680,7 +697,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           </span>
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-[10px] sm:text-xs font-mono text-white font-bold tabular-nums">
-              {currentPrice > 0
+              {currentPrice > 0 && !poOffline
                 ? `$${formatPairPrice(currentPrice, activeSymbol)}`
                 : "---"}
             </span>

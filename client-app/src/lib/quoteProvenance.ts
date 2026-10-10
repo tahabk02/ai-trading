@@ -18,6 +18,7 @@
  */
 
 import type { MarketQuote } from "@/services/api";
+import { getAssetSubType } from "@/constants/symbols";
 
 /** Freshness floor mirrored from the backend (`QUOTE_STALE_AFTER_MS`). */
 export const QUOTE_PROVENANCE_STALE_MS = 15_000;
@@ -89,6 +90,31 @@ function normalizeSource(raw: string | null | undefined): string | null {
   const clean = raw.trim().toLowerCase();
   if (!clean) return null;
   return clean.endsWith(":live") ? clean.slice(0, -":live".length) : clean;
+}
+
+/** True when raw is a genuine Pocket Option print (any PO tier, held included). */
+export function isPocketOptionSource(raw: string | null | undefined): boolean {
+  const source = normalizeSource(raw);
+  return source != null && source.startsWith("pocket_option");
+}
+
+/**
+ * PART 43.4 [469] — TRUE when an OTC instrument is being priced by a NON-Pocket
+ * Option feed (a "market proxy": Frankfurter / ER-API / GitHub / last-known-real
+ * …). For an OTC pair that is PO OFFLINE: the number on screen is NOT a PO
+ * print, so it must not be dimmed-but-traded like one. Real-forex fallbacks (a
+ * weekday Frankfurter ECB rate) and crypto feeds are NOT this state, and a
+ * genuine PO print (PO-held included) is not either. Market-closed is its own
+ * state — say so plainly, never "PO OFFLINE".
+ */
+export function isPoOfflineOtc(
+  symbol: string,
+  quote?: ProvenanceQuote | null,
+): boolean {
+  if (!quote || quote.marketClosed === true) return false;
+  if (getAssetSubType(symbol) !== "otc") return false;
+  const source = normalizeSource(quote.source);
+  return source != null && !source.startsWith("pocket_option");
 }
 
 function secondsText(ms: number | null | undefined): string {

@@ -17,7 +17,7 @@ import {
   selectGetPrediction,
 } from "@/store/useTradingStore";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
-import { QUOTE_PROVENANCE_STALE_MS } from "@/lib/quoteProvenance";
+import { QUOTE_PROVENANCE_STALE_MS, isPoOfflineOtc } from "@/lib/quoteProvenance";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -150,6 +150,11 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
       ? Math.max(1, Math.round(quoteAgeMs / 1000))
       : null;
 
+  // PART 43.4 [469] — an OTC pair priced by a NON-PO feed (PO OFFLINE / market
+  // proxy) must NOT present a tradeable execution price. The rail resolves the
+  // same per-symbol quote map the card uses, so its `source` is authoritative.
+  const poOffline = isPoOfflineOtc(railSymbol, symbolQuote ?? null);
+
   // ════════════════════════════════════════════════════════════════
   // ABSOLUTE CONFIDENCE SANITIZER — KILLS OVERFLOW AT CLIENT BOUNDARY
   const rawConf = Number(signal?.confidence) || 0;
@@ -233,12 +238,21 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
             Execution Price
           </p>
           <p className="text-slate-50 font-mono text-sm sm:text-lg truncate">
-            {priceUnknown ? (
+            {priceUnknown || poOffline ? (
               "--"
             ) : (
               <>${formatPairPrice(price, symbol)}</>
             )}
           </p>
+          {/* PART 43.4 [469] — PO OFFLINE: no tradeable execution price. */}
+          {poOffline ? (
+            <p
+              data-testid="rail-po-offline-marker"
+              className="text-st-caution text-[9px] sm:text-[10px] font-bold uppercase tracking-wider truncate mt-0.5"
+            >
+              PO OFFLINE · MARKET PROXY
+            </p>
+          ) : null}
           {/* PART 41 [399] — same stale marker as the panel: age the quote out
               loud instead of showing PREMIUM styling on a stale-built verdict. */}
           {stale ? (

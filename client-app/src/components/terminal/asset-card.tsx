@@ -2,7 +2,7 @@
 
 import React from "react";
 import { useRouter } from "next/navigation";
-import { TrendingUp, TrendingDown, Activity, ChevronDown, Filter, Clock } from "lucide-react";
+import { TrendingUp, TrendingDown, Activity, ChevronDown, Filter, Clock, WifiOff } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { getPairLabel, getQuoteCurrency } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
@@ -15,7 +15,7 @@ import {
   isBelowConfidenceBar,
 } from "@/lib/minConfidenceFilter";
 import { resolveCardTier, tierClearsSelection } from "@/lib/tierFilter";
-import { quoteProvenance } from "@/lib/quoteProvenance";
+import { quoteProvenance, isPoOfflineOtc } from "@/lib/quoteProvenance";
 import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
 import { TierBadge } from "@/components/shared/tier-badge";
 
@@ -83,6 +83,14 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
   // last close, never a live quote.
   const marketClosed = quote?.marketClosed === true;
   const scoredOnly = !marketClosed && regime.scoredOnly;
+
+  // ── PART 43.4 [469] PO OFFLINE — OTC PRICED BY A MARKET PROXY ──
+  // An OTC pair (24/7, normally fed by Pocket Option) whose quote comes from a
+  // NON-PO feed (Frankfurter / ER-API / GitHub / last-known-real …) is PO
+  // OFFLINE: the number on screen is a proxy, not a live PO print. Dim the
+  // price and say so — a trader must never read a proxy as a tradeable PO tick.
+  // MARKET CLOSED is its own state and takes precedence.
+  const poOffline = isPoOfflineOtc(symbol, quote ?? null);
 
   // ── CONFIDENCE FILTER DEMOTION ──
   // A pair whose measurable confidence is strictly below the operator's bar
@@ -312,12 +320,15 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
       <div className="mt-1 flex items-end justify-between gap-1 min-w-0">
         <div className="min-w-0">
           <span
-            key={interactive ? `${symbol}::${priceText}` : undefined}
+            key={interactive && !poOffline ? `${symbol}::${priceText}` : undefined}
+            data-testid="asset-card-price"
+            data-po-offline={poOffline ? "true" : undefined}
             className={cn(
               "num-fig text-[16px] font-bold leading-tight truncate block",
               interactive ? "text-term-ink" : "text-term-ink-faint",
-              interactive && flashDir === "up" && "price-flash-up",
-              interactive && flashDir === "down" && "price-flash-down",
+              poOffline && "text-term-ink-faint opacity-60",
+              interactive && !poOffline && flashDir === "up" && "price-flash-up",
+              interactive && !poOffline && flashDir === "down" && "price-flash-down",
             )}
           >
             {priceText}
@@ -338,22 +349,38 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
         </div>
       </div>
 
-      {/* ── ROW 2b (PART 38.2) — data provenance / staleness strip ── */}
-      {provenance && !marketClosed && (
+      {/* ── ROW 2b (PART 38.2 / PART 43.4 [469]) — provenance / PO-OFFLINE strip ── */}
+      {!marketClosed && (poOffline || provenance) && (
         <div className="mt-0.5 flex items-center justify-between gap-1 min-w-0">
-          <span
-            data-testid="quote-provenance"
-            title={provenance.title}
-            className={cn(
-              "num-fig text-[8px] leading-none truncate cursor-help",
-              provenance.tone === "held" && "text-bear font-semibold",
-              provenance.tone === "fallback" && "text-gold",
-              provenance.tone === "live" && "text-term-ink-faint",
-              provenance.tone === "unknown" && "text-term-ink-dim",
-            )}
-          >
-            {provenance.label}
-          </span>
+          {poOffline ? (
+            <span
+              data-testid="po-offline-chip"
+              title={`PO feed offline — price is a ${
+                provenance?.label ?? "market proxy"
+              } market proxy, not a live Pocket Option tick`}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[8px] leading-none text-gold bg-gold/10 border border-gold/40 whitespace-nowrap"
+            >
+              <WifiOff size={9} />
+              PO OFFLINE · market proxy
+            </span>
+          ) : (
+            <span />
+          )}
+          {provenance && (
+            <span
+              data-testid="quote-provenance"
+              title={provenance.title}
+              className={cn(
+                "num-fig text-[8px] leading-none truncate cursor-help",
+                provenance.tone === "held" && "text-bear font-semibold",
+                provenance.tone === "fallback" && "text-gold",
+                provenance.tone === "live" && "text-term-ink-faint",
+                provenance.tone === "unknown" && "text-term-ink-dim",
+              )}
+            >
+              {provenance.label}
+            </span>
+          )}
         </div>
       )}
 
