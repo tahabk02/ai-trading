@@ -22,6 +22,11 @@ WORKDIR /app
 
 # Install Python dependencies (Optimized with BuildKit cache)
 COPY requirements.txt .
+# PART 43 [435]: upgrade pip itself first — the 3.11-slim base ships a pip with
+# known PYSEC advisories (fixed in >=26.2.0) and it is never invoked at runtime,
+# but scanners flag it and the floor is cheap to hold.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --upgrade "pip>=26.2.0"
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir -r requirements.txt
 
