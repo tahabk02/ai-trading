@@ -32,15 +32,17 @@ export interface QuoteProvenance {
   tone: ProvenanceTone;
 }
 
-type ProvenanceQuote = Pick<
-  MarketQuote,
-  | "source"
-  | "stale"
-  | "staleLive"
-  | "freshAgeMs"
-  | "ageMs"
-  | "marketClosed"
-  | "lastTickAt"
+type ProvenanceQuote = Partial<
+  Pick<
+    MarketQuote,
+    | "source"
+    | "stale"
+    | "staleLive"
+    | "freshAgeMs"
+    | "ageMs"
+    | "marketClosed"
+    | "lastTickAt"
+  >
 >;
 
 /** Short, honest chip labels per known authoring feed. */
