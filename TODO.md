@@ -703,3 +703,92 @@ were restored on boot; it is a query limit against a 30-minute store.
     evidence, as in PART 38.
   - 26 request failures were all `POST /api/v1/predict` 503 = the pre-existing
     engine-warm issue already noted in PART 38, unrelated to this part.
+
+## DONE - PART 42.1: market-closed is a state, not an error loop [420]-[423]
+
+The weekly forex market (Sun 17:00 -> Fri 17:00 New York) used to look like an
+outage: the spot chain retried a dead provider, the terminal painted PRICE STALE
+/ HELD on REAL cards, and the regime gate scored a last-close as if it were a
+live print. Closed is now a first-class state, derived from the New York clock
+(no hard-coded UTC), applied to REAL pairs only - OTC/crypto are 24/7.
+
+### [420] forex-week schedule helper
+
+- `core-backend/src/lib/marketSchedule.ts` - pure, dependency-free. Uses the
+  runtime `Intl.DateTimeFormat` (`timeZone: "America/New_York"`, `hourCycle:
+  "h23"`) so DST is handled by ICU, not a hand-rolled offset. Exports
+  `FOREX_MARKET_TIME_ZONE`, `FOREX_WEEK_OPEN_WEEKDAY=0`/`OPEN_HOUR=17`,
+  `FOREX_WEEK_CLOSE_WEEKDAY=5`/`CLOSE_HOUR=17`, `newYorkForexParts`,
+  `forexWeekState`, `isForexMarketClosed(atMs = Date.now())`, `isForexMarketOpen`,
+  `nextForexMarketOpenMs`. Provider doc-comment records the corroboration (Yahoo
+  intraday stops at the weekly close; Frankfurter/ECB is TARGET business days;
+  open.er-api is daily).
+- `core-backend/src/lib/__tests__/marketSchedule.test.ts` (7) - Friday close,
+  Saturday, Sunday before/after open, Monday open, DST summer vs winter anchors,
+  `nextForexMarketOpenMs`.
+
+### [421] backend state (backoff + info-once log; never an error)
+
+- `forexData.service.ts` - `ForexSpotResult.marketClosed?`; gate at the top of
+  `getLiveSpotFresh`/`getLiveSpot`; `isRealMarketPair()` (via
+  `symbolRegistry.getAssetSubType`, no import cycle) + `marketClosedSpotResult()`
+  -> when a held print exists returns
+  `{success:true, source:"market_closed_last_close", stale:true, marketClosed:true, ageMs}`
+  else `{success:false, source:"market_closed", price:null, marketClosed:true}`
+  with NO `error`. Never logs.
+- `tickIngestion.service.ts` - `MARKET_CLOSED_POLL_MS = 5*60_000`,
+  `marketClosedUntil`/`marketClosedLatched` maps; gate at the top of
+  `pollLiveTick` -> `enterMarketClosedState()` (5-min backoff + a SINGLE
+  `logger.info`, never `error`) / `exitMarketClosedState()` ("Market reopened");
+  defensive `if (spot.marketClosed) return;` in `pollOnce`; map cleanup in
+  `stopSymbolStream`. Never broadcasts DEGRADED.
+- `marketQuotes.service.ts` - backend `MarketQuote.marketClosed`;
+  `(meta.assetSubType ?? "otc") === "forex" && isForexMarketClosed()`; forces
+  `staleLive: true`.
+
+### [422] client state (honest "MARKET CLOSED", no SCORED-ONLY, no signal)
+
+- `client-app/src/services/api.ts` - `MarketQuote.marketClosed?`.
+- `store/useMarketTerminalStore.ts` - `"marketClosed"` in `QUOTE_RENDER_FIELDS`.
+- `lib/quoteProvenance.ts` - new `"closed"` tone + `marketClosed` branch ->
+  label `MARKET CLOSED`, title cites the last close (HH:MM UTC).
+- `components/terminal/asset-card.tsx` - `marketClosed` suppresses the
+  SCORED-ONLY badge (`scoredOnly = !marketClosed && ...`), forces
+  non-interactive, suppresses the provenance strip and the target slot, and
+  renders ROW 3 band `data-testid="market-closed-badge"` +
+  `"market-closed-last-close"` (Clock + `last close HH:MM UTC`).
+- `components/shared/feed-health.tsx` - `marketClosed` prop; precedence
+  transportDown > marketClosed > stalled > stale > freshness; tone delayed; age
+  text `weekly close - no live signals`; pulse suppressed.
+- `app/(dashboard)/dashboard/pro/page.tsx` - `realMarketClosed` selector (>=1
+  forex quote, all forex closed) -> `FeedHealthBar`.
+- `scripts/part42/tier-a-analyze.mjs` - PART 42 matrix marks market-closed pro
+  cells + blotter rows `N/A` with `market_closed: last close <lastTickAt>`.
+
+### [423] regression test
+
+- `core-backend/src/lib/__tests__/marketSchedule.test.ts` (7) and
+  `forexData.marketClosed.test.ts` (5) - weekend -> closed, Monday open -> normal
+  cascade, OTC weekend -> unaffected, closed never fabricates a live print.
+- `forexData.yahooFallback.test.ts` - now pins `Date.now` to a weekday open
+  instant (Date.now spy, NOT fake timers, so the cascade's real setTimeout
+  throttle still runs) - makes the pre-existing [211] suite day-independent.
+- `client-app/.../quoteProvenance.test.ts` +1; `asset-card.market-closed.dom.test.tsx`
+  (3) - MARKET CLOSED + last close, no target/SCORED-ONLY/PRO, and the flag is
+  what flips the state; `feed-health.dom.test.tsx` +1 (MARKET CLOSED outranks
+  PRICE STALE).
+
+### Verification run for PART 42.1
+
+- core-backend: `npx tsc --noEmit` OK; `npx vitest run` **36 files / 323 tests passed**.
+- client-app: `npx tsc --noEmit` OK; targeted `npx vitest run` for the touched +
+  related files: `quoteProvenance` (8), `feed-health.dom` (9),
+  `asset-card.market-closed.dom` (3), `asset-card.quote-provenance.dom` (5),
+  `asset-card.live-verdict-badge.dom` (5), `marketTerminalRealForex` (15) - all passed.
+- ai-engine: untouched this part.
+
+### Out of scope / do NOT
+
+- No new timezone dependency (built-in `Intl` only).
+- OTC/crypto paths are never gated; only `assetSubType === "forex"`.
+- No hard-coded UTC close hour - the schedule is always the New York clock.

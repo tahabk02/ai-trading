@@ -51,6 +51,11 @@ describe("PART 28.1 [211]: real-pair Yahoo intraday → ECB fallback engages aut
   let openErSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // PART 42.1 — real pairs are gated by the weekly forex schedule, so pin the
+    // clock to a weekday open instant to make this suite day-independent. A
+    // Date.now spy (not fake timers) keeps the cascade's real setTimeout throttle
+    // working.
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-12T12:00:00.000Z"));
     yahooSpy = vi.fn(async (): Promise<ForexSpotResult> => YAHOO_OK);
     frankSpy = vi.fn(async (): Promise<ForexSpotResult> => FRANK_OK);
     openErSpy = vi.fn(async (): Promise<ForexSpotResult> => OPEN_ER_OK);
