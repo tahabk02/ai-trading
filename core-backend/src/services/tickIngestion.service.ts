@@ -33,6 +33,7 @@ import {
   classifyFeedLog,
 } from "../lib/feedResilience";
 import { feedMetrics } from "../lib/feedMetrics";
+import { isForexMarketClosed } from "../lib/marketSchedule";
 
 export interface LiveMarketTick {
   symbol: string;
@@ -104,6 +105,19 @@ export class LiveTickIngestionService {
   private inFlightPolls: Set<string> = new Set();
   /** Last time a held (stale) real print was pended into the ring, per symbol. */
   private heldStalePendedAt: Map<string, number> = new Map();
+
+  /**
+   * PART 42.1 [421] — REAL-pair weekly-close backoff. While the forex week is
+   * closed (Fri ~17:00 → Sun ~17:00 New York) the HTTP spot cascade is not
+   * retried at all; the 1 Hz loop only re-checks a cheap schedule and wakes a
+   * probe at most this often. Closure is a STATE, so it is logged once at INFO
+   * (never warn/error) and OTC/crypto never enter this set.
+   */
+  private readonly MARKET_CLOSED_POLL_MS = 5 * 60_000;
+  /** Per-symbol instant before which a closed-market re-probe is skipped. */
+  private marketClosedUntil: Map<string, number> = new Map();
+  /** Per-symbol INFO-log latch so closure is reported exactly once per window. */
+  private marketClosedLatched: Set<string> = new Set();
 
   /**
    * Per-symbol last assigned tick timestamp (epoch ms), floored to the 1-second
@@ -245,6 +259,8 @@ export class LiveTickIngestionService {
       this.nextAllowedPollAt.delete(norm);
       this.streamDegraded.delete(norm);
       this.heldStalePendedAt.delete(norm);
+      this.marketClosedUntil.delete(norm);
+      this.marketClosedLatched.delete(norm);
 
       logger.info("[TickIngestion] Stopped live tick stream", { symbol: norm });
     }
@@ -289,6 +305,21 @@ export class LiveTickIngestionService {
    * candle buffer from the authoritative PO tape.
    */
   private pollLiveTick(symbol: string): void {
+    // ── PART 42.1 [421] MARKET-CLOSED STATE (REAL pairs only) ──
+    // The forex week ends Fri ~17:00 NY and reopens Sun ~17:00 NY. There is no
+    // live print to fetch while closed, so the HTTP cascade is NEVER retried:
+    // the 1 Hz loop only re-checks the O(1) schedule and, once per 5 min,
+    // wakes to confirm the market is still closed. Closure is logged once at
+    // INFO. OTC/crypto are 24/7 and fall straight through this branch.
+    if (
+      symbolRegistry.getAssetSubType(symbol) === "forex" &&
+      isForexMarketClosed()
+    ) {
+      this.enterMarketClosedState(symbol);
+      return;
+    }
+    this.exitMarketClosedState(symbol);
+
     // Never stack probes for one symbol: a slow cascade must not be joined by a
     // second overlapping poll from the 1s interval or the age watchdog.
     if (this.inFlightPolls.has(symbol)) return;
@@ -317,6 +348,43 @@ export class LiveTickIngestionService {
     void this.pollOnce(symbol);
   }
 
+  /**
+   * PART 42.1 [421] — enter the closed-market backoff for a REAL symbol. The
+   * cascade is paused (not failed): the next probe is deferred ~5 min and the
+   * closure is logged ONCE at info. Never broadcasts DEGRADED — a closed market
+   * is not a feed outage.
+   */
+  private enterMarketClosedState(symbol: string): void {
+    const now = Date.now();
+    const until = this.marketClosedUntil.get(symbol) ?? 0;
+    if (now < until) return; // still inside the ~5 min backoff window
+    this.marketClosedUntil.set(symbol, now + this.MARKET_CLOSED_POLL_MS);
+    if (!this.marketClosedLatched.has(symbol)) {
+      this.marketClosedLatched.add(symbol);
+      logger.info("[TickIngestion] Market closed — pausing real-pair spot retries", {
+        symbol,
+        marketClosed: true,
+        reopen: "Sun 17:00 America/New_York",
+        nextProbeInMs: this.MARKET_CLOSED_POLL_MS,
+      });
+    }
+  }
+
+  /**
+   * PART 42.1 [421] — clear the closed-market latch when the market reopens so
+   * the feed resumes immediately (zero-timeout recovery) and the next closure
+   * logs its INFO line again.
+   */
+  private exitMarketClosedState(symbol: string): void {
+    const hadLatch = this.marketClosedLatched.delete(symbol);
+    const hadBackoff = this.marketClosedUntil.delete(symbol);
+    if (hadLatch || hadBackoff) {
+      logger.info("[TickIngestion] Market reopened — resuming real-pair spot retries", {
+        symbol,
+      });
+    }
+  }
+
   private async pollOnce(symbol: string): Promise<void> {
     this.inFlightPolls.add(symbol);
     try {
@@ -333,6 +401,13 @@ export class LiveTickIngestionService {
 
       const spot: ForexSpotResult =
         await forexDataService.getLiveSpotFresh(symbol);
+
+      // PART 42.1 [421] — market-closed is a state, not a feed failure: never
+      // count it as an error, never broadcast DEGRADED. The last close is
+      // already in the ring; pollLiveTick's schedule guard owns the backoff.
+      if (spot.marketClosed === true) {
+        return;
+      }
 
       if (!spot.success || spot.price == null || spot.price <= 0) {
         this.handleFeedFailure(

@@ -13,6 +13,7 @@
 
 import { symbolRegistry } from "./symbolRegistry.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { isForexMarketClosed } from "../lib/marketSchedule";
 import { logger } from "../utils/logger";
 
 export interface MarketQuote {
@@ -38,6 +39,13 @@ export interface MarketQuote {
   freshAgeMs: number | null;
   /** Terminal-facing "this price is NOT live" flag (>15s without a fresh tick). */
   staleLive: boolean;
+  /**
+   * PART 42.1 [421]/[422] — true when this REAL pair's weekly forex market is
+   * closed (Fri ~17:00 → Sun ~17:00 New York). The price is the LAST CLOSE,
+   * never live; the card renders "MARKET CLOSED · last close". OTC/crypto are
+   * 24/7 and always false.
+   */
+  marketClosed: boolean;
 }
 
 /**
@@ -64,6 +72,11 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
     const out: MarketQuote[] = [];
     for (const q of quotes.slice(0, MAX_QUOTES)) {
       const meta = entries.find((e) => e.symbol === q.symbol);
+      // PART 42.1 — a REAL pair is market-closed on the weekly boundary. While
+      // closed the last close is NEVER live: force staleLive so no downstream
+      // live-freshness gate can treat the carried print as a current quote.
+      const marketClosed =
+        (meta?.assetSubType ?? "otc") === "forex" && isForexMarketClosed();
       out.push({
         symbol: q.symbol,
         name: meta?.name ?? q.symbol,
@@ -82,7 +95,8 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
         source: q.source,
         stale: q.stale,
         freshAgeMs: q.freshAgeMs,
-        staleLive: q.staleLive,
+        staleLive: marketClosed ? true : q.staleLive,
+        marketClosed,
       });
     }
     return out;

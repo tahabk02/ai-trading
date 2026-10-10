@@ -107,10 +107,18 @@ export const executeTrade = async (req: Request, res: Response) => {
     const dynamicPayout = entry?.payout ?? 92;
 
     // ── Real-time entry price from live OTC spot (no zeros) ──
+    // A HELD print (last known good, served only while every live source is
+    // exhausted) is refused here: an entry price must be a genuinely current
+    // quote, never a carried-over one.
     let entryPrice = 0;
     const spot = await forexDataService.getLiveSpot(cleanSymbol);
-    if (spot.success && spot.price != null) {
+    if (spot.success && spot.price != null && spot.stale !== true) {
       entryPrice = spot.price;
+    } else if (spot.stale === true) {
+      logger.warn("[trades.controller] Refusing held price for trade entry", {
+        symbol: cleanSymbol,
+        priceAgeMs: spot.ageMs ?? null,
+      });
     }
 
     tradeCounter++;

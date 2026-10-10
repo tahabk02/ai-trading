@@ -1,6 +1,7 @@
 import { Server as SocketServer } from "socket.io";
 import { PrismaClient } from "@prisma/client";
 import { EventTypes } from "./eventTypes";
+import { startDurableSignalConsumer } from "./signalStream";
 import { WebSocketService } from "../services/websocket.service";
 import { NotificationService } from "../services/notification.service";
 import { LocalEventBus } from "./local-event-bus";
@@ -62,6 +63,31 @@ export class RedisSubscriber {
       this.bus.warnOnce();
       this.attachLocalBusListeners();
     }
+
+    // ── DURABLE CONSUMER (Streams) ──
+    // Started regardless of whether the Pub/Sub subscription above succeeded:
+    // the two transports are independent halves of the same guarantee, and a
+    // working stream still recovers signals that the lossy Pub/Sub half dropped.
+    // Failure here is contained inside startDurableSignalConsumer — the hot
+    // socket path must never depend on the durable log being available.
+    await startDurableSignalConsumer(async (raw, entryId) => {
+      const payload = this.extractSignalPayload(raw);
+      if (!payload) {
+        logger.warn("[SignalStream] dropped unparseable durable entry");
+        return;
+      }
+      // At-least-once: entryId is the Redis stream entry id, stable across a
+      // replay. persistSignal dedups on it so a crash between "persisted" and
+      // "XACK" cannot create a duplicate row.
+      const { signal, created } = await this.persistSignal(payload, entryId);
+      logger.info("[SignalStream] durable signal persisted", {
+        symbol: payload.symbol,
+        signalType: payload.signal_type,
+        entryId,
+        created,
+        signalId: signal.id,
+      });
+    });
   }
 
   /** Graceful shutdown */
@@ -175,6 +201,61 @@ export class RedisSubscriber {
   //  Signal processing pipeline
   // ----------------------------------------------------------
 
+  /**
+   * The single durable write for a signal, shared by BOTH transports.
+   *
+   * Keeping one writer is what makes at-least-once delivery safe: the stream
+   * consumer and the Pub/Sub handler cannot drift into persisting the same
+   * fields differently, and a replayed entry produces an identical row.
+   *
+   * `sourceEventId` is the idempotency key. The Streams consumer is
+   * AT LEAST ONCE, so an entry can be delivered twice (crash between the
+   * database write and XACK, or an XAUTOCLAIM reclaim). Writing blind would
+   * duplicate one real signal into two rows and corrupt the history the
+   * accuracy tracker reads. When the key is already present we return the
+   * EXISTING row with `created: false` instead.
+   *
+   * Race-safe: two concurrent deliveries of the same entry can both miss the
+   * pre-check, so the unique index is the real guarantee. P2002 is caught and
+   * the existing row fetched.
+   */
+  private async persistSignal(
+    payload: SignalPayload,
+    sourceEventId?: string,
+  ): Promise<{ signal: Signal; created: boolean }> {
+    const data = {
+      symbol: payload.symbol,
+      signalType: payload.signal_type,
+      price: payload.price,
+      confidence: payload.confidence,
+      indicators: JSON.stringify(payload.indicators ?? {}),
+      status: payload.status ?? "ACTIVE",
+      sourceEventId: sourceEventId ?? null,
+    };
+
+    if (sourceEventId) {
+      const existing = await this.prisma.signal.findUnique({
+        where: { sourceEventId },
+      });
+      if (existing) return { signal: existing, created: false };
+    }
+
+    try {
+      const signal = await this.prisma.signal.create({ data });
+      return { signal, created: true };
+    } catch (err) {
+      // P2002 = unique constraint violation: a concurrent delivery of the same
+      // stream entry won the race. That is the dedup working, not an error.
+      if ((err as { code?: string }).code === "P2002" && sourceEventId) {
+        const existing = await this.prisma.signal.findUnique({
+          where: { sourceEventId },
+        });
+        if (existing) return { signal: existing, created: false };
+      }
+      throw err;
+    }
+  }
+
   private async handleSignalGenerated(
     raw: Record<string, unknown>,
   ): Promise<void> {
@@ -191,16 +272,10 @@ export class RedisSubscriber {
     });
 
     try {
-      const saved = await this.prisma.signal.create({
-        data: {
-          symbol: payload.symbol,
-          signalType: payload.signal_type,
-          price: payload.price,
-          confidence: payload.confidence,
-          indicators: JSON.stringify(payload.indicators ?? {}),
-          status: payload.status ?? "ACTIVE",
-        },
-      });
+      // No sourceEventId: Pub/Sub carries no stable id, so this write is not
+      // deduplicated. That is correct -- Pub/Sub is the lossy hot half, and the
+      // stream is what guarantees no signal is lost or double-counted.
+      const { signal: saved } = await this.persistSignal(payload);
 
       const wsSignal = this.toWebSocketSignal(payload, saved);
 
@@ -209,8 +284,13 @@ export class RedisSubscriber {
       // genuinely fresh. A stale tape must never present a BUY/SELL as live —
       // the user is shown "Connecting / Waiting for Real-time Tick" instead.
       const norm = payload.symbol.trim().toUpperCase();
+      // A held (stale) print keeps the ring contiguous but is never a live tape.
+      const latest = realtimeTickBuffer.getLatestEntry(norm);
       const ageMs = realtimeTickBuffer.getLatestAgeMs(norm);
-      const tapeFresh = ageMs != null && ageMs <= LIVE_SIGNAL_MAX_AGE_MS;
+      const tapeFresh =
+        ageMs != null &&
+        ageMs <= LIVE_SIGNAL_MAX_AGE_MS &&
+        latest?.stale !== true;
       if (!tapeFresh) {
         logger.warn(
           "[RedisSubscriber] Dropping LIVE broadcast for stale tape (persisting only)",
@@ -218,6 +298,7 @@ export class RedisSubscriber {
             symbol: norm,
             signal: payload.signal_type,
             tickAgeMs: ageMs,
+            tapeHeld: latest?.stale === true,
             liveToleranceMs: LIVE_SIGNAL_MAX_AGE_MS,
           },
         );

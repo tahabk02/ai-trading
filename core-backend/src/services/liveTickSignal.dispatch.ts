@@ -30,6 +30,7 @@ import { clampMinTierToEngineSet } from "../lib/signalTiers";
 import type { SignalTier } from "../lib/signalTiers";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { publishDurableSignal } from "../messaging/signalStream";
+import { isAlertEligible } from "../lib/alertGate";
 
 const buildAiEngineTickSignalUrl = (baseUrl: string): string => {
   const cleaned = baseUrl.replace(/\/+$/, "");
@@ -489,60 +490,71 @@ public clearSelectedHorizonMinutes(symbol: string): void {
         : this.getSelectedHorizonMinutes(symbol);
 
     const payload = {
-      symbol,
-      signalType: direction,
-      signal: direction,
-      confidence,
-      confidence_score: confidence,
-      current_price: Number.isFinite(price) ? price : undefined,
-      target_price: Number.isFinite(targetPrice) ? targetPrice : undefined,
-      take_profit: Number.isFinite(targetPrice) ? targetPrice : undefined,
-      timeframe: "1m",
-      market_waiting: waiting,
-      waiting_reason: data?.waiting_reason ?? null,
-      waiting_detail: data?.waiting_detail ?? null,
-      book_confluence:
-        Number(data?.book_confluence) > 0 ? Number(data.book_confluence) : null,
-      dataSource: "live_tick_quant",
-      // Honest execution surface (PART 38.1 [377]) — forwarded verbatim so the
-      // card's `LiveVerdict` contract (tier / tier_label / scored_only /
-      // dispatchable / executable) stays true across the socket hop instead of
-      // being declared on the type and then silently dropped by the builder.
-      tier,
-      tier_label: typeof data?.tier_label === "string" ? data.tier_label : null,
-      status: typeof data?.status === "string" ? data.status : null,
-      dispatchable: data?.dispatchable === true,
-      scored_only: data?.scored_only === true,
-      executable: data?.executable === true,
-      regime_gate:
-        typeof data?.regime_gate === "string" ? data.regime_gate : null,
-      suppressed_reason:
-        typeof data?.suppressed_reason === "string"
-          ? data.suppressed_reason
-          : null,
-      ...(horizonMinutes !== null ? { horizon_minutes: horizonMinutes } : {}),
-      ...(data?.aiEngine ? { aiEngine: data.aiEngine } : {}),
-      timestamp,
-    };
+        symbol,
+        signalType: direction,
+        signal: direction,
+        confidence,
+        confidence_score: confidence,
+        current_price: Number.isFinite(price) ? price : undefined,
+        target_price: Number.isFinite(targetPrice) ? targetPrice : undefined,
+        take_profit: Number.isFinite(targetPrice) ? targetPrice : undefined,
+        timeframe: "1m",
+        market_waiting: waiting,
+        waiting_reason: data?.waiting_reason ?? null,
+        waiting_detail: data?.waiting_detail ?? null,
+        book_confluence:
+          Number(data?.book_confluence) > 0 ? Number(data.book_confluence) : null,
+        dataSource: "live_tick_quant",
+        // Honest execution surface (PART 38.1 [377]) — forwarded verbatim so the
+        // card's `LiveVerdict` contract (tier / tier_label / scored_only /
+        // dispatchable / executable) stays true across the socket hop instead of
+        // being declared on the type and then silently dropped by the builder.
+        tier,
+        tier_label: typeof data?.tier_label === "string" ? data.tier_label : null,
+        status: typeof data?.status === "string" ? data.status : null,
+        dispatchable: data?.dispatchable === true,
+        scored_only: data?.scored_only === true,
+        executable: data?.executable === true,
+        regime_gate:
+          typeof data?.regime_gate === "string" ? data.regime_gate : null,
+        suppressed_reason:
+          typeof data?.suppressed_reason === "string"
+            ? data.suppressed_reason
+            : null,
+        ...(horizonMinutes !== null ? { horizon_minutes: horizonMinutes } : {}),
+        ...(data?.aiEngine ? { aiEngine: data.aiEngine } : {}),
+        timestamp,
+      };
 
-    this.lastBroadcast.set(symbol, {
-      direction,
-      confidence,
-      waiting,
-      tier,
-    });
+      this.lastBroadcast.set(symbol, {
+        direction,
+        confidence,
+        waiting,
+        tier,
+      });
 
-    websocketService.broadcastLiveQuantSignal(payload);
+      websocketService.broadcastLiveQuantSignal(payload);
 
-    // ── DURABLE HALF ──
-    // The socket emit above is the HOT path: sub-millisecond, best-effort, and
-    // lossy by design (if nobody is connected the operator was not watching).
-    // The stream append is the DURABLE path: at-least-once, so a crash between
-    // here and the database write still leaves a recoverable record. It is
-    // fire-and-forget and can never slow down or fail the broadcast above.
-    void publishDurableSignal(payload as Record<string, unknown>);
+      // ── DURABLE HALF ──
+      // The socket emit above is the HOT path: sub-millisecond, best-effort, and
+      // lossy by design (if nobody is connected the operator was not watching).
+      // The stream append is the DURABLE path: at-least-once, so a crash between
+      // here and the database write still leaves a recoverable record. It is
+      // fire-and-forget and can never slow down or fail the broadcast above.
+      void publishDurableSignal(payload as Record<string, unknown>);
 
-    if (direction && confidence >= HIGH_CONFIDENCE_THRESHOLD) {
+    if (
+      direction &&
+      confidence >= HIGH_CONFIDENCE_THRESHOLD &&
+      // PART 41 [403] — a high-confidence score is NOT enough. A 98% agreement
+      // on a gate that is still `pending_high_precision` (or a non-executable
+      // verdict) is silent — no bell, no toast, no sound.
+      isAlertEligible({
+        executable: data?.executable,
+        tier,
+        regime_gate: data?.regime_gate,
+      })
+    ) {
       websocketService.broadcastHighConfidenceSignal({
         symbol,
         signalType: direction as "BUY" | "SELL",
@@ -551,6 +563,10 @@ public clearSelectedHorizonMinutes(symbol: string): void {
         targetPrice: Number.isFinite(targetPrice) ? targetPrice : 0,
         timeframe: "1m",
         timestamp,
+        executable: data?.executable === true,
+        tier,
+        regime_gate:
+          typeof data?.regime_gate === "string" ? data.regime_gate : null,
       });
     }
   }

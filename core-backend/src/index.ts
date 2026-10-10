@@ -36,6 +36,7 @@ import { errorMiddleware } from "./middlewares/error.middleware";
 import apiRouter from "./routes/index";
 import { rootHealthRouter } from "./routes/health.routes";
 import { historyCollector } from "./services/historyCollector.service";
+import { warmUpModels } from "./controllers/signal.controller";
 import {
   allowedOrigins,
   corsOriginResolver,
@@ -719,6 +720,16 @@ httpServer.listen(PORT, () => {
         count: entries.length,
         symbols: entries.map((p) => p.symbol),
       });
+
+      // ── PART 41 [401c] — MODEL PRE-WARM ──
+      // Fire one silent, bounded-concurrency evaluation per live-tick symbol so
+      // the FIRST client batch is a warm cache hit instead of a cold 8–24s
+      // model train. `warmUpModels` is silent (never broadcasts/rings the [403]
+      // alert gate), never throws, and is observational — a warmup failure must
+      // not block boot. Opt out with PREDICT_WARM_UP_ON_BOOT=0.
+      if (process.env.PREDICT_WARM_UP_ON_BOOT !== "0") {
+        void warmUpModels(entries.map((p) => p.symbol));
+      }
     })
     .catch((err) => {
       logger.error("[Startup] Failed to auto-start live tick streams", {

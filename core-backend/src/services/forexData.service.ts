@@ -31,6 +31,8 @@ import {
   normalizeSeries,
   openBucket,
 } from "../lib/ohlcNormalizer";
+import { isForexMarketClosed } from "../lib/marketSchedule";
+import { symbolRegistry } from "./symbolRegistry.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TYPES
@@ -64,6 +66,13 @@ export interface ForexSpotResult {
   stale?: boolean;
   /** Age (ms) of the underlying observation when `stale` is true. */
   ageMs?: number;
+  /**
+   * PART 42.1 [421] — true when this REAL pair is in its weekly closed window
+   * (Fri ~17:00 → Sun ~17:00 New York). The price, when present, is the LAST
+   * CLOSE, never a live quote; `stale` is always set alongside it. OTC/crypto
+   * are 24/7 and never carry this flag.
+   */
+  marketClosed?: boolean;
 }
 
 export interface GitHubForexTick {
@@ -471,6 +480,44 @@ class ForexDataService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
+   * PART 42.1 [420] — is `norm` a REAL (non-OTC) forex instrument? The
+   * authoritative classifier is the symbol registry (`assetSubType "forex"`);
+   * the 32 OTC majors classify as "otc" and crypto as "crypto", so neither is
+   * ever gated by the forex-week schedule.
+   */
+  private isRealMarketPair(norm: string): boolean {
+    return symbolRegistry.getAssetSubType(norm) === "forex";
+  }
+
+  /**
+   * PART 42.1 [421] — the honest result for a REAL pair while the market is
+   * closed. Serves the LAST CLOSE (last genuinely observed print) stamped
+   * `stale` + `marketClosed`; it is NEVER a live quote. When no print was
+   * observed this session it returns an honest empty (no error field — being
+   * closed is a state, not a failure). Never logs: closure is reported once at
+   * info by the tick-ingestion loop that owns the poll cadence.
+   */
+  private marketClosedSpotResult(norm: string): ForexSpotResult {
+    const held = this.lastSpotCache.get(norm);
+    if (held && Number.isFinite(held.price) && held.price > 0) {
+      return {
+        success: true,
+        price: held.price,
+        source: "market_closed_last_close",
+        stale: true,
+        ageMs: Math.max(0, Date.now() - held.ts),
+        marketClosed: true,
+      };
+    }
+    return {
+      success: false,
+      price: null,
+      source: "market_closed",
+      marketClosed: true,
+    };
+  }
+
+  /**
    * Get a FRESH live spot rate. Always fetches from the network; does NOT
    * return the cache. Used by the tick ingestion engine's 1-second poll loop.
    *
@@ -482,6 +529,17 @@ class ForexDataService {
    */
   async getLiveSpotFresh(symbol: string): Promise<ForexSpotResult> {
     const norm = (symbol || "").trim().toUpperCase();
+
+    // ── PART 42.1 [421] MARKET-CLOSED IS A STATE, NOT AN ERROR LOOP ──
+    // REAL (assetSubType "forex") pairs stop ticking when the weekly forex
+    // market closes (Fri ~17:00 NY) and resume Sunday ~17:00 NY. While closed
+    // there is nothing to fetch, so the whole cascade below is skipped: no
+    // HTTP retries, no error log. We serve the LAST CLOSE, honestly stamped
+    // `stale` + `marketClosed` so no live-freshness gate can treat it as live.
+    // OTC/crypto never reach this branch — they are 24/7 broker instruments.
+    if (this.isRealMarketPair(norm) && isForexMarketClosed()) {
+      return this.marketClosedSpotResult(norm);
+    }
 
     // ── PRIORITY 0: Pocket Option SSOT (when present & fresh) ──
     // The Pocket Option bridge delivers the closest real-time match to PO's own
@@ -702,6 +760,12 @@ class ForexDataService {
    */
   async getLiveSpot(symbol: string): Promise<ForexSpotResult> {
     const norm = (symbol || "").trim().toUpperCase();
+
+    // PART 42.1 [421] — the closed state applies to the cached variant too: a
+    // cached print must not be served as a live quote outside the forex week.
+    if (this.isRealMarketPair(norm) && isForexMarketClosed()) {
+      return this.marketClosedSpotResult(norm);
+    }
 
     // Pocket Option SSOT first — same parity guarantee as getLiveSpotFresh so
     // controllers (e.g. /predict spot fallback) read the same authoritative

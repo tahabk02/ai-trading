@@ -279,6 +279,10 @@ export const getOrderBook = async (req: Request, res: Response) => {
       lastPrice: Number(livePrice.toFixed(6)),
       level1: true,
       hasDepth: false,
+      // Honest provenance: a held print is served (L1 continuity) but is
+      // explicitly flagged so the client can render it as stale, never live.
+      held: spotResult.stale === true,
+      heldAgeMs: spotResult.stale === true ? (spotResult.ageMs ?? null) : null,
       depthLabel: "L1 quote — no exchange depth (Pocket Option tape)",
       quote: spec?.quote ?? "USD",
       timestamp: new Date().toISOString(),

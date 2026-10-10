@@ -17,6 +17,12 @@ model Signal {
   confidence Float
   status     String   @default("ACTIVE") // ACTIVE, EXECUTED, CANCELLED
   indicators String   // JSON stored as string for SQLite compatibility
+  // Durable-transport idempotency key. The Redis Streams entry id (e.g.
+  // "1721234567890-0") is stable and unique per appended signal, so a replay
+  // after a crash between "persisted" and "XACK" collides here instead of
+  // writing a duplicate row. NULL for signals that arrived over Pub/Sub only,
+  // which keeps the unique index from collapsing unrelated rows.
+  sourceEventId String?  @unique
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 

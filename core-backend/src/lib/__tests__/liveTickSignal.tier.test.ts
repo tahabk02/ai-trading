@@ -31,6 +31,7 @@ vi.mock("../../config/secrets", () => ({
   },
 }));
 
+vi.mock("../../utils/aiEngineHttp", () => ({ AI_ENGINE_HTTP_AGENT: {} }));
 
 vi.mock("../../services/websocket.service", () => ({
   websocketService: {

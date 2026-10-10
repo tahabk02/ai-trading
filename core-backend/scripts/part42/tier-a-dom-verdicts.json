@@ -1,0 +1,15 @@
+{
+  "cells": 264,
+  "pro": 220,
+  "blotter": 44,
+  "counts": {
+    "FAIL": 0,
+    "OK_real": 0,
+    "OK_withheld": 264,
+    "N_A": 0
+  },
+  "failList": [],
+  "drifted": 0,
+  "drawnDomCount": 0,
+  "drawnDom": []
+}

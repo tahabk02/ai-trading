@@ -604,6 +604,17 @@ export class SymbolRegistryService {
         .trim()
         .toUpperCase();
       if (!symbol || next.has(symbol)) continue;
+      // PART 28.3 — STRICT SHAPE GUARD: only genuine base/quote pairs (or the
+      // compact BTCUSD/ETHUSD crypto names) may enter this forex registry.
+      // Pocket Option's live asset dump also carries non-forex junk (AAPL,
+      // TSLA, #FB, indices, penny pairs) which previously polluted /symbols
+      // and the boot-stream seed — a registry that claims "strict 44 real
+      // assets" must never expose them.
+      const compact = symbol.replace(/\//g, "");
+      const looksLikeTradablePair =
+        /^[A-Z0-9]{2,5}\/[A-Z]{2,5}$/.test(symbol) ||
+        ["BTCUSD", "BTCUSDT", "ETHUSD", "ETHUSDT"].includes(compact);
+      if (!looksLikeTradablePair) continue;
       const subtype = String(
         item.assetSubType || item.type || "forex",
       ) as AssetSubType;

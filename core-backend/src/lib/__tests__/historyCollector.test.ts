@@ -46,6 +46,7 @@ import {
   HISTORY_WINDOW_MINUTES,
   HISTORY_BUCKET_MS,
 } from "../../services/historyCollector.service";
+import { logger } from "../../utils/logger";
 
 const MIN = 60_000;
 
@@ -115,6 +116,11 @@ describe("historyCollector.collectForSymbol", () => {
     mocks.upsert.mockReset();
     mocks.createMany.mockReset();
     mocks.tickFindMany.mockReset();
+    // A SUCCESSFUL Prisma upsert always resolves to the row. Without this the
+    // mock resolves undefined, which the collector cannot distinguish from a
+    // degraded (unreachable-DB) write — so a bar that really was persisted
+    // would be reported as 0. Faithful default: resolve the row.
+    mocks.upsert.mockResolvedValue({ id: "x" });
     mocks.tickFindMany.mockResolvedValue([]);
     mocks.createMany.mockResolvedValue({ count: 3 });
   });
@@ -282,5 +288,126 @@ describe("historyCollector.upsertBars (Alpha.5 Pro, Part 6.3 ingest)", () => {
     expect(await historyCollector.upsertBars("EURUSD", "1m", [])).toBe(0);
     expect(await historyCollector.upsertBars("", "1m", [{ bucketStartMs: 1, open: 1, high: 1, low: 1, close: 1 }])).toBe(0);
     expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * DATABASE OUTAGE RESILIENCE.
+ *
+ * The collector is a background layer, so an unreachable Postgres must degrade
+ * to HONEST EMPTY history instead of throwing. These tests pin both halves of
+ * that contract:
+ *
+ *   - connectivity failures (P1001/P1000/P2024/...) are absorbed, and
+ *   - everything else is RE-THROWN, so a real query/schema bug can never hide
+ *     behind a silently empty chart.
+ */
+describe("historyCollector — database outage resilience", () => {
+  const P1001 = Object.assign(new Error("Can't reach database server"), { code: "P1001" });
+  const P1000 = Object.assign(new Error("Authentication failed"), { code: "P1000" });
+
+  beforeEach(() => {
+    mocks.getRecentWindow.mockReset();
+    mocks.findMany.mockReset();
+    mocks.upsert.mockReset();
+    mocks.count.mockReset();
+    mocks.upsert.mockResolvedValue({ id: "x" });
+    mocks.findMany.mockResolvedValue([]);
+    mocks.count.mockResolvedValue(0);
+  });
+
+  it("collectForSymbol reports 0 bars instead of throwing when Postgres is unreachable", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([{ price: 1.0, tsMs: now - 5 * MIN }]);
+    mocks.upsert.mockRejectedValue(P1001);
+
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+
+    expect(res.bars).toBe(0); // NOT 1 — nothing was actually persisted
+    expect(res.barsFound).toBe(1);
+  });
+
+  it("collectForSymbol skips tick inserts when the dedupe read fails (no blind writes)", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([{ price: 1.0, tsMs: now - 5 * MIN }]);
+    mocks.tickFindMany.mockReset();
+    mocks.tickFindMany.mockRejectedValue(P1001);
+    mocks.createMany.mockReset();
+
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+
+    // We cannot know what is already persisted, so inserting blind would risk
+    // duplicate (symbol, tsMs) rows. The pass must skip instead.
+    expect(mocks.createMany).not.toHaveBeenCalled();
+    expect(res.ticksInserted).toBe(0);
+  });
+
+  it("getAssetHistoryBars returns [] rather than rejecting (routes get 200, not 500)", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await expect(historyCollector.getAssetHistoryBars("EURUSD", 30)).resolves.toEqual([]);
+  });
+
+  it("getRecentBars returns [] rather than rejecting (boot backfill stays safe)", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await expect(historyCollector.getRecentBars("EURUSD", 100)).resolves.toEqual([]);
+  });
+
+  it("getHistoryHealth degrades to an honest empty report, never throws", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    const health = await historyCollector.getHistoryHealth("EURUSD");
+
+    expect(health.bars_30m).toBe(0);
+    expect(health.window_complete).toBe(false);
+  });
+
+  it("RE-THROWS P1000 auth failure — credential drift must never look like empty data", async () => {
+    // This is the bug that motivated removing P1000 from the absorbed set: a
+    // stale password served silently EMPTY charts while Postgres logged FATAL
+    // auth failures, indistinguishable from "no ticks yet".
+    mocks.findMany.mockRejectedValue(P1000);
+    await expect(historyCollector.getAssetHistoryBars("EURUSD", 30)).rejects.toMatchObject({
+      code: "P1000",
+    });
+  });
+
+  it("RE-THROWS P1003 missing database", async () => {
+    const noDb = Object.assign(new Error('database "trading_radar" does not exist'), {
+      code: "P1003",
+    });
+    mocks.findMany.mockRejectedValue(noDb);
+    await expect(historyCollector.getRecentBars("EURUSD", 50)).rejects.toMatchObject({
+      code: "P1003",
+    });
+  });
+
+  it("RE-THROWS non-connectivity errors so real bugs stay visible", async () => {
+    const realBug = Object.assign(new Error("column does not exist"), { code: "P2022" });
+    mocks.findMany.mockRejectedValue(realBug);
+
+    await expect(historyCollector.getAssetHistoryBars("EURUSD", 30)).rejects.toThrow(
+      /column does not exist/,
+    );
+  });
+
+  it("logs ONE error per outage, not one per symbol (44 symbols would be 44 traces)", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await historyCollector.getAssetHistoryBars("A", 30);
+    await historyCollector.getAssetHistoryBars("B", 30);
+    await historyCollector.getAssetHistoryBars("C", 30);
+
+    expect((logger.error as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it("recovers: a success clears the outage counter", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await historyCollector.getAssetHistoryBars("A", 30);
+    expect(historyCollector.dbStatus().reachable).toBe(false);
+    expect(historyCollector.dbStatus().consecutiveFailures).toBeGreaterThan(0);
+
+    mocks.findMany.mockResolvedValue([]);
+    await historyCollector.getAssetHistoryBars("A", 30);
+
+    expect(historyCollector.dbStatus().reachable).toBe(true);
+    expect(historyCollector.dbStatus().consecutiveFailures).toBe(0);
   });
 });

@@ -16,7 +16,7 @@ import { realtimeCandleAggregatorService } from "./realtimeCandleAggregator.serv
  */
 export const MARKET_TERMINAL_ROOM = "market-terminal";
 
-/** Payload contract for the high-confidence (>90%) priority notification. */
+/** Payload contract for the high-confidence priority notification. */
 export interface HighConfidenceSignalPayload {
   symbol: string;
   signalType: "BUY" | "SELL";
@@ -25,6 +25,11 @@ export interface HighConfidenceSignalPayload {
   targetPrice: number;
   timeframe: string;
   timestamp: string;
+  /** PART 41 [403] — execution surface, forwarded so the client can re-verify
+   *  the gate that authorised this alert (executable && T1-T3 && tradable). */
+  executable?: boolean;
+  tier?: string | null;
+  regime_gate?: string | null;
 }
 
 /**

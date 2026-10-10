@@ -11,9 +11,7 @@ import { corsOptions } from "./cors";
  *    stalls while still pruning genuinely wedged pipes in ~45s worst case.
  *  • CORS reuses the shared `corsOptions` resolver so the Socket.IO engine
  *    and the Express middleware can never drift — both allow the frontend
- *    origin and exactly the origins on the shared allowlist, with credentials.
- *    No wildcard host matching — register a tunnel explicitly via
- *    CORS_ALLOWED_TUNNEL_ORIGINS.
+ *    origin and every *.devtunnels.ms origin with credentials.
  */
 export const SOCKET_SERVER_OPTIONS: Partial<ServerOptions> = {
   cors: {
