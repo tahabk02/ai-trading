@@ -623,11 +623,15 @@ function proxyUpgrade(req, socket, head) {
 
 function start() {
   const app = next({ dev: DEV, hostname: HOSTNAME, port: PORT });
-  const handle = app.getRequestHandler();
-  const nextUpgradeHandler =
-    typeof app.getUpgradeHandler === "function" ? app.getUpgradeHandler() : null;
 
+  // Next 15.5: getRequestHandler()/getUpgradeHandler() throw "prepare() must
+  // be called" unless app.prepare() resolved first (Next 14 allowed lazy
+  // prepare). The handlers are built AFTER prepare completes.
   return app.prepare().then(() => {
+    const handle = app.getRequestHandler();
+    const nextUpgradeHandler =
+      typeof app.getUpgradeHandler === "function" ? app.getUpgradeHandler() : null;
+
     const server = http.createServer((req, res) => {
       if (PROXY_ENABLED) {
         try {

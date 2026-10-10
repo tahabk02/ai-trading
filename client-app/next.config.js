@@ -167,12 +167,50 @@ const nextConfig = {
     return [
       // 1) Catch-all FIRST — HTML & dynamic routes must never be cached,
       //    so clients always fetch markup referencing THIS build's chunks.
+      //    Same rule also carries the PART 43 [433] security headers for every
+      //    response (nosniff, HSTS, Referrer-Policy, frame denial).
       {
         source: "/:path*",
         headers: [
           {
             key: "Cache-Control",
             value: "no-store, must-revalidate",
+          },
+          {
+            key: "X-Content-Type-Options",
+            value: "nosniff",
+          },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=63072000; includeSubDomains; preload",
+          },
+          {
+            key: "Referrer-Policy",
+            value: "strict-origin-when-cross-origin",
+          },
+          {
+            key: "X-Frame-Options",
+            value: "DENY",
+          },
+          // PROD CSP: Next emits inline bootstrap scripts/styles by design, so
+          // inline is allowed — but `unsafe-eval` is NOT (Next production
+          // bundles never eval, and no chart CDN is loaded in production).
+          {
+            key: "Content-Security-Policy",
+            value: [
+              "default-src 'self'",
+              "script-src 'self' 'unsafe-inline'",
+              "style-src 'self' 'unsafe-inline'",
+              "img-src 'self' data: blob: https:",
+              "font-src 'self' data: https:",
+              "connect-src 'self' ws: wss:",
+              "worker-src 'self' blob:",
+              "media-src 'self' data: blob:",
+              "object-src 'none'",
+              "base-uri 'self'",
+              "form-action 'self'",
+              "frame-ancestors 'none'",
+            ].join("; "),
           },
         ],
       },

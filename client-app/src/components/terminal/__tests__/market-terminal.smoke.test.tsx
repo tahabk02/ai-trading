@@ -69,11 +69,15 @@ const expected = (classes: AssetClass[] = [...ASSET_CLASSES]) =>
 describe("market terminal smoke", () => {
   beforeEach(resetAll);
 
+  // The full-registry case mounts all 44 AssetCards synchronously in jsdom;
+  // measured 1.8s in isolation but the shared runner (transform/setup in the
+  // 200s range on this host) briefly starved the 5s default. The limits below
+  // are a flake-guard, not a perf concession.
   it("renders the full registry with no quotes at all", () => {
     ui(<MarketTerminal />);
     expect(cards()).toBe(expected());
     expect(cards()).toBe(ALL_MARKET_SYMBOLS.length);
-  });
+  }, 30000);
 
   it("INVARIANT 4 — a PARTIAL quote snapshot cannot change the count", () => {
     // The documented defect (market-terminal.tsx:78-85): a non-reactive
