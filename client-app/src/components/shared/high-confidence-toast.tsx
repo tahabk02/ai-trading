@@ -32,6 +32,7 @@ import { useLangContext } from "@/hooks/useLangContext";
 import { useTradingStore } from "@/store/useTradingStore";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 import { resolveExecutionFloor } from "@/lib/signalTiers";
+import { isAlertEligible } from "@/lib/alertGate";
 import { cn } from "@/utils/cn";
 import { formatPairPrice } from "@/utils/format";
 
@@ -176,6 +177,18 @@ export const HighConfidenceToast: React.FC = () => {
     const dir = predictionData.signal;
     if (!Number.isFinite(conf) || conf < alertBarPct) return;
     if (dir !== "BUY" && dir !== "SELL") return;
+    // PART 41 [403] — the tier floor is not enough: a SCORED-ONLY verdict
+    // (executable:false or a pending/tradable-less regime gate) is silent even
+    // at 98% book agreement. No toast, no sound — the metal must be tradable.
+    if (
+      !isAlertEligible({
+        executable: predictionData.executable,
+        tier: predictionData.tier,
+        regime_gate: predictionData.regime_gate,
+      })
+    ) {
+      return;
+    }
 
     const signature = `${predictionData.symbol}|${dir}|${predictionData.timeframe}`;
     if (!shouldAlert(signature)) return;
@@ -218,9 +231,25 @@ export const HighConfidenceToast: React.FC = () => {
       targetPrice?: number;
       timeframe?: string;
       timestamp?: string;
+      executable?: boolean;
+      tier?: string | null;
+      regime_gate?: string | null;
     }) => {
       if (!payload?.symbol || !payload?.signalType) return;
       if (payload.signalType !== "BUY" && payload.signalType !== "SELL") return;
+
+      // PART 41 [403] — the server already gates who it broadcasts; the client
+      // re-verifies the same predicate here and FAILS CLOSED: a wire verdict
+      // that cannot prove executable && T1..T3 && "tradable" never rings.
+      if (
+        !isAlertEligible({
+          executable: payload.executable,
+          tier: payload.tier,
+          regime_gate: payload.regime_gate,
+        })
+      ) {
+        return;
+      }
 
       // Enforce the operator's selected tier floor + cooldown dedup on the
       // wire payload too (only alerts for bands the trader actually trades).

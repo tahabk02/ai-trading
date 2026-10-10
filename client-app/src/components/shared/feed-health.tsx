@@ -31,6 +31,12 @@ export interface FeedHealthProps {
   connected: boolean;
   stale: boolean;
   stalled: boolean;
+  /**
+   * PART 42.1 [422] — true when every REAL (forex) instrument is in its weekly
+   * closed window. A closed market is a STATE, not a feed fault: the bar says
+   * "MARKET CLOSED" instead of "PRICE STALE". OTC/crypto remain 24/7.
+   */
+  marketClosed?: boolean;
   /** Optional override for the packet-age source. Tests inject a fake clock. */
   getLastUpdateMs?: () => number | null;
   now?: () => number;
@@ -47,6 +53,7 @@ export function FeedHealthBar({
   connected,
   stale,
   stalled,
+  marketClosed = false,
   getLastUpdateMs,
   now,
 }: FeedHealthProps) {
@@ -78,22 +85,28 @@ export function FeedHealthBar({
   // stale boolean — the boolean always wins, and a transport failure always
   // wins over both.
   const transportDown = !connected;
-  const tone = TONE[effective];
+  const tone = transportDown
+    ? TONE.dead
+    : marketClosed
+      ? TONE.delayed
+      : TONE[effective];
   const label = transportDown
     ? "FEED DOWN"
-    : stalled
-      ? "STREAM STALLED"
-      : stale
-        ? "PRICE STALE"
-        : effective === "live"
-          ? "LIVE"
-          : effective === "delayed"
-            ? "DELAYED"
-            // Reached only when `stale` is false, so the age really is in the
-            // 2-10s band while the boolean has not yet tripped.
-            : effective === "stale"
-              ? "NO TICK"
-              : "NO FEED";
+    : marketClosed
+      ? "MARKET CLOSED"
+      : stalled
+        ? "STREAM STALLED"
+        : stale
+          ? "PRICE STALE"
+          : effective === "live"
+            ? "LIVE"
+            : effective === "delayed"
+              ? "DELAYED"
+              // Reached only when `stale` is false, so the age really is in the
+              // 2-10s band while the boolean has not yet tripped.
+              : effective === "stale"
+                ? "NO TICK"
+                : "NO FEED";
 
   return (
     <div
@@ -105,7 +118,7 @@ export function FeedHealthBar({
       <span
         data-testid="feed-health-dot"
         className={`w-1.5 h-1.5 rounded-full shrink-0 ${tone.dot} ${
-          effective === "live" ? "animate-pulse" : ""
+          effective === "live" && !marketClosed && !transportDown ? "animate-pulse" : ""
         }`}
       />
       <span data-testid="feed-health-label" className={`font-bold ${tone.text}`}>
@@ -113,7 +126,11 @@ export function FeedHealthBar({
       </span>
       <span className="text-ink-faint">·</span>
       <span data-testid="feed-health-age" className="text-ink-faint tabular-nums">
-        {connected ? `last tick ${displayAge}` : "no socket"}
+        {!connected
+          ? "no socket"
+          : marketClosed
+            ? "weekly close · no live signals"
+            : `last tick ${displayAge}`}
       </span>
 
       {stalled && (

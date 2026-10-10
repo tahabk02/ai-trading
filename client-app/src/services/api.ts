@@ -175,6 +175,13 @@ export interface PredictionResponse {
   /** Human label for the tier (PREMIUM / HIGH / MEDIUM / LOW / WEAK). */
   tier_label?: string;
   /**
+   * PART 41 [403] — the engine's strict execution surface. True ONLY when the
+   * regime gate passed AND the verdict cleared every concurrency/thermal floor.
+   * A high-confidence score with `executable:false` is a SCORED-ONLY verdict
+   * and must never sound an alert.
+   */
+  executable?: boolean;
+  /**
    * PART 9 — time-gated emission. True when the engine suppressed this very
    * verdict because there was not enough real time left in the bucket to act
    * on it. Never fabricated client-side.
@@ -382,6 +389,9 @@ export interface MarketQuote {
   freshAgeMs?: number | null;
   /** Backend "no live price for >15s" flag — the terminal must say so. */
   staleLive?: boolean;
+  /** PART 42.1 — this REAL pair's weekly forex market is closed. `price` is the
+   *  last close, never live. OTC/crypto are 24/7 and never set this. */
+  marketClosed?: boolean;
 }
 
 export interface QuotesResponse {

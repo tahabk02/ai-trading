@@ -2,7 +2,7 @@
 
 import React from "react";
 import { useRouter } from "next/navigation";
-import { TrendingUp, TrendingDown, Activity, ChevronDown, Filter } from "lucide-react";
+import { TrendingUp, TrendingDown, Activity, ChevronDown, Filter, Clock } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { getPairLabel, getQuoteCurrency } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
@@ -16,6 +16,7 @@ import {
 } from "@/lib/minConfidenceFilter";
 import { resolveCardTier, tierClearsSelection } from "@/lib/tierFilter";
 import { quoteProvenance } from "@/lib/quoteProvenance";
+import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
 import { TierBadge } from "@/components/shared/tier-badge";
 
 interface AssetCardProps {
@@ -76,7 +77,12 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
     symbol,
     (prediction?.data as { regime_gate?: string | null } | null)?.regime_gate,
   );
-  const scoredOnly = regime.scoredOnly;
+  // PART 42.1 [421]/[422] — a REAL pair whose weekly forex market is closed is
+  // its own state: MARKET CLOSED. It must NOT be confused with SCORED-ONLY
+  // (which is about the regime gate) and it shows no signal — the price is the
+  // last close, never a live quote.
+  const marketClosed = quote?.marketClosed === true;
+  const scoredOnly = !marketClosed && regime.scoredOnly;
 
   // ── CONFIDENCE FILTER DEMOTION ──
   // A pair whose measurable confidence is strictly below the operator's bar
@@ -88,7 +94,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
     verdict?.confidence,
   );
   const demotedByFilter =
-    !scoredOnly && isBelowConfidenceBar(filterConf, minConfidencePct);
+    !marketClosed && !scoredOnly && isBelowConfidenceBar(filterConf, minConfidencePct);
 
   // ── TIER SELECTOR DEMOTION (flexible tiers) ──
   // A verdict whose HONEST band sits below the operator's selected floor is
@@ -97,15 +103,32 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
   // relabel it, so a T3 signal reads "T3 MEDIUM", not a rewritten T5.
   const cardTier = resolveCardTier(prediction?.data, verdict);
   const demotedByTier =
-    !scoredOnly && !demotedByFilter && !tierClearsSelection(cardTier, minTier);
-  const interactive = !scoredOnly && !demotedByFilter && !demotedByTier;
-  const nonInteractiveTitle = scoredOnly
-    ? regime.nonInteractiveTitle
-    : demotedByFilter
-      ? `Confidence below the ${minConfidencePct.toFixed(1)}% filter bar — lower the Confidence Filter to trade.`
-      : demotedByTier
-        ? `${cardTier ?? "This"} is below your ${minTier} trade floor — select a lower tier to trade it.`
-        : undefined;
+    !marketClosed &&
+    !scoredOnly &&
+    !demotedByFilter &&
+    !tierClearsSelection(cardTier, minTier);
+  const interactive = !marketClosed && !scoredOnly && !demotedByFilter && !demotedByTier;
+
+  // "last close" is the time of the last genuinely observed print (UTC), never
+  // a live clock — the last close is stamped on the quote as `lastTickAt`.
+  const lastCloseIso = quote?.lastTickAt ?? null;
+  const lastCloseTime =
+    typeof lastCloseIso === "string" && lastCloseIso.length >= 16
+      ? lastCloseIso.slice(11, 16)
+      : null;
+  const marketClosedTitle = `Weekly forex market closed — showing last close${
+    lastCloseTime ? ` ${lastCloseTime} UTC` : ""
+  }; no live signal.`;
+
+  const nonInteractiveTitle = marketClosed
+    ? marketClosedTitle
+    : scoredOnly
+      ? regime.nonInteractiveTitle
+      : demotedByFilter
+        ? `Confidence below the ${minConfidencePct.toFixed(1)}% filter bar — lower the Confidence Filter to trade.`
+        : demotedByTier
+          ? `${cardTier ?? "This"} is below your ${minTier} trade floor — select a lower tier to trade it.`
+          : undefined;
 
   const proHref = React.useMemo(
     () => buildProHref(symbol, horizon * 60),
@@ -227,12 +250,29 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
   // LIVE? A held/fallback print must never paint like a genuine PO tick.
   const provenance = quote ? quoteProvenance(quote) : null;
 
+  // ── PART 40 [394]/[395] TARGET SLOT ──
+  // The card's target is the SAME pure gate the chart runs: regime_gate
+  // "tradable" AND tier T1–T3, read from this card's ONE /predict payload.
+  // When it is closed the slot shows WHY (the engine's own sub-reason, verbatim)
+  // instead of a blank — the grid must never imply a target it does not have.
+  const cardTargetState = targetStateForPayload(prediction?.data ?? null);
+  const cardTargetCopy = targetReasonCopy(
+    cardTargetState.reason,
+    cardTargetState.detail,
+  );
+  const cardTargetPrice =
+    Number(
+      (prediction?.data as { target_price?: number } | null | undefined)
+        ?.target_price,
+    ) || 0;
+  const cardTargetShown = cardTargetState.showTarget && cardTargetPrice > 0;
+
   return (
     <div
       data-testid="asset-card"
       role={interactive ? "link" : undefined}
       tabIndex={interactive ? 0 : -1}
-      aria-label={regime.ariaLabel}
+      aria-label={marketClosed ? `${symbol} — market closed, showing last close` : regime.ariaLabel}
       aria-disabled={interactive ? undefined : true}
       aria-description={nonInteractiveTitle}
       title={nonInteractiveTitle}
@@ -299,7 +339,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
       </div>
 
       {/* ── ROW 2b (PART 38.2) — data provenance / staleness strip ── */}
-      {provenance && (
+      {provenance && !marketClosed && (
         <div className="mt-0.5 flex items-center justify-between gap-1 min-w-0">
           <span
             data-testid="quote-provenance"
@@ -318,7 +358,33 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
       )}
 
       {/* ── ROW 3 — verdict strip (LIVE + horizon) ── */}
-      {scoredOnly ? (
+      {marketClosed ? (
+        /* PART 42.1 [422] — MARKET CLOSED is its own card state. It is not
+           SCORED-ONLY, it is not a signal: the market is shut for the week, so
+           the card shows the last close and explicitly serves NO direction and
+           NO target. */
+        <div className="mt-2 flex flex-col gap-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span
+              data-testid="market-closed-badge"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-gold bg-gold/10 border border-gold/40"
+              title={marketClosedTitle}
+            >
+              <Clock size={10} />
+              MARKET CLOSED
+            </span>
+            <span
+              data-testid="market-closed-last-close"
+              className="num-fig ml-auto text-[8px] uppercase tracking-tight text-term-ink-dim whitespace-nowrap"
+            >
+              last close {lastCloseTime ? `${lastCloseTime} UTC` : "unknown"}
+            </span>
+          </div>
+          <span className="text-[8px] leading-tight text-term-ink-faint">
+            Weekly forex market closed — last close shown, no live signal.
+          </span>
+        </div>
+      ) : scoredOnly ? (
         <div className="mt-2 flex flex-col gap-1">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span
@@ -431,6 +497,43 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
             </div>
           )}
         </>
+      )}
+
+      {/* ── ROW 3b (PART 40 [395]) — TARGET SLOT: the engine target when the
+          regime gate is open and the tier clears T1–T3, otherwise the truthful
+          reason it is withheld. Never blank, never a target the gate did not
+          authorize — the same wording the chart's TGT card renders.
+          PART 42.1: a market-closed REAL card shows NO target slot at all —
+          the market is shut, so no target is implied. */}
+      {!marketClosed && (
+        <div
+          data-testid="card-target-slot"
+          data-state={cardTargetShown ? "target" : "withheld"}
+          data-reason={cardTargetState.reason ?? ""}
+          data-detail={cardTargetState.detail ?? ""}
+          className="mt-0.5 flex items-center gap-1.5 min-w-0"
+        >
+          <span className="num-fig text-[8px] uppercase tracking-tight text-term-ink-faint shrink-0">
+            TGT
+          </span>
+          {cardTargetShown ? (
+            <span className="num-fig text-[9px] font-semibold text-term-ink truncate">
+              {cardTargetPrice.toFixed(digits)}
+            </span>
+          ) : (
+            <span
+              className={cn(
+                "num-fig text-[8px] font-bold uppercase tracking-tight truncate",
+                cardTargetState.reason === "scored_only"
+                  ? "text-gold"
+                  : "text-amber-400",
+              )}
+              title={cardTargetCopy.hint}
+            >
+              {cardTargetCopy.label}
+            </span>
+          )}
+        </div>
       )}
 
       {/* ── ROW 4 — expiry pills + Pro deep-link (tradable only) ── */}

@@ -11,6 +11,7 @@ import {
   signalBadgeFor,
   targetCandlesLabelFor,
   formatTargetCandlesLabel,
+  targetZoneEnabled,
 } from "@/lib/signalRender";
 
 // ── PART 11 — THE SIGNAL RENDER PATH ──
@@ -127,41 +128,52 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
   // Pure seam mirroring financial-chart's currentSignalView(): bucket floor
   // (wallSec), hysteresis real clock (realMs), raw gate output, raw tier — fed
   // to the REAL SignalHoldBuffer, then ONE view() consumed by everyone.
+  //
+  // PART 40 [394] — the regime gate rides the SAME evaluate() call the chart
+  // makes (it passes `predictionData?.regime_gate`). It defaults to
+  // "tradable" here so these tests keep isolating the TIER behaviour they were
+  // written for; the gate's own coverage lives in the targetGate test.
   const tick = (
     buf: SignalHoldBuffer,
     rawGated: "BUY" | "SELL" | null,
     wallSec: number,
     realMs: number,
     rawTier: string | null,
+    regimeGate: string | null = "tradable",
+    regimeDetail: string | null = "high_precision_composite",
   ): SignalHoldView => {
-    buf.evaluate(rawGated, wallSec, 60, null, realMs, rawTier);
+    buf.evaluate(rawGated, wallSec, 60, null, realMs, rawTier, regimeGate, regimeDetail);
     return buf.view();
   };
 
   const candlesFor = (v: SignalHoldView) =>
-    buildTargetCandles({
-      liveTipBucketMs: v.bucketSec * 1000,
-      liveClose: 100,
-      targetPrice: 105,
-      atr: 1,
-      signal: v.gatedSignal,
-      tier: v.tier,
-      expirationSeconds: 300,
-      timeframeSeconds: 60,
-    });
+    targetZoneEnabled(v)
+      ? buildTargetCandles({
+          liveTipBucketMs: v.bucketSec * 1000,
+          liveClose: 100,
+          targetPrice: 105,
+          atr: 1,
+          signal: v.gatedSignal,
+          tier: v.tier,
+          expirationSeconds: 300,
+          timeframeSeconds: 60,
+        })
+      : [];
 
   // ONE assertion for ALL the render consumers: badge↔HUD, gate↔view tier, and
   // PART 24 [158] — the "TARGET CANDLES N candles" HUD TEXT follows the SAME
   // view.tier as the shape (a label that drifted independently of the shape is
   // exactly the PART 20/22 drift class, so it belongs in this coherence block).
+  // PART 40 [394] — every target-bearing surface is gated by the ONE combined
+  // predicate (tradable AND T1–T3), so all three read `targetZoneEnabled(v)`.
   const assertCoherent = (v: SignalHoldView) => {
     const badge = signalBadgeFor(v);
     const candles = candlesFor(v);
     const label = targetCandlesLabelFor(v, 5);
     const labelText = formatTargetCandlesLabel(label);
     expect(badge.direction).toBe(v.gatedSignal); // (c) card badge == HUD view
-    expect(candles.length > 0).toBe(targetCandlesEnabled(v.tier)); // (b) candle gate == view tier
-    expect(label.enabled).toBe(targetCandlesEnabled(v.tier)); // (d) PART 24 label gate == view tier
+    expect(candles.length > 0).toBe(targetZoneEnabled(v)); // (b) candle gate == view gate
+    expect(label.enabled).toBe(targetZoneEnabled(v)); // (d) PART 24 label gate == view gate
     expect(label.count != null).toBe(label.enabled); // count only when enabled
     expect(labelText !== null).toBe(label.enabled);
     return { badge, candles, label, labelText };

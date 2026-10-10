@@ -28,10 +28,19 @@ import {
   formatPairPrice,
   formatLocalTime,
 } from "@/utils/format";
+import { QUOTE_PROVENANCE_STALE_MS } from "@/lib/quoteProvenance";
 
 // ============================================================
 // AI EXPLANATION WIDGET — Why the AI predicts CALL or PUT
 // ============================================================
+
+// ── PART 41 [401a] ──
+// A restored in-store verdict older than this (the engine's last-good TTL) is a
+// LEDGER ARTIFACT, not a call: the panel labels it SEEDED and holds it
+// NON-EXECUTABLE (neutral gray — no PREMIUM emerald/rose) until a fresh
+// evaluation lands on the active symbol. Faster must never mean actionable
+// stale data.
+const VERDICT_STALE_MS = 60_000;
 
 export const AIExplanation: React.FC = () => {
   // ── ALL HOOKS AT TOP LEVEL (before any early return) ──
@@ -44,6 +53,19 @@ export const AIExplanation: React.FC = () => {
   const engineError = useTradingStore((s) => s.error);
   /** Recoverable 503 / live-quote timeout — auto-re-polling in the store. */
   const quoteStreamWaiting = useTradingStore((s) => s.quoteStreamWaiting);
+  /** PART 41 [401a] — a fresh /predict is resolving over the seeded snapshot. */
+  const isLoading = useTradingStore((s) => s.isLoading);
+  /** The last live-tick instant — the "fresh tick" that re-arms executability. */
+  const lastPriceUpdate = useTradingStore((s) => s.lastPriceUpdate);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!predictionData) return;
+    // Tick once per second so the verdict age stays honest while displayed.
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+    // Key the ticker on verdict PRESENCE only — never restart it per eval.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(predictionData)]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -271,6 +293,30 @@ export const AIExplanation: React.FC = () => {
     );
   }
 
+  // ── PART 41 [401a] — SEEDED VERDICT: SHOWN WITH AGE, NON-EXECUTABLE ──
+  // The panel may be painting an in-store snapshot (restored from
+  // `predictionBySymbol` on symbol switch, or the last live 1Hz verdict) while
+  // a fresh evaluation resolves. Surface the VERDICT AGE and hold it
+  // NON-EXECUTABLE until a fresh tick (lastPriceUpdate) re-arms it.
+  const verdictTsMs = (() => {
+    const raw = Number(predictionData.timestamp ?? 0);
+    if (Number.isFinite(raw) && raw > 0) {
+      return raw < 1_000_000_000_000 ? raw * 1000 : raw;
+    }
+    const parsed = new Date(String(predictionData.timestamp ?? "")).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  })();
+  const verdictAgeMs = verdictTsMs > 0 ? Math.max(0, now - verdictTsMs) : 0;
+  const tickAgeMs = lastPriceUpdate
+    ? Math.max(0, now - new Date(lastPriceUpdate).getTime())
+    : Number.POSITIVE_INFINITY;
+  const awaitingFreshTick = tickAgeMs > QUOTE_PROVENANCE_STALE_MS;
+  const staleVerdict = verdictAgeMs > VERDICT_STALE_MS;
+  const seeded = isLoading || awaitingFreshTick || staleVerdict;
+  const seededAgeSec = Math.max(1, Math.round(verdictAgeMs / 1000));
+  const executableSign =
+    !seeded && (signal === "BUY" || signal === "SELL");
+
   return (
     <div className="bg-obsidian-900/60 border border-slate-800/80 rounded-2xl p-5 backdrop-blur-sm">
       {/* ── Header ── */}
@@ -284,11 +330,11 @@ export const AIExplanation: React.FC = () => {
         <span
           className={cn(
             "text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
-            signal === "BUY"
-              ? "bg-emerald-500/20 text-emerald-400"
-              : signal === "SELL"
-                ? "bg-rose-500/20 text-rose-400"
-                : "bg-slate-500/20 text-slate-300",
+            executableSign
+              ? signal === "BUY"
+                ? "bg-emerald-500/20 text-emerald-400"
+                : "bg-rose-500/20 text-rose-400"
+              : "bg-slate-500/20 text-slate-300",
           )}
         >
           {signal === "BUY"
@@ -304,7 +350,19 @@ export const AIExplanation: React.FC = () => {
           tier={predictionData.tier}
           confidence={confidenceNum}
           size="sm"
+          degraded={seeded}
         />
+        {/* ── PART 41 [401a] — SEEDED (non-executable) marker with verdict age ── */}
+        {seeded && verdictTsMs > 0 && (
+          <span
+            data-testid="ai-verdict-seed-marker"
+            title="In-store snapshot — non-executable until a fresh evaluation lands"
+            className="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/40"
+          >
+            <Clock className="w-3 h-3" />
+            Seeded · {seededAgeSec}s
+          </span>
+        )}
       </div>
 
       {/* ── Signal + Strategy Book Agreement Bar ── */}
@@ -457,6 +515,9 @@ export const AIExplanation: React.FC = () => {
           </span>
           <span>
             {predictionData.timeframe} ·{" "}
+            {seeded && verdictTsMs > 0
+              ? `seeded ${seededAgeSec}s ago · `
+              : ""}
             {formatLocalTime(predictionData.timestamp)}
           </span>
         </div>

@@ -997,6 +997,17 @@ export interface SignalHoldView {
   /** Broker-grid bucket floor (s) of the last evaluate — the freeze-window clock. */
   bucketSec: number;
   suppressedReason: SignalSuppressReason;
+  /** PART 40 [394] — the ENGINE regime gate of the latest /predict payload
+   *  ("tradable" | "scored_only" | "pending_high_precision" | null/unknown).
+   *  NEVER frozen with a held direction: the gate is a verdict on the CURRENT
+   *  regime, so a newly closed gate must blank the projection immediately.
+   *  Fail-closed — anything but the exact string "tradable" withholds. */
+  regimeGate: string | null;
+  /** PART 40 [395] — the payload's raw `suppressed_reason` beside the gate
+   *  (otc_hf_fail / mtf_misaligned / below_high_precision_bar /
+   *  insufficient_history / stale_market_out_of_safety_bounds / …): the
+   *  engine's stated SUB-reason, surfaced verbatim instead of a blank. */
+  regimeDetail: string | null;
 }
 
 /** PART 9 — WHY the stabilized signal is not (or not yet) what raw says:
@@ -1017,12 +1028,29 @@ export type SignalSuppressReason =
   | null;
 
 /** PART 21 — normalize an engine tier for the hold buffer; unknown → null. */
-function normalizeViewTier(tier: unknown): string | null {
+export function normalizeViewTier(tier: unknown): string | null {
   if (typeof tier !== "string") return null;
   const t = tier.trim().toUpperCase();
   return t === "T1" || t === "T2" || t === "T3" || t === "T4" || t === "T5"
     ? t
     : null;
+}
+
+/** PART 40 [394] — normalize the engine's `regime_gate`. Case/whitespace
+ *  tolerated (the surface lowercases), but the value itself is kept verbatim
+ *  so an unknown future gate string still renders as its own honest reason
+ *  rather than being coerced into a known one. Non-strings → null. */
+export function normalizeViewRegimeGate(gate: unknown): string | null {
+  if (typeof gate !== "string") return null;
+  const g = gate.trim().toLowerCase();
+  return g === "" ? null : g;
+}
+
+/** PART 40 [395] — normalize the engine's `suppressed_reason` sub-reason. */
+export function normalizeViewRegimeDetail(reason: unknown): string | null {
+  if (typeof reason !== "string") return null;
+  const r = reason.trim().toLowerCase();
+  return r === "" ? null : r;
 }
 
 export class SignalHoldBuffer {
@@ -1035,6 +1063,11 @@ export class SignalHoldBuffer {
   private heldTier: string | null = null;
   /** Latest raw /predict tier — the target-candle fallback once neutral. */
   private lastRawTier: string | null = null;
+  /** PART 40 [394] — latest raw /predict regime gate. Always the LATEST
+   *  verdict (never frozen with a held direction). */
+  private lastRawRegimeGate: string | null = null;
+  /** PART 40 [395] — latest raw /predict suppressed_reason sub-reason. */
+  private lastRawRegimeDetail: string | null = null;
   /** Broker-grid bucket floor (s) of the latest evaluate — the freeze clock. */
   private lastBucketSec = 0;
   private readonly holdNeutralEvals: number;
@@ -1064,7 +1097,14 @@ export class SignalHoldBuffer {
    *  and does not advance between prints, so it cannot measure how long a
    *  neutral has persisted; the neutral-clear hysteresis uses realMs. When
    *  omitted (legacy callers/tests) it falls back to `wallSec * 1000`, which
-   *  preserves the original read-count semantics for seconds-spaced reads. */
+   *  preserves the original read-count semantics for seconds-spaced reads.
+   *
+   *  PART 40 [394] — `regimeGate` / `regimeDetail` ride the SAME evaluate()
+   *  call as direction + tier so the render consumers can never read a gate
+   *  from a different payload than the tier beside it. They are committed as
+   *  the LATEST raw verdict on every call (including the suppressed returns
+   *  below), never frozen: a gate that closes must blank the projection at
+   *  once, not at the end of the held direction's freeze window. */
   evaluate(
     raw: "BUY" | "SELL" | null,
     wallSec: number,
@@ -1073,11 +1113,16 @@ export class SignalHoldBuffer {
     realMs?: number,
     /* PART 21 — engine tier (T1…T5), committed ATOMICALLY with the direction. */
     tier?: string | null,
+    /* PART 40 — engine regime gate + sub-reason of this same payload. */
+    regimeGate?: string | null,
+    regimeDetail?: string | null,
   ): "BUY" | "SELL" | null {
     const freeze = Math.max(1, bucketSec ?? this.commitBucketSec);
     const nowMs =
       Number.isFinite(realMs) && (realMs ?? 0) > 0 ? realMs : wallSec * 1000;
     this.lastRawTier = normalizeViewTier(tier);
+    this.lastRawRegimeGate = normalizeViewRegimeGate(regimeGate);
+    this.lastRawRegimeDetail = normalizeViewRegimeDetail(regimeDetail);
     this.lastBucketSec = wallSec;
     this.suppressedReason = null;
     // PART 9 — engine time-gate: signal too close to bucket close to act.
@@ -1151,6 +1196,8 @@ export class SignalHoldBuffer {
     this.held = null;
     this.heldTier = null;
     this.lastRawTier = null;
+    this.lastRawRegimeGate = null;
+    this.lastRawRegimeDetail = null;
     this.lastBucketSec = 0;
     this.committedSec = Number.MIN_SAFE_INTEGER;
     this.nullStreak = 0;
@@ -1178,6 +1225,11 @@ export class SignalHoldBuffer {
       tier: this.held !== null ? this.heldTier : this.lastRawTier,
       bucketSec: this.lastBucketSec,
       suppressedReason: this.suppressedReason,
+      // PART 40 [394]/[395] — always the LATEST gate/detail of the payload
+      // that produced this evaluate(), so a newly closed gate blanks the
+      // projection immediately (see the evaluate() contract).
+      regimeGate: this.lastRawRegimeGate,
+      regimeDetail: this.lastRawRegimeDetail,
     };
   }
 

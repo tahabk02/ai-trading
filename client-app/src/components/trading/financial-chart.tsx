@@ -52,8 +52,10 @@ import {
   barTintForBufferedSignal,
   formatTargetCandlesLabel,
   targetCandlesLabelFor,
+  targetReasonCopy,
+  targetRenderState,
+  type TargetRenderState,
 } from "@/lib/signalRender";
-import { targetCandlesEnabled } from "@/lib/signalTiers";
 import { expiryCountdownRemainingSeconds } from "@/lib/expirySelection";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
@@ -708,6 +710,15 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       (
         predictionDataRef.current as { tier?: string | null } | null
       )?.tier ?? null,
+      // PART 40 [394] — regime gate + engine sub-reason ride the SAME
+      // evaluate(), so the target gate can never read a different payload
+      // than the tier beside it. The RAW payload values (not the mapped
+      // `engineSuppress` channel) are what the reason surface must show.
+      predictionDataRef.current?.regime_gate ?? null,
+      predictionDataRef.current
+        ? (predictionDataRef.current.suppressed_reason ?? null)
+        : // no /predict payload in hand — the honest "awaiting" sub-reason
+          ("awaiting_payload" as string | null),
     );
     // The evaluate() return is the stabilized gated direction — consumers that
     // need tier MUST read view(), never a second predictionDataRef fetch.
@@ -865,6 +876,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       intervals: number,
       frame: TargetCandleData[],
       signalValue: "BUY" | "SELL" | null,
+      /* PART 40 [394]/[397] — the gate state that decided the render, so a
+         browser pass can read gate + reason per symbol without a payload
+         fetch: exactly what the HUD shows. */
+      targetState?: TargetRenderState,
     ): void => {
       const tip = rows.length > 0 ? rows[rows.length - 1] : null;
       const bws = bw / 1000;
@@ -903,6 +918,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           intervals > 0 && tipSec > 0 ? tipSec + lastTargetOffsetSec : 0,
         lastTargetOffsetSec,
         targetDirection: signalValue,
+        // PART 40 [394]/[397] — the gate that decided the render and, when it
+        // is closed, the truthful reason: readable per symbol from the browser
+        // without a second payload fetch (the [397] table's DOM evidence).
+        targetRegimeGate: targetState?.regimeGate ?? null,
+        targetGateOpen: targetState?.showTarget ?? false,
+        targetWithheldReason: targetState?.reason ?? null,
+        targetWithheldDetail: targetState?.detail ?? null,
         targetFirstClose: frame.length > 0 ? frame[0].close : 0,
         targetLastClose: frame.length > 0 ? frame[frame.length - 1].close : 0,
         targetHigh,
@@ -1017,11 +1039,21 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // blanked. A time marker must not disappear because a price is missing.
       syncExpiryMarker(tipSec, tfSec, expSec);
 
+      // ── PART 40 [394] — THE TARGET GATE ──
+      // A projection renders if AND ONLY IF regime_gate === "tradable" AND the
+      // tier clears T1–T3, read from the SAME currentSignalView the HUD renders.
+      // Everything below the gate (candles, price lines, target direction) is
+      // the target layer; when it is closed the layer is CLEARED and the reason
+      // rides to the HUD instead — no ghost projection, no silent blank.
+      const targetState = targetRenderState(view, targetPrice);
+      const showTarget = targetState.showTarget;
+
       // ── SUPPRESSION: candles ALWAYS render when live tip + target exist ──
       // The 96.5% confidence gate ONLY affects the BUY/SELL label, never the
-      // candle rendering. Suppress only when required data is genuinely
-      // absent. Never anchor Date.now(); never gate on feedStatus/confidence.
-      if (tipGridMs <= 0 || targetPrice <= 0) {
+      // candle rendering. Suppress when the regime gate withholds the target or
+      // when required data is genuinely absent. Never anchor Date.now(); never
+      // gate on feedStatus/confidence.
+      if (!showTarget || tipGridMs <= 0 || targetPrice <= 0) {
         lastTargetIntervalsRef.current = 0;
         if (projectionRef.current.currentKey !== "") {
           projectionRef.current.reset();
@@ -1033,8 +1065,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           try { series.setMarkers([]); } catch {}
         }
         setTargetLayerActive(false);
-        syncMarkers(dirColor, null, 0, 0, 0, targetCandlesEnabled(tierForGate));
-        syncChartDebug(rows, bw, tipSec, intervals, [], signalValue);
+        syncMarkers(dirColor, null, 0, 0, 0, showTarget);
+        syncChartDebug(rows, bw, tipSec, intervals, [], signalValue, targetState);
         return;
       }
 
@@ -1114,9 +1146,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           targetPrice,
           anchorPrice,
           stopPrice,
-          targetCandlesEnabled(tierForGate),
+          showTarget,
         );
-        syncChartDebug(rows, bw, tipSec, intervals, snap.candles, signalValue);
+        syncChartDebug(rows, bw, tipSec, intervals, snap.candles, signalValue, targetState);
       }
     },
     [reanchor, syncMarkers, syncChartDebug, syncExpiryMarker, currentSignalView],
@@ -1660,6 +1692,16 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const hudSignal = hudView.gatedSignal;
   const hudTargetCandles = targetCandlesLabelFor(hudView, targetCandleCount);
   const hudZone = hudTargetCandles.enabled;
+  // PART 40 [394]/[395] — the ONE pure gate + the reason copy every
+  // target-shaped surface renders from. The TGT card shows the target when the
+  // gate is open and the withheld reason when it is not — same view, same
+  // decision, no blank.
+  const hudTargetState = targetRenderState(hudView, hudTarget);
+  const hudTargetCopy = targetReasonCopy(
+    hudTargetState.reason,
+    hudTargetState.detail,
+  );
+  const hudTargetShown = hudTargetState.showTarget && hudTarget > 0;
   const hudDigits = getPriceDigits(activeSymbol);
   const hudLive = Number(currentPriceRef.current) || 0;
   const hudDeltaPct =
@@ -1887,24 +1929,47 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               )}
             </div>
           ) : null}
-          {hudZone && hudTarget > 0 ? (
-            <div className="flex items-center gap-2 rounded-md border border-white/10 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
-              <span className="uppercase tracking-widest text-slate-400">TGT</span>
-              <span className="font-bold tabular-nums text-slate-200">
-                {hudTarget.toFixed(hudDigits)}
-              </span>
-              {hudLive > 0 ? (
-                <span
-                  className={`font-bold tabular-nums ${
-                    hudDeltaPct >= 0 ? "text-emerald-400" : "text-rose-400"
-                  }`}
-                >
-                  {hudDeltaPct >= 0 ? "+" : ""}
-                  {hudDeltaPct.toFixed(3)}%
+          {/* PART 40 [394]/[395] — THE TARGET SLOT (chart). Shows the engine
+              target only while the regime gate is open AND the tier clears
+              T1–T3; otherwise it states WHY it is withheld — the slot is never
+              blank and never shows a target the gate did not authorize. */}
+          <div
+            data-testid="hud-target-slot"
+            data-state={hudTargetShown ? "target" : "withheld"}
+            data-reason={hudTargetState.reason ?? ""}
+            data-detail={hudTargetState.detail ?? ""}
+            className={`flex items-center gap-2 rounded-md backdrop-blur-sm px-2 py-1 font-mono text-[10px] ${
+              hudTargetShown
+                ? "border border-white/10 bg-obsidian/85"
+                : "border border-amber-400/30 bg-amber-500/10"
+            }`}
+          >
+            <span className="uppercase tracking-widest text-slate-400">TGT</span>
+            {hudTargetShown ? (
+              <>
+                <span className="font-bold tabular-nums text-slate-200">
+                  {hudTarget.toFixed(hudDigits)}
                 </span>
-              ) : null}
-            </div>
-          ) : null}
+                {hudLive > 0 ? (
+                  <span
+                    className={`font-bold tabular-nums ${
+                      hudDeltaPct >= 0 ? "text-emerald-400" : "text-rose-400"
+                    }`}
+                  >
+                    {hudDeltaPct >= 0 ? "+" : ""}
+                    {hudDeltaPct.toFixed(3)}%
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span
+                className="font-black uppercase tracking-widest text-amber-300"
+                title={hudTargetCopy.hint}
+              >
+                {hudTargetCopy.label}
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2 rounded-md border border-sky-500/25 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
             <span className="uppercase tracking-widest text-slate-400">TIME</span>
             <span className="font-bold tabular-nums text-slate-200">{tf}</span>

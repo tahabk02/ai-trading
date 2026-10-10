@@ -22,7 +22,7 @@ import type { MarketQuote } from "@/services/api";
 /** Freshness floor mirrored from the backend (`QUOTE_STALE_AFTER_MS`). */
 export const QUOTE_PROVENANCE_STALE_MS = 15_000;
 
-export type ProvenanceTone = "live" | "fallback" | "held" | "unknown";
+export type ProvenanceTone = "live" | "fallback" | "held" | "unknown" | "closed";
 
 export interface QuoteProvenance {
   /** Short chip text (fits the card). */
@@ -34,7 +34,13 @@ export interface QuoteProvenance {
 
 type ProvenanceQuote = Pick<
   MarketQuote,
-  "source" | "stale" | "staleLive" | "freshAgeMs" | "ageMs"
+  | "source"
+  | "stale"
+  | "staleLive"
+  | "freshAgeMs"
+  | "ageMs"
+  | "marketClosed"
+  | "lastTickAt"
 >;
 
 /** Short, honest chip labels per known authoring feed. */
@@ -88,6 +94,13 @@ function secondsText(ms: number | null | undefined): string {
   return `${Math.round(value / 1000)}s`;
 }
 
+/** "2026-10-09T20:59:00.000Z" → "20:59" (UTC), or "unknown". */
+function closeTimeText(iso?: string | null): string {
+  if (typeof iso !== "string" || iso.length < 16) return "unknown";
+  const t = iso.slice(11, 16);
+  return /^\d{2}:\d{2}$/.test(t) ? t : "unknown";
+}
+
 /**
  * Derive the provenance chip for a quote.
  *
@@ -97,6 +110,18 @@ function secondsText(ms: number | null | undefined): string {
  * live just because its `ageMs` is small.
  */
 export function quoteProvenance(quote?: ProvenanceQuote | null): QuoteProvenance {
+  // PART 42.1 [422] — market closed is a STATE ahead of any provenance: the
+  // price shown is the last close, not a held live print. Say so plainly
+  // (never "HELD", never a live/fallback tone).
+  if (quote?.marketClosed === true) {
+    const at = closeTimeText(quote.lastTickAt);
+    return {
+      label: "MARKET CLOSED",
+      title: `Weekly forex market closed — price is the last close (${at} UTC), never live`,
+      tone: "closed",
+    };
+  }
+
   const source = normalizeSource(quote?.source);
   const ageText = secondsText(quote?.freshAgeMs ?? quote?.ageMs ?? null);
 

@@ -16,6 +16,10 @@ interface TierBadgeProps {
   size?: "xs" | "sm";
   showLabel?: boolean;
   className?: string;
+  /** PART 41 [399] — when true (stale quote / degraded verdict) the whole
+   *  badge renders in neutral gray so a PREMIUM tier never wears its emerald
+   *  premium styling while the verdict it colors is built on a stale price. */
+  degraded?: boolean;
 }
 
 /** Color-coded tier badge — T1 green/emerald, T2 teal/cyan, T3 amber,
@@ -26,6 +30,7 @@ export const TierBadge: React.FC<TierBadgeProps> = ({
   size = "xs",
   showLabel = true,
   className,
+  degraded = false,
 }) => {
   const resolved: SignalTier = isTier(tier)
     ? (tier as SignalTier)
@@ -35,24 +40,40 @@ export const TierBadge: React.FC<TierBadgeProps> = ({
     "inline-flex items-center gap-1 font-black uppercase tracking-wider rounded-full border";
   const padding =
     size === "sm" ? "px-2.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-[9px]";
-  const palette: Record<SignalTier, string> = {
-    T1: "bg-st-pos/15 text-st-pos border-st-pos/40",
-    T2: "bg-st-teal/15 text-st-teal border-st-teal/40",
-    T3: "bg-st-warn/15 text-st-warn border-st-warn/40",
-    T4: "bg-st-caution/15 text-st-caution border-st-caution/40",
-    T5: "bg-slate-500/15 text-slate-400 border-slate-500/40",
-  };
-  const dot: Record<SignalTier, string> = {
-    T1: "bg-st-pos",
-    T2: "bg-st-teal",
-    T3: "bg-st-warn",
-    T4: "bg-st-caution",
-    T5: "bg-slate-400",
-  };
+  const palette: Record<SignalTier, string> = degraded
+    ? {
+        T1: "bg-slate-500/15 text-slate-400 border-slate-500/40",
+        T2: "bg-slate-500/15 text-slate-400 border-slate-500/40",
+        T3: "bg-slate-500/15 text-slate-400 border-slate-500/40",
+        T4: "bg-slate-500/15 text-slate-400 border-slate-500/40",
+        T5: "bg-slate-500/15 text-slate-400 border-slate-500/40",
+      }
+    : {
+        T1: "bg-st-pos/15 text-st-pos border-st-pos/40",
+        T2: "bg-st-teal/15 text-st-teal border-st-teal/40",
+        T3: "bg-st-warn/15 text-st-warn border-st-warn/40",
+        T4: "bg-st-caution/15 text-st-caution border-st-caution/40",
+        T5: "bg-slate-500/15 text-slate-400 border-slate-500/40",
+      };
+  const dot: Record<SignalTier, string> = degraded
+    ? {
+        T1: "bg-slate-400",
+        T2: "bg-slate-400",
+        T3: "bg-slate-400",
+        T4: "bg-slate-400",
+        T5: "bg-slate-400",
+      }
+    : {
+        T1: "bg-st-pos",
+        T2: "bg-st-teal",
+        T3: "bg-st-warn",
+        T4: "bg-st-caution",
+        T5: "bg-slate-400",
+      };
   return (
     <span
       data-testid="tier-badge"
-      title={`Tier ${resolved} — ${label}`}
+      title={`Tier ${resolved} — ${label}${degraded ? " (stale quote)" : ""}`}
       className={cn(base, padding, palette[resolved], className)}
     >
       <span className={cn("w-1.5 h-1.5 rounded-full shrink-0", dot[resolved])} />

@@ -13,10 +13,11 @@ import { TierBadge } from "@/components/shared/tier-badge";
 import { BookAgreementDepthNote } from "@/components/shared/book-agreement-depth-note";
 import {
   useTradingStore,
-  selectCurrentPrice,
   selectSetActiveSymbol,
   selectGetPrediction,
 } from "@/store/useTradingStore";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
+import { QUOTE_PROVENANCE_STALE_MS } from "@/lib/quoteProvenance";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -84,8 +85,70 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
     !!normalizeSymbol(predictionSymbol) &&
     normalizeSymbol(predictionSymbol) === normalizeSymbol(symbol);
 
-  const unifiedPrice = useTradingStore(selectCurrentPrice);
-  const price = unifiedPrice > 0 ? unifiedPrice : 0;
+  const invert = normalizeSymbol(symbol) === normalizeSymbol(displayType);
+
+  // ════════════════════════════════════════════════════════════════════
+  // PART 41 [398] — PER-CARD PRICE, NEVER THE ACTIVE SYMBOL'S.
+  // Every card used to read `selectCurrentPrice` (the ACTIVE symbol) and stamp
+  // it as its own execution price — a GBP/USD active session printed ~1.32 on
+  // the BTC/USD card. The card price now resolves from its OWN symbol: the
+  // signal payload price first, then the per-symbol quote map keyed by
+  // `signal.symbol`. Unknown → "--". There is intentionally NO fallback to the
+  // active symbol's price.
+  // ════════════════════════════════════════════════════════════════════
+  const railSymbol = (signal?.symbol ?? "").trim().toUpperCase();
+  const payloadPrice =
+    typeof signal?.price === "number" &&
+    Number.isFinite(signal.price) &&
+    signal.price > 0
+      ? signal.price
+      : 0;
+  const symbolQuote = useMarketTerminalStore((s) => {
+    if (!railSymbol) return undefined;
+    // Direct key first — the backend keys quotes by the canonical symbol.
+    if (s.quotes?.[railSymbol]) return s.quotes[railSymbol];
+    // Slash/spacing variants ("BTC / USD" → "BTC/USD") fall back to a compact
+    // match across the whole map. Cheap: this path only runs for variant keys.
+    const compact = railSymbol.replace(/[\/\s_-]/g, "");
+    for (const q of Object.values(s.quotes ?? {})) {
+      if (q?.symbol && q.symbol.replace(/[\/\s_-]/g, "").toUpperCase() === compact) {
+        return q;
+      }
+    }
+    return undefined;
+  });
+  const quotePrice =
+    typeof symbolQuote?.price === "number" &&
+    Number.isFinite(symbolQuote.price) &&
+    symbolQuote.price > 0
+      ? symbolQuote.price
+      : 0;
+  const price = payloadPrice > 0 ? payloadPrice : quotePrice;
+  const priceUnknown = !(price > 0);
+
+  // PART 41 [399] — the rail carries the SAME stale marker as the panel.
+  // A verdict built on a quote older than the provenance threshold (15s) or
+  // flagged stale/held by the backend must not wear PREMIUM styling. We report
+  // the age outright ("STALE Ns") instead of silently downgrading the tier.
+  const quoteAgeMs =
+    typeof symbolQuote?.freshAgeMs === "number" &&
+    Number.isFinite(symbolQuote.freshAgeMs)
+      ? symbolQuote.freshAgeMs
+      : typeof symbolQuote?.ageMs === "number" &&
+          Number.isFinite(symbolQuote.ageMs)
+        ? symbolQuote.ageMs
+        : symbolQuote?.lastTickAt && !Number.isNaN(Date.parse(symbolQuote.lastTickAt))
+          ? Date.now() - Date.parse(symbolQuote.lastTickAt)
+          : null;
+  const stale =
+    !!symbolQuote &&
+    (symbolQuote.staleLive === true ||
+      symbolQuote.stale === true ||
+      (quoteAgeMs != null && quoteAgeMs > QUOTE_PROVENANCE_STALE_MS));
+  const staleSeconds =
+    quoteAgeMs != null && stale
+      ? Math.max(1, Math.round(quoteAgeMs / 1000))
+      : null;
 
   // ════════════════════════════════════════════════════════════════
   // ABSOLUTE CONFIDENCE SANITIZER — KILLS OVERFLOW AT CLIENT BOUNDARY
@@ -170,8 +233,22 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
             Execution Price
           </p>
           <p className="text-slate-50 font-mono text-sm sm:text-lg truncate">
-            ${formatPairPrice(price, symbol)}
+            {priceUnknown ? (
+              "--"
+            ) : (
+              <>${formatPairPrice(price, symbol)}</>
+            )}
           </p>
+          {/* PART 41 [399] — same stale marker as the panel: age the quote out
+              loud instead of showing PREMIUM styling on a stale-built verdict. */}
+          {stale ? (
+            <p
+              data-testid="rail-stale-marker"
+              className="text-st-caution text-[9px] sm:text-[10px] font-bold uppercase tracking-wider truncate mt-0.5"
+            >
+              STALE {staleSeconds != null ? `${staleSeconds}s` : ""}
+            </p>
+          ) : null}
         </div>
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
           <p className="text-ink-muted text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
@@ -209,6 +286,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           tier={signal?.tier}
           confidence={displayConfidence}
           size="sm"
+          degraded={stale}
         />
       </div>
 

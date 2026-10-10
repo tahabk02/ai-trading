@@ -227,4 +227,27 @@ describe("feed health bar", () => {
     expect(screen.getByTestId("feed-health-stalled")).toBeInTheDocument();
     staleRender.unmount();
   });
+
+  it("[422] a closed real market reads MARKET CLOSED, outranking PRICE STALE", () => {
+    const now = () => 7_000;
+    render(
+      <Counted
+        connected
+        stale
+        stalled
+        marketClosed
+        getLastUpdateMs={() => 1_000}
+        now={now}
+      />,
+    );
+    expect(screen.getByTestId("feed-health-label")).toHaveTextContent(
+      "MARKET CLOSED",
+    );
+    expect(screen.getByTestId("feed-health-label")).not.toHaveTextContent(
+      "PRICE STALE",
+    );
+    expect(screen.getByTestId("feed-health-age")).toHaveTextContent(
+      "weekly close",
+    );
+  });
 });

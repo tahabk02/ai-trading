@@ -13,6 +13,7 @@ import {
   type ExpiryOptionState,
 } from "@/lib/expirySelection";
 import { timeframeToSeconds } from "@/lib/realtimeCandleAggregator";
+import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
 
 export const PRO_EXPIRY_OPTIONS = [
   { label: "1m", seconds: 60 },
@@ -41,6 +42,10 @@ interface ProExpiryBarProps {
      next to a WEAK/SCORED-ONLY badge. */
   tier?: string | null;
   regimeScoredOnly?: boolean;
+  /* PART 40 [394]/[395] — the engine regime gate + sub-reason that decide
+     whether a target may render at all, plus the reason the TGT slot is held. */
+  regimeGate?: string | null;
+  regimeDetail?: string | null;
 }
 
 export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
@@ -52,6 +57,8 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   live,
   tier = null,
   regimeScoredOnly = false,
+  regimeGate = null,
+  regimeDetail = null,
 }) => {
   const expirationSeconds = useTradingStore(selectSelectedExpiration);
   const setSelectedExpirationSeconds = useTradingStore(
@@ -116,9 +123,20 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   // deadlock (a sub-threshold verdict disabled every option, so the operator
   // could never switch to a horizon that would clear the bar).
   const tfSeconds = timeframeToSeconds(selectedTimeframe) || 60;
+  // PART 40 [395] — the regime reason rides the SAME channel the selector
+  // already folds over the timing gate. The engine puts `pending_high_precision`
+  // in `regime_gate` (the old check read it off `suppressed_reason`, so the
+  // reason never reached this chip and it fell through to "BELOW TIER").
+  const regimeReason = regimeScoredOnly
+    ? "regime_scored_only"
+    : regimeGate === "pending_high_precision"
+      ? "pending_high_precision"
+      : regimeGate === "scored_only"
+        ? "regime_scored_only"
+        : null;
   const selector = expirySelectorState(
     regimeScoredOnly ? "T5" : tier,
-    regimeScoredOnly ? "regime_scored_only" : null,
+    regimeReason,
     tfSeconds,
     nowMs,
     PRO_EXPIRY_OPTIONS,
@@ -126,6 +144,22 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   const bySeconds = new Map(
     selector.options.map((o) => [o.seconds as number, o]),
   );
+
+  // PART 40 [394]/[395] — the SAME pure gate the chart runs: the TGT slot
+  // shows the engine target only while regime_gate is "tradable" AND the tier
+  // clears T1–T3; otherwise it states WHY it is held instead of printing "--".
+  const targetState = targetStateForPayload({
+    tier,
+    regime_gate: regimeGate,
+    suppressed_reason: regimeDetail,
+    target_price: targetPrice ?? undefined,
+  });
+  const targetCopy = targetReasonCopy(targetState.reason, targetState.detail);
+  const targetShown =
+    targetState.showTarget &&
+    targetPrice != null &&
+    Number.isFinite(targetPrice) &&
+    targetPrice > 0;
 
   // Status is reported for the horizon the operator actually SELECTED — not
   // preemptively for every option.
@@ -206,9 +240,26 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
       <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
         <span
           data-testid="pro-tgt"
-          className={`text-[10px] sm:text-[11px] font-black font-mono tabular-nums ${dirColor}`}
+          data-state={targetShown ? "target" : "withheld"}
+          data-reason={targetState.reason ?? ""}
+          data-detail={targetState.detail ?? ""}
+          className={`text-[10px] sm:text-[11px] font-black font-mono tabular-nums ${
+            targetShown ? dirColor : "text-amber-300"
+          }`}
+          title={targetShown ? undefined : targetCopy.hint}
         >
-          TGT {dirArrow} {targetPrice != null && Number.isFinite(targetPrice) ? targetPrice.toFixed(4) : "--"}
+          {targetShown ? (
+            <>
+              TGT {dirArrow}{" "}
+              {targetPrice != null && Number.isFinite(targetPrice)
+                ? targetPrice.toFixed(4)
+                : "--"}
+            </>
+          ) : (
+            <>
+              TGT — <span className="uppercase tracking-wider">{targetCopy.label}</span>
+            </>
+          )}
         </span>
         <span
           data-testid="pro-anc"
@@ -264,7 +315,10 @@ const ExpiryHorizonStatus: React.FC<{
       text = "SCORED-ONLY — RANDOM WALK · ALL EXPIRIES";
       break;
     case "regime_pending_high_precision":
-      text = "BELOW 96.5% BAR · ALL EXPIRIES";
+      // PART 40 [395] — the gate value, not an inference: the engine withholds
+      // for many sub-reasons (otc_hf_fail, insufficient_history, …), so
+      // claiming "below 96.5%" here would state a reason the engine never gave.
+      text = "PENDING HIGH PRECISION · ALL EXPIRIES";
       break;
     case "low_tier":
       text = "BELOW TIER THRESHOLD · ALL EXPIRIES";

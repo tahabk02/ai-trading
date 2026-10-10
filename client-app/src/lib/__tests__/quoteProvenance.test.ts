@@ -96,4 +96,20 @@ describe("[384] quoteProvenance", () => {
       }).tone,
     ).toBe("fallback");
   });
+
+  it("[422] a market-closed REAL quote is its own state, never HELD or live", () => {
+    const p = quoteProvenance({
+      source: "market_closed_last_close",
+      stale: true,
+      staleLive: true,
+      freshAgeMs: null,
+      ageMs: 3_600_000,
+      marketClosed: true,
+      lastTickAt: "2026-10-09T20:59:00.000Z",
+    });
+    expect(p.tone).toBe("closed");
+    expect(p.label).toBe("MARKET CLOSED");
+    expect(p.title).toMatch(/last close \(20:59 UTC\)/);
+    expect(p.label).not.toContain("HELD");
+  });
 });

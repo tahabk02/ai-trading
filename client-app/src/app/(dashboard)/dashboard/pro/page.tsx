@@ -51,6 +51,7 @@ import {
   selectSelectedTimeframe,
   selectSelectedExpiration,
 } from "@/store/useTradingStore";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 
 /**
  * PRO TERMINAL — the single-asset deep-dive. Opened from the Market Terminal
@@ -112,6 +113,24 @@ function ProTerminalInner() {
   // and seeds the aggregator with REAL backend OHLC history when present.
   const predictionData = useTradingStore((s) => s.predictionData);
 
+  // PART 42.1 [422] — the feed-health bar must say MARKET CLOSED (never PRICE
+  // STALE) when every REAL forex instrument is in its weekly closed window.
+  // Returns a primitive so the page re-renders only on the transition, never on
+  // the tick clock. OTC/crypto quotes are ignored (they are 24/7). When the
+  // market-terminal store is unhydrated (direct Pro load) this stays false and
+  // the bar behaves exactly as before.
+  const realMarketClosed = useMarketTerminalStore((s) => {
+    let anyReal = false;
+    for (const key in s.quotes) {
+      const q = s.quotes[key];
+      if (q.assetSubType === "forex") {
+        anyReal = true;
+        if (!q.marketClosed) return false;
+      }
+    }
+    return anyReal;
+  });
+
   // ═══ THE ONE COHERENT SIGNAL VIEW ═══
   // Published by the chart (sole owner of the SignalHoldBuffer and of the
   // broker-grid `wallSec` clock) and consumed here for the CoherenceStrip.
@@ -136,6 +155,18 @@ function ProTerminalInner() {
     : (predictionData?.tier ?? null);
   const coherentRegimeScoredOnly =
     coherentView?.suppressedReason === "regime_scored_only";
+  // PART 40 [394]/[395] — regime gate + engine sub-reason for the Pro target
+  // slot. Same precedence rule as the strip above: the published view is the
+  // authority, the raw payload is the pre-first-publish fallback, and with
+  // neither in hand the honest state is "awaiting", never a silent blank.
+  const coherentRegimeGate = coherentView
+    ? coherentView.regimeGate
+    : (predictionData?.regime_gate ?? null);
+  const coherentRegimeDetail = coherentView
+    ? coherentView.regimeDetail
+    : predictionData
+      ? (predictionData?.suppressed_reason ?? null)
+      : "awaiting_payload";
   // ── HYDRATION-SAFE TIMEFRAME RESTORE (deterministic "1m" SSR default) ──
   const hydrateSelectedTimeframe = useTradingStore(
     (s) => s.hydrateSelectedTimeframe,
@@ -379,6 +410,7 @@ function ProTerminalInner() {
           connected={connected}
           stale={stalePrice}
           stalled={streamStalled}
+          marketClosed={realMarketClosed}
         />
 
         <main className="flex-1 min-h-0 p-3 sm:p-4 md:p-6 overflow-x-hidden overflow-y-auto custom-scrollbar xl:overflow-y-hidden">
@@ -499,6 +531,8 @@ function ProTerminalInner() {
                     live={engineLive}
                     tier={coherentTier}
                     regimeScoredOnly={coherentRegimeScoredOnly}
+                    regimeGate={coherentRegimeGate}
+                    regimeDetail={coherentRegimeDetail}
                   />
                 {/*
                   THE CHART.
