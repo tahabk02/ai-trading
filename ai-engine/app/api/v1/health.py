@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict
 
 from fastapi import APIRouter
@@ -49,7 +49,7 @@ def health_report() -> Dict[str, Any]:
         "warmup_running": bool(warmup),
         "warmup_progress": warmup_progress(),
         "last_error": last_health_error(),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 
@@ -107,7 +107,7 @@ def gate_report() -> Dict[str, Any]:
         "legacy_hard_gate_frac": float(HARD_GATE),
         "configured_threshold_pct": round(float(configured_pct), 2),
         "signal_gatekeeper_loaded": True,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 

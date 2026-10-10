@@ -147,7 +147,7 @@ class SignalGenerator:
                 "status": "NO_TRADE",
                 "reason": "NEWS_FREEZE",
                 "confidence": 0.0,
-                "timestamp": pd.Timestamp.utcnow().isoformat(),
+                "timestamp": pd.Timestamp.now("UTC").isoformat(),
                 "indicators": {"adx": _round_up_5(adx), "atr": _round_up_5(atr)},
             }
 
@@ -258,7 +258,7 @@ class SignalGenerator:
                 "adx": _round_up_5(adx),
                 "atr": _round_up_5(atr),
             },
-            "timestamp": pd.Timestamp.utcnow().isoformat(),
+            "timestamp": pd.Timestamp.now("UTC").isoformat(),
             "debug": {
                 "regime": self.ta_service.get_market_regime(adx),
                 "risk": risk,
@@ -432,5 +432,5 @@ def generate_unbiased_prediction(
             )
             else f"NO SIGNAL — confidence {float(verdict.confidence):.2f}% < threshold {(float(settings.CONFIDENCE_THRESHOLD) if float(settings.CONFIDENCE_THRESHOLD) > 1 else float(settings.CONFIDENCE_THRESHOLD) * 100):.2f}%"
         ),
-        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "timestamp": pd.Timestamp.now("UTC").isoformat(),
     }

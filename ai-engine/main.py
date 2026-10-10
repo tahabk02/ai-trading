@@ -16,4 +16,8 @@ import uvicorn
 from app.main import app
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # timeout_keep_alive=5 — close idle keep-alive connections promptly so
+    # high-frequency /tick-signal dispatches from the core-backend never pile
+    # up as half-closed sockets on the accept side (see core-backend
+    # aiEngineHttp.ts pooled agent for the client-side half of this fix).
+    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=5)

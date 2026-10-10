@@ -1,9 +1,10 @@
 import asyncio
 import math
+import os
 import time
 import httpx
 import structlog
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..core.config import settings
@@ -386,10 +387,10 @@ class MarketDataCollector:
             # margin) makes >= `limit` REAL observations arrive naturally.
             # NO synthetic backfilling anywhere in this path.
             calendar_days = min(int(days * 1.5) + 30, 430)
-            start_date = (
-                datetime.utcnow().timestamp() - calendar_days * 86400
-            )
-            start_iso = datetime.utcfromtimestamp(start_date).strftime("%Y-%m-%d")
+            start_date = datetime.now(UTC).timestamp() - calendar_days * 86400
+            start_iso = datetime.fromtimestamp(
+                start_date, tz=UTC
+            ).strftime("%Y-%m-%d")
             url = f"{self.FRANKFURTER_API}/{start_iso}..?from={base}&to={quote}"
             resp = await self.client.get(url)
             if resp.status_code == 404:
@@ -648,6 +649,26 @@ ASSET_HISTORY_UPSERT_INTERVAL_SECONDS = 60.0
 ASSET_HISTORY_WINDOW_LABEL = "30m"
 ASSET_HISTORY_TIMEFRAME = "1m"
 
+# ── BOUNDED FAN-OUT (2026-09-30) ─────────────────────────────────────────
+# run_once() used to fetch OTC_SET (34 symbols) STRICTLY SERIALLY, each with an
+# up-to-12s httpx timeout against three public REST endpoints, then POST to the
+# backend. Worst case one pass took 34 x 12s ~= 408s while the scheduler slept
+# only 60s, so passes piled up and the whole event loop spent its time on
+# public-internet round trips that failed open. A failed fetch is NOT negatively
+# cached, so the whole 34-symbol storm repeated every minute, indefinitely.
+#
+# Bounded concurrency keeps the pass wall-clock near one timeout instead of 34,
+# and a hard per-pass deadline guarantees a slow pass can never overlap the next
+# one. External REST is best-effort by construction: symbols that miss the
+# deadline simply produce no bar this minute (never fabricated), and the local
+# WebSocket tick pipeline remains the authoritative source either way.
+ASSET_HISTORY_FETCH_CONCURRENCY = int(
+    os.getenv("AI_ENGINE_ASSET_HISTORY_CONCURRENCY", "8")
+)
+ASSET_HISTORY_PASS_DEADLINE_SECONDS = float(
+    os.getenv("AI_ENGINE_ASSET_HISTORY_DEADLINE_S", "25")
+)
+
 
 class AssetHistoryUpsertJob:
     """Periodic ai-engine-side AssetHistory reconciliation job."""
@@ -668,46 +689,87 @@ class AssetHistoryUpsertJob:
         resp.raise_for_status()
         return resp.json()
 
+    async def _upsert_symbol(self, symbol: str, bucket_ms: int) -> int:
+        """Fetch one real live rate and idempotently upsert its 1m bar.
+
+        Returns the number of bars ingested (0 on any failure). Never
+        fabricates: without a genuine live rate, no row is emitted.
+        """
+        try:
+            price = await self.collector.fetch_live_spot(symbol)
+        except Exception as e:
+            logger.warning("[AssetHistory] live spot failed", symbol=symbol, error=str(e))
+            return 0
+        if not price or price <= 0 or not math.isfinite(price):
+            return 0  # no real rate → no row (never fabricate)
+
+        payload = {
+            "symbol": symbol,
+            "timeframe": ASSET_HISTORY_TIMEFRAME,
+            "bars": [
+                {
+                    "bucketStartMs": bucket_ms,
+                    "open": round(price, 6),
+                    "high": round(price, 6),
+                    "low": round(price, 6),
+                    "close": round(price, 6),
+                    "volume": None,
+                    "tickCount": 1,
+                }
+            ],
+        }
+        try:
+            result = await self._post_bars(payload)
+            upserted = int(result.get("ingested", 0))
+        except Exception as e:
+            logger.warning("[AssetHistory] upsert failed", symbol=symbol, error=str(e))
+            return 0
+        logger.info(
+            "AssetHistory upserted",
+            symbol=symbol,
+            bars=upserted,
+            window=ASSET_HISTORY_WINDOW_LABEL,
+        )
+        return upserted
+
     async def run_once(self) -> int:
         total = 0
         bucket_ms = self.minute_bucket_ms(time.time() * 1000.0)
-        for symbol in sorted(OTC_SET):
-            try:
-                price = await self.collector.fetch_live_spot(symbol)
-            except Exception as e:
-                logger.warning("[AssetHistory] live spot failed", symbol=symbol, error=str(e))
-                continue
-            if not price or price <= 0 or not math.isfinite(price):
-                continue  # no real rate → no row (never fabricate)
+        symbols = sorted(OTC_SET)
 
-            payload = {
-                "symbol": symbol,
-                "timeframe": ASSET_HISTORY_TIMEFRAME,
-                "bars": [
-                    {
-                        "bucketStartMs": bucket_ms,
-                        "open": round(price, 6),
-                        "high": round(price, 6),
-                        "low": round(price, 6),
-                        "close": round(price, 6),
-                        "volume": None,
-                        "tickCount": 1,
-                    }
-                ],
-            }
-            try:
-                result = await self._post_bars(payload)
-                upserted = int(result.get("ingested", 0))
-            except Exception as e:
-                logger.warning("[AssetHistory] upsert failed", symbol=symbol, error=str(e))
-                continue
-            total += upserted
-            logger.info(
-                "AssetHistory upserted",
-                symbol=symbol,
-                bars=upserted,
-                window=ASSET_HISTORY_WINDOW_LABEL,
+        # Bounded concurrency: wall-clock is now ~one timeout, not len(symbols)
+        # of them. The semaphore keeps us from opening 34 simultaneous sockets.
+        sem = asyncio.Semaphore(max(1, ASSET_HISTORY_FETCH_CONCURRENCY))
+
+        async def _guarded(symbol: str) -> int:
+            async with sem:
+                return await self._upsert_symbol(symbol, bucket_ms)
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(_guarded(s) for s in symbols),
+                    return_exceptions=True,
+                ),
+                timeout=ASSET_HISTORY_PASS_DEADLINE_SECONDS,
             )
+        except asyncio.TimeoutError:
+            # A slow pass is abandoned, NOT retried into the next interval.
+            logger.warning(
+                "[AssetHistory] pass exceeded deadline; skipping remainder",
+                deadline_s=ASSET_HISTORY_PASS_DEADLINE_SECONDS,
+                symbols=len(symbols),
+            )
+            return 0
+
+        for symbol, res in zip(symbols, results):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "[AssetHistory] symbol failed",
+                    symbol=symbol, error=str(res),
+                )
+                continue
+            total += res
         return total
 
     async def run_forever(self) -> None:

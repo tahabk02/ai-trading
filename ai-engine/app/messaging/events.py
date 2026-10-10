@@ -9,7 +9,7 @@ Events are plain dataclasses serialised to JSON for Redis Pub/Sub.
 
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -23,7 +23,7 @@ class SignalGeneratedEvent:
     stop_loss: float
     take_profit: float
     indicators: Dict[str, float]
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     status: str = "ACTIVE"
     reason: Optional[str] = None
 
@@ -39,7 +39,7 @@ class NoTradeEvent:
     status: str  # "NO_DATA" | "INVALID_CANDLES" | "INVALID_INDICATORS" | "SIDEWAYS_CHOP" | "NEWS_FREEZE" | "LOW_CONFIDENCE" | "INTERNAL_ERROR"
     reason: Optional[str] = None
     confidence: float = 0.0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -54,7 +54,7 @@ class ModelTrainedEvent:
     version: str
     accuracy: float
     features: list[str]
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -66,7 +66,7 @@ class EngineStatusEvent:
 
     status: str  # "OPERATIONAL" | "DEGRADED" | "OFFLINE"
     message: Optional[str] = None
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from datetime import datetime
+from datetime import UTC, datetime
 import structlog
 import asyncio
 import numpy as np
@@ -260,6 +260,13 @@ async def _warmup_launcher() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await publisher.connect()
+    # Authoritative expiry-scoped signal lock. Connect eagerly so the first
+    # request does not pay a Redis round trip, and so a Redis outage is logged
+    # once at startup rather than on every tick. Falls back to process-local
+    # semantics if Redis is down (see services/signal_lock.py).
+    from .services.signal_lock import signal_lock as _signal_lock
+
+    await _signal_lock.connect()
     data_cache.clear_all()
     logger.info("AI Engine DataCache cleared on startup — stale prices purged")
     # Fire-and-forget warmup — don't block server readiness. /health reports
@@ -283,6 +290,7 @@ async def lifespan(app: FastAPI):
     warmup_task.cancel()
     set_warmup_running(False)
     await publisher.close()
+    await _signal_lock.close()
     logger.info("AI Engine shutdown complete")
 
 
@@ -292,11 +300,32 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# ── CORS ──
+# Mirrors core-backend/src/config/cors.ts: an explicit env-driven allowlist that
+# Starlette reflects verbatim, plus an https Dev Tunnel regex so a reissued
+# tunnel never needs a config edit.
+#
+# This deliberately does NOT use `allow_origins=["*"]`. Combined with
+# `allow_credentials=True` that is the one pairing the Fetch spec forbids: a
+# browser rejects `Access-Control-Allow-Origin: *` on a credentialed request,
+# and Starlette papers over the conflict by reflecting whatever origin asked —
+# turning the engine into an unauthenticated wildcard callable from any site a
+# logged-in operator visits. For a trading engine that is not a stylistic
+# preference, so the allowlist stays explicit.
+#
+# With no Origin header (curl, server-to-server, the Next.js rewrite) the
+# middleware is a no-op, which is exactly the tunnel/SSR path we want.
+_DEV_TUNNEL_ORIGIN_RE = (
+    r"^https://[a-z0-9-]+-\d{2,5}\.[a-z0-9-]+\.devtunnels\.ms$"
+    r"|^https://[a-z0-9-]+\.tunnels\.api\.visualstudio\.com$"
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origin_list,
+    allow_origin_regex=_DEV_TUNNEL_ORIGIN_RE if settings.CORS_ALLOW_DEV_TUNNELS else None,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -334,7 +363,7 @@ async def validation_exception_handler(
             "error": "Validation Error",
             "detail": error_details,
             "message": "One or more required fields are missing or invalid.",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         },
     )
 
@@ -351,5 +380,7 @@ async def health_check_gate():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # timeout_keep_alive=5 — same leak guard as the root runner: idle pooled
+    # sockets from the core-backend are closed quickly instead of lingering.
+    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=5)
 

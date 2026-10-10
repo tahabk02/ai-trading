@@ -70,9 +70,13 @@ def _app_client():
     return TestClient(app)
 
 
-def test_definitive_tape_ships_rf_numbers_and_flag_false():
+def test_definitive_tape_ships_rf_numbers_and_flag_false(monkeypatch):
     """The RandomForest corroborator RAN: split rf_* fields present, legacy
     ml_probability/model_accuracy are EXACT aliases of the RF numbers."""
+    # The interactive inference budget (default 150ms, P1-2026-09-24) is a
+    # COLD-CACHE guard for the LIVE terminal — this test pins the RF enrichment
+    # contract on a definitive tape, so give the train a generous budget here.
+    monkeypatch.setattr("app.services.ml_predictor.INFERENCE_BUDGET_MS", 60.0)
     client = _app_client()
     n = 120
     rng = np.random.default_rng(99)
@@ -166,9 +170,13 @@ def test_subthermal_fallback_never_populates_rf_or_legacy_keys(monkeypatch):
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # The sub-thermal path: direction kept, signal withheld as market-waiting.
-    assert body["market_waiting"] is True, body
-    assert body["signal"] is None, body
+    # Flexible-tier: a genuine sub-thermal direction is EMITTED with its real
+    # tier and marked scored-only, rather than nulled into market-waiting.
+    assert body["signal"] == "SELL", body
+    assert body["dispatchable"] is True, body
+    assert body["market_waiting"] is False, body
+    assert body["executable"] is False, body
+    assert body["scored_only"] is True, body
 
     # RF never ran: honest nulls + flag — the response must NOT show the old
     # `ml_probability = confidence/100` / `model_accuracy = agreement` swap.

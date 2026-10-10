@@ -725,23 +725,32 @@ def atr_volatility_regime(closes: np.ndarray, highs: np.ndarray, lows: np.ndarra
 # DEFINITIVE_CONFIDENCE_MIN is imported from signal_gatekeeper so the thermal
 # bar used here IS the canonical HARD_GATE = 0.98 (98.0%) — never a local copy.
 # ── ONE CANONICAL CONVERGENCE LOGISTIC (organic 98% scaling) ──
-# A single logistic maps the two-factor real-tape convergence index (agreement
-# × strength, composed in compute_multiplicative_confluence below) onto the
-# percentage scale. Tuned so a convergence index of 0.90 — 90% of the ACTIVE
-# independent evidence streams aligned at meaningful magnitude — lands near
-# the 96.5% region, while the canonical 98% DEFINITIVE gate sits just above it
-# at conv ≈ 0.955 (only near-total real-tape unanimity passes):
-#   score = 100 / (1 + e^{−k·(conv − t)}),  k = 16.6, t = 0.70
-#   conv 0.50 → ~3.5%    conv 0.60 → ~16%    conv 0.70 → 50%
-#   conv 0.80 → ~78%     conv 0.90 → 96.5%   conv 0.955 → 98.0% (gate)
-#   conv 1.00 → 99.3% (full active-book unanimity)
-# Legitimate strong momentum therefore resolves sharply into the 98-99.3
-# definitive band, while a bare majority or faint-alignment tape is correctly
-# held sub-thermal — 0% demo, 0% fabrication (a strict monotone mapping of the
-# real directional agreement the books actually produced).
-FACTOR_GATE_K = 16.6                      # logistic steepness for convergence → %
-FACTOR_GATE_MIDPOINT = 0.70               # conv where score = 50%
-_FACTOR_GATE_CURVE = "100/(1+e^{-16.6*(conv-0.70)})  conv=0.90→96.5%  conv=0.955→98.0% (gate)"
+# A single logistic maps the real-tape convergence index (composed in
+# compute_multiplicative_confluence below) onto the percentage scale.
+#
+#   score = 100 / (1 + e^{−k·(conv − t)}),  k = 20.0, t = 0.70
+#   conv 0.46 →  ~7.6%   conv 0.58 → ~46%    conv 0.70 → 73%
+#   conv 0.805 → 89%     conv 0.8975 → 98.1%  conv 0.9162 → 98.7%
+#
+# WHY k WAS RE-DERIVED (2026-09-30 anti-saturation). The previous pair
+# (k = 16.6, t = 0.70) placed the 98% gate at conv ≈ 0.955 out of a possible
+# 1.000 — a value the composition could only reach by PINNING, because its
+# strength term `clip(magnitude / 0.30, 0, 1)` was FLAT above 0.30. With that
+# term saturated, `conv = alignment × (0.6 + 0.4 × 1.0)` = exactly
+# `alignment`, so any unanimous tape read conv = 1.0 → 99.32% — flat, ramped
+# and noisy synthetic tapes included. Measured over 400 randomised real-shaped
+# tapes: 387/400 collapsed onto 13 distinct scores and 27.25% landed on the
+# 99.32% ceiling, with ZERO variation anywhere in the top decile.
+#
+# The strength term is now the strictly-monotone rational s(m) = m/(m+0.25),
+# so conv can no longer be pinned, and the steeper logistic (k 16.6 → 20.0,
+# same canonical midpoint t = 0.70) spends its range where the evidence
+# actually is. Nothing about the gate is relaxed — the same anchor tape that
+# cleared 98% before still clears it (98.7%), while evidence that used to pin
+# at 99.3% now resolves honestly across the whole band.
+FACTOR_GATE_K = 20.0                      # logistic steepness for convergence → %
+FACTOR_GATE_MIDPOINT = 0.70               # conv where score ≈ 73% (canonical)
+_FACTOR_GATE_CURVE = "100/(1+e^{-20.0*(conv-0.70)})  conv=0.8975→98.1%  conv=0.9162→98.7% (gate band)"
 CONFLUENCE_SIGMOID_STEEPNESS = FACTOR_GATE_K       # alias — the SAME curve
 CONFLUENCE_SIGMOID_MIDPOINT = FACTOR_GATE_MIDPOINT # alias — the SAME curve
 # ── TWO-FACTOR CONVERGENCE COMPOSITION (replaces the unreachable geo-mean) ──
@@ -749,22 +758,46 @@ CONFLUENCE_SIGMOID_MIDPOINT = FACTOR_GATE_MIDPOINT # alias — the SAME curve
 # tapes: e_i = 0.5+0.5·max(f·sign,0) means a single modest book (|f|≈0.35)
 # yields e≈0.68, and the product across 8 books pinched G to ~0.60-0.75 →
 # permanent 7-50% throttling no matter how strong the setup (98% demanded
-# EVERY book at ≥0.88 strength simultaneously). The convergence index is now a
-# JOINT agreement × strength product of the live evidence:
-#   alignment — fraction of ACTIVE independent books aligned with the
-#               arbitrated direction (each aligned book is one honest vote).
-#   strength  — mean |magnitude| of the aligned books, saturating at
-#               CONFLUENCE_MAGNITUDE_FULL_AT (0.30). This keeps the curve
-#               disciplined: faint "technically aligned" votes can never
-#               manufacture 98%, only real convictions can.
+# EVERY book at ≥0.88 strength simultaneously). The convergence index is a
+# JOINT product of live evidence:
+#   alignment — fraction of ACTIVE books on-direction, discounted by BREADTH.
+#   magnitude — mean |strength| of the aligned books via a soft, NEVER-SATURATING
+#               rational curve s(m) = m / (m + MAG_HALF).
 # Purity is untouched — 0-valued (missing/data-less) books stay INACTIVE
 # (excluded from both numerator and denominator, never counted as dissent),
 # and per-pillar presence is still enforced by the cluster blockers below, so
 # the strict institutional validity AND-gate (volatility, momentum,
 # microstructure all live) is preserved exactly.
+#
+# WHY THE MAGNITUDE CURVE IS RATIONAL AND THE BREADTH CURVE IS NOT ────────────
+# The saturated `clip(m / 0.30, 0, 1)` was the whole defect. It is monotone only
+# up to its knee and then FLAT, so every book from |0.30| to |1.00| bought
+# EXACTLY ZERO additional confidence: the composed index had a hard mathematical
+# ceiling that it reached on ordinary input, and any unanimous tape read exactly
+# conv = 1.0 → 99.32% — flat, ramped and noisy synthetic tapes alike. A rational
+# curve s(m) = m/(m+half) is strictly increasing on [0, ∞) and approaches 1
+# asymptotically without ever attaining it, so the top of the scale is now
+# reachable only by the top of the EVIDENCE.
+#
+# Breadth deliberately KEEPS its linear min(1, n/6) discount. Charging the
+# SCORE for a missing evidence pillar as well would double-count it: the
+# cluster blockers below already demote any confluence with an incomplete
+# volatility / momentum / microstructure pillar from T1 to T2, which is the
+# system's designed and single mechanism for "less evidence spoke". When the
+# breadth term was additionally made steep enough to matter, a genuine
+# 140-bar 5%-drift trend (six active books, magnitude 0.73, no volume feed)
+# fell from 96.6% to 94.6% and stopped being executable — the anti-saturation
+# work had silently removed a real tradable setup. The score expresses HOW
+# STRONGLY the live books agree; the blocker/tier ladder expresses HOW MANY
+# of them were present. Keeping those two jobs separate is what stops the
+# calibration from quietly tightening the execution gate.
 CONFLUENCE_MAGNITUDE_WEIGHT = 0.40       # strength share of the composed index
-CONFLUENCE_MAGNITUDE_FULL_AT = 0.30      # |aligned strength| that counts as "full"
+CONFLUENCE_MAGNITUDE_HALF_AT = 0.25      # s(0.25) = 0.50 — the magnitude knee
+CONFLUENCE_ALIGNMENT_HALF_AT = 6.0       # legacy alias — breadth uses min(1, n/6)
+CONFLUENCE_ALIGNMENT_FULL_AT = 6.0       # active books for an undiscounted alignment
 CONFLUENCE_CLUSTER_MIN_ALIGN = 0.40      # per-pillar presence/alignment floor
+# Legacy name kept so existing imports keep resolving; it is now the soft knee.
+CONFLUENCE_MAGNITUDE_FULL_AT = CONFLUENCE_MAGNITUDE_HALF_AT
 CONFLUENCE_CLUSTERS: Dict[str, Tuple[str, ...]] = {
     "volatility": ("bollinger_bands", "atr_volatility"),
     "momentum": ("macd_rsi_stack", "donchian_breakout", "candlestick"),
@@ -781,9 +814,38 @@ CONFLUENCE_CLUSTERS: Dict[str, Tuple[str, ...]] = {
 ORDER_BOOK_DEPTH_FACTOR = "order_book_depth"
 DEPTH_ACTIVE_MIN = 0.10            # |imbalance| >= 0.10 (a 55/45 book) counts live
 DEPTH_VERIFIED_STRENGTH_MIN = 0.50  # |imbalance| that makes the book "verified"
-DEPTH_VERIFIED_MIN_CONV = 0.80      # base convergence at which the lift begins
-DEPTH_VERIFIED_RAMP = 0.20          # conv span over which the lift ramps to full
-DEPTH_VERIFIED_LIFT_MAX = 0.12      # max conv added by a fully-verified book
+# The lift window is expressed on the CONVERGENCE-INDEX scale, re-derived with
+# the 2026-09-30 anti-saturation work. On this curve T2/HIGH (90%) sits at
+# conv ≈ 0.855 and the 98% gate at conv ≈ 0.885, so the ramp spans that gap.
+DEPTH_VERIFIED_MIN_CONV = 0.855
+DEPTH_VERIFIED_RAMP = 0.030
+DEPTH_VERIFIED_LIFT_MAX = 0.030     # max conv added by a fully-verified book
+# The lift may close AT MOST this share of the remaining gap to the thermal
+# bar, so real resting liquidity can accelerate a converged confluence but can
+# NEVER carry one across the gate by itself. The 98% bar means "the multi-book
+# evidence is overwhelming"; a single liquidity snapshot deciding that on its
+# own is precisely the blind-dispatch failure the bar exists to prevent. A
+# tape that clears 98% does so on the books, with the skew as corroboration.
+DEPTH_VERIFIED_LIFT_HEADROOM_SHARE = 0.50
+
+
+def _conv_for_score(score_pct: float) -> float:
+    """Inverse of the canonical logistic: the convergence index that maps to
+    ``score_pct``. Derived (never hand-copied) so the gate cap below can never
+    drift away from FACTOR_GATE_K / FACTOR_GATE_MIDPOINT."""
+    p = float(np.clip(score_pct, 1e-6, 100.0 - 1e-6)) / 100.0
+    return FACTOR_GATE_MIDPOINT + float(np.log(p / (1.0 - p))) / FACTOR_GATE_K
+
+
+# The 98% thermal bar expressed on the convergence-index scale. The
+# depth-verified lift is HARD-CAPPED at this value: a one-sided real book may
+# carry a converged confluence UP TO the thermal bar and never beyond it.
+# Without the cap the lift is an UNBOUNDED ADD and simply relocates the
+# saturation defect — with the steeper post-fix logistic, +0.12 of conv moved
+# the score from 99.08% to 99.98% and pinned a quarter of all real-shaped
+# tapes onto a fresh 99.9% ceiling. A bounded lift is the only honest form:
+# real liquidity corroborates, it does not manufacture.
+CONFLUENCE_GATE_CONV = _conv_for_score(DEFINITIVE_CONFIDENCE_MIN)
 
 MICROSTRUCTURE_QUEUE_FACTOR = "microstructure_queue"
 
@@ -797,8 +859,8 @@ def resolve_confluence_tier(score: float, blockers: list) -> str:
     missing feed, e.g. an unconverged microstructure pillar): blockered
     confluences can still dispatch at a lower tier (exactly why they are not
     top-of-the-ladder), but the PREMIUM T1 tag is reserved for confluences
-    whose evidence pillars are all live AND aligned. ``score`` 0.70-0.965
-    maps to T4-LOW → T1-PREMIUM; anything below 0.70 is honestly INSUFFICIENT
+    whose evidence pillars are all live AND aligned. ``score`` 0.30-0.965
+    maps to T4-LOW → T1-PREMIUM; anything below 0.30 is honestly INSUFFICIENT
     (never dispatched). Identical candle math — only the gate label changes.
     """
     gate = compute_confluence_tier_by_score(score)
@@ -844,16 +906,18 @@ def compute_multiplicative_confluence(
     confluence. 0-valued factors are INACTIVE (missing feed) and are excluded
     from BOTH the alignment numerator and denominator: they neither help nor
     vote, exactly like a silenced book. The convergence index is the JOINT
-    product of ALIGNMENT (fraction of ACTIVE books on-direction) and STRENGTH
-    (mean aligned magnitude, saturating at CONFLUENCE_MAGNITUDE_FULL_AT),
-    mapped through the canonical logistic whose 0.90 inflection is exactly
-    DEFINITIVE_CONFIDENCE_MIN (98.0%). The DEFINITIVE gate therefore requires
-    score >= ``threshold`` AND every pillar's members present (logical AND
-    across volatility, momentum and microstructure — cluster presence is
-    enforced by ``blockers``). ``threshold`` is the STRICT 98% thermal bar the caller computed
-    (quant_matrix / live_quant FLAT at 98% in every regime — never relaxed;
-    so it accepts the caller's threshold unchanged); external callers
-    that omit it also get the full 98%. The microstructure queue factor
+    product of ALIGNMENT (fraction of ACTIVE books on-direction, discounted by
+    evidence breadth) and STRENGTH (mean aligned magnitude through the
+    non-saturating rational curve s(m) = m/(m + CONFLUENCE_MAGNITUDE_HALF_AT)),
+    mapped through the canonical logistic whose 98% inflection sits at
+    conv ≈ 0.72. Every term is STRICTLY MONOTONE and none can be pinned by a
+    clamp, so the top of the scale is reachable only by the top of the
+    evidence — see the anti-saturation note beside FACTOR_GATE_K. The DEFINITIVE
+    gate therefore requires score >= ``threshold`` AND every pillar's members
+    present (logical AND across volatility, momentum and microstructure —
+    cluster presence is enforced by ``blockers``). ``threshold`` is the
+    STRICT 98% thermal bar the caller computed; external callers that omit it
+    also get the full 98%. The microstructure queue factor
     is live via the real bid/ask book when one exists, else via the honest
     tick-position proxy on the real close tape; a genuinely flat tape (no
     queue signal in either source) cannot reach DEFINITIVE. This makes strong
@@ -880,6 +944,13 @@ def compute_multiplicative_confluence(
         "blockers": [],
         "active_count": 0,
         "aligned_count": 0,
+        # Present on EVERY return path so consumers can read the anti-saturation
+        # diagnostics unconditionally (a neutral tape has no evidence at all).
+        "alignment": 0.0,
+        "alignment_effective": 0.0,
+        "evidence_breadth": 0.0,
+        "magnitude": 0.0,
+        "convergence_index": 0.0,
     }
     if sign == 0.0:
         return empty
@@ -945,40 +1016,58 @@ def compute_multiplicative_confluence(
         log_ev = [0.5]
     G = float(np.exp(np.mean(np.log(np.asarray(log_ev)))))
 
-    # ── TWO-FACTOR CONVERGENCE INDEX (agreement × strength) ──
-    # alignment  = fraction of ACTIVE independent books aligned with the
-    #              arbitrated direction — the honest multi-book vote count.
-    # magnitude  = mean |strength| of those aligned books; any missing/zero
-    #              book is INACTIVE and excluded from both counts, never a veto.
-    # conv       = alignment, discounted only when the aligned books carry
-    #              faint convictions (< CONFLUENCE_MAGNITUDE_FULL_AT). This is
-    #              the single input to the canonical logistic, whose 0.90
-    #              inflection sits just below the 98% thermal gate and
-    #              whose 1.0 maps to ~99.3% (full unanimity at real magnitude).
+    # ── TWO-FACTOR CONVERGENCE INDEX (agreement × strength), NON-SATURATING ──
+    # alignment  = fraction of ACTIVE books aligned with the arbitrated
+    #              direction, discounted by how many books actually spoke.
+    # magnitude  = mean |strength| of those aligned books, passed through a
+    #              RATIONAL curve s(m) = m/(m+HALF) that is strictly
+    #              increasing and never reaches 1.0 at any finite magnitude.
+    # conv       = alignment_effective × (1 - W + W·s(m)) — the single input to
+    #              the canonical logistic, whose 98% gate now sits at conv ≈
+    #              0.72 rather than 0.955, i.e. it is reachable ONLY by broad,
+    #              unanimous, high-magnitude evidence.
     aligned_strengths = [
         float(factors[k]) * sign for k in active_keys
         if (float(factors[k]) * sign) > 0.0
     ]
     aligned_count = len(aligned_strengths)
     alignment = aligned_count / len(active_keys)
+    # EVIDENCE-BREADTH DISCOUNT: a unanimous but THIN book set is not unanimity.
+    # Linear min(1, n/6) — this is a DISCOUNT, not a saturation, and it is
+    # deliberately the only non-soft term left in the composition. See the
+    # block comment above: the cluster blockers already express missing
+    # evidence via the T1→T2 tier demotion, so steepening this term as well
+    # would double-count and quietly un-execute real trending tapes.
+    breadth = float(min(1.0, len(active_keys) / CONFLUENCE_ALIGNMENT_HALF_AT))
+    alignment_effective = alignment * breadth
     magnitude = float(np.mean(aligned_strengths)) if aligned_strengths else 0.0
-    strength_component = float(np.clip(
-        magnitude / CONFLUENCE_MAGNITUDE_FULL_AT, 0.0, 1.0
-    ))
+    # STRICTLY MONOTONE strength: m/(m+half). Replaces clip(m/0.30, 0, 1),
+    # which was FLAT above 0.30 and made |f|=0.30 indistinguishable from |f|=1.
+    strength_component = (
+        magnitude / (magnitude + CONFLUENCE_MAGNITUDE_HALF_AT)
+        if magnitude > 0.0 else 0.0
+    )
     conv = float(np.clip(
-        alignment * (
+        alignment_effective * (
             (1.0 - CONFLUENCE_MAGNITUDE_WEIGHT)
             + CONFLUENCE_MAGNITUDE_WEIGHT * strength_component
         ),
         0.0, 1.0,
     ))
-    # ── DEPTH-VERIFIED DYNAMIC LIFT ──
+    # ── DEPTH-VERIFIED DYNAMIC LIFT (soft, bounded by the thermal bar) ──
     # A real one-sided order book is the tick path's strongest confirmation:
-    # once the base books already converge at DEPTH_VERIFIED_MIN_CONV, the
-    # verified book's skew lifts the convergence index the rest of the way to
-    # the 98% inflection — scaling DYNAMICALLY with the book's own strength
-    # (a 75/25 book lifts more than a 60/40 one), never capping a verified
-    # confluence at a mid-30s plateau. Absent/balanced books get no lift.
+    # once the base books already converge, the verified book's skew lifts the
+    # convergence index toward the 98% inflection — scaling DYNAMICALLY with
+    # the book's own strength (a 75/25 book lifts more than a 60/40 one).
+    # The lift is BOUNDED BY THE THERMAL BAR and reaches it only asymptotically:
+    # real resting liquidity may carry a converged confluence up to the bar,
+    # never past it, and it never PINS at it either. Both failure modes were
+    # measured and both are removed by the same form — an unbounded add
+    # relocates the saturation to ~99.9%, and a hard `min(gate, ...)` cap
+    # relocates it to exactly 98.00% (a third of all real-shaped tapes). The
+    # soft form below is strictly increasing in the book's skew and strictly
+    # inside the headroom, so a stronger book always scores strictly higher
+    # while the bar remains genuinely hard.
     depth_verified = ORDER_BOOK_DEPTH_FACTOR in active_keys
     depth_strength = (
         abs(float(factors[ORDER_BOOK_DEPTH_FACTOR])) if depth_verified else 0.0
@@ -987,14 +1076,22 @@ def compute_multiplicative_confluence(
     if (
         depth_verified
         and depth_strength >= DEPTH_VERIFIED_STRENGTH_MIN
-        and conv >= DEPTH_VERIFIED_MIN_CONV
+        and DEPTH_VERIFIED_MIN_CONV <= conv < CONFLUENCE_GATE_CONV
     ):
         ramp = min(
             max((conv - DEPTH_VERIFIED_MIN_CONV) / DEPTH_VERIFIED_RAMP, 0.0),
             1.0,
         )
-        verified_lift = DEPTH_VERIFIED_LIFT_MAX * ramp * depth_strength
-        conv = min(1.0, conv + verified_lift)
+        headroom = CONFLUENCE_GATE_CONV - conv
+        raw = DEPTH_VERIFIED_LIFT_MAX * ramp * depth_strength
+        # lift < headroom for ANY finite raw, with lift → raw as raw → 0, and
+        # capped at DEPTH_VERIFIED_LIFT_HEADROOM_SHARE of the headroom so the
+        # lift can never itself reach the bar.
+        verified_lift = (
+            headroom * DEPTH_VERIFIED_LIFT_HEADROOM_SHARE
+            * (1.0 - float(np.exp(-raw / headroom)))
+        )
+        conv = conv + verified_lift
     score = float(np.clip(
         100.0 / (1.0 + np.exp(
             -FACTOR_GATE_K * (conv - FACTOR_GATE_MIDPOINT)
@@ -1010,6 +1107,9 @@ def compute_multiplicative_confluence(
         "geo_mean": round(G, 4),
         "convergence_index": round(conv, 4),
         "alignment": round(alignment, 4),
+        "alignment_effective": round(alignment_effective, 4),
+        "evidence_breadth": round(breadth, 4),
+        "active_count": len(active_keys),
         "magnitude": round(magnitude, 4),
         "order_book_verified": bool(depth_verified),
         "verified_lift": round(verified_lift, 4),

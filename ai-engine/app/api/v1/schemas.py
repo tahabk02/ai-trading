@@ -88,11 +88,16 @@ class FutureCandleModel(BaseModel):
 from app.services.ml_predictor import pad_candles_if_needed
 
 # ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — 100% REAL, 0 DEMO — FULL 34-PAIR UNIVERSE
+# STRICT OTC WHITELIST — 100% REAL, 0 DEMO — FULL 44-PAIR UNIVERSE
 # Mirrors core-backend symbolRegistry.service.ts EXACTLY. Includes the
 # two CRYPTO MAJORS (BTC/USD, ETH/USD) whose absence previously caused
 # every crypto prediction to be rejected at Pydantic validation (HTTP
 # 422) — the root cause of BTC/ETH signals being permanently stuck.
+# PART 28.3 — also now includes the 10 REAL wholesale forex pairs
+# (EUR/SEK … USD/CZK): their pro terminals read regime_gate /
+# suppressed_reason from /predict responses, so rejecting them at the
+# Pydantic boundary kept every real-pair gate verdict absent (cards
+# locked to "regime review pending" for ever).
 # ═══════════════════════════════════════════════════════════════════
 STRICT_OTC_WHITELIST = frozenset({
     # Forex Majors (7)
@@ -109,6 +114,9 @@ STRICT_OTC_WHITELIST = frozenset({
     "AUD/CAD", "AUD/NZD", "NZD/JPY", "CAD/CHF", "EUR/RUB",
     # Emerging / OTC Variants (6)
     "USD/TRY", "USD/ZAR", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
+    # PART 28.3 — the 10 REAL NON-OTC wholesale pairs (assetSubType "forex").
+    "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK", "EUR/HUF",
+    "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
 })
 
 # Asset-class precision map:
@@ -190,6 +198,31 @@ class PredictRequest(BaseModel):
             "signal is released). Absent = latency window (quality reported None honestly)."
         ),
     )
+    min_confidence: Optional[float] = Field(
+        default=None,
+        ge=50.0,
+        le=99.0,
+        description=(
+            "USER-SET minimum executable confidence (50.0..99.0%). Instruments whose "
+            "confidence is below this bar are demoted to SCORED-ONLY (executable=false, "
+            "regime_gate='pending_high_precision'); those meeting or exceeding it are "
+            "marked tradable. None = the engine default 96.5% strict bar. Floored never "
+            "below the lowest tradable tier (T4 = 70.0%) even if a lower value is sent."
+        ),
+    )
+    min_tier: Optional[str] = Field(
+        default=None,
+        description=(
+            "USER-SELECTED minimum signal tier, one of T1/T2/T3/T4/T5 (case-insensitive). "
+            "This is the flexible-tier control: the engine ALWAYS emits every computed "
+            "tier (T1..T5) with its true confidence and metadata — this field only decides "
+            "which of them are marked `executable` for THIS request. T1 = strictest (96.5%), "
+            "T4 = most permissive tradable (70%). T5 is accepted but floored to T4: a T5 "
+            "WEAK verdict is emitted and monitorable but never executable. Takes precedence "
+            "over `min_confidence` when present. None/absent/garbage = engine default T1 "
+            "(96.5%), i.e. unchanged legacy behaviour."
+        ),
+    )
 
     @field_validator("symbol")
     @classmethod
@@ -199,15 +232,18 @@ class PredictRequest(BaseModel):
             raise ValueError("symbol must be a non-empty string")
         normalized = stripped.upper()
         # STRICT WHITELIST GATE — reject ALL non-whitelisted tickers.
-        # Covers the FULL 34-pair universe including BTC/USD & ETH/USD.
+        # Covers the FULL 44-pair universe including BTC/USD & ETH/USD and
+        # the 10 REAL wholesale forex pairs.
         if normalized not in STRICT_OTC_WHITELIST:
             raise ValueError(
                 f"Symbol '{normalized}' is NOT in the strict OTC whitelist. "
-                "Allowed pairs (34): EUR/USD, GBP/USD, USD/JPY, USD/CHF, USD/CAD, "
+                "Allowed pairs (44): EUR/USD, GBP/USD, USD/JPY, USD/CHF, USD/CAD, "
                 "AUD/USD, NZD/USD, BTC/USD, ETH/USD, EUR/GBP, EUR/JPY, EUR/CHF, "
                 "EUR/AUD, EUR/CAD, EUR/NZD, EUR/TRY, GBP/JPY, GBP/CHF, GBP/AUD, "
                 "GBP/CAD, AUD/JPY, CAD/JPY, CHF/JPY, AUD/CAD, AUD/NZD, NZD/JPY, "
-                "CAD/CHF, EUR/RUB, USD/TRY, USD/ZAR, USD/MXN, USD/SGD, MAD/USD, KES/USD."
+                "CAD/CHF, EUR/RUB, USD/TRY, USD/ZAR, USD/MXN, USD/SGD, MAD/USD, "
+                "KES/USD, EUR/SEK, EUR/NOK, EUR/DKK, EUR/PLN, EUR/CZK, EUR/HUF, "
+                "USD/SEK, USD/NOK, USD/PLN, USD/CZK."
             )
         return normalized
 

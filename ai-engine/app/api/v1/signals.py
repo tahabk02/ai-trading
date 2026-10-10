@@ -50,17 +50,25 @@ NOTE: RequestValidationError handlers are registered in main.py on the FastAPI a
 
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import UTC, datetime
 from urllib.parse import quote
 import httpx
 import numpy as np
 import pandas as pd
 import structlog
 import asyncio
+import os
 import time as _time
 
 from app.services.signal_generator import SignalGenerator, generate_unbiased_prediction
-from app.services.ml_predictor import predict_with_rf, _CPU_EXECUTOR
+import app.services.ml_predictor as ml_predictor
+from app.services.ml_predictor import (
+    predict_with_rf,
+    _CPU_EXECUTOR,
+    run_inference,
+    InferenceAdmissionTimeout,
+    InferenceBudgetExceeded,
+)
 from app.services.math_target import (
     compute_math_target,
     parse_window,
@@ -81,8 +89,56 @@ from app.services.horizon_engine import (
     build_horizon_payload,
     resolve_horizon_minutes,
 )
+from app.services.signal_lock import (
+    build_identity as build_lock_identity,
+    locked_projection_fields,
+    resolve_expiration_seconds,
+    signal_lock,
+)
 from app.core.config import settings
+from app.services.regime_detector import classify_regime, MIN_CLOSES as REGIME_MIN_CLOSES
+from app.services.signal_gatekeeper import (
+    REGIME_GATE_TRADABLE,
+    REGIME_GATE_SCORED_ONLY,
+    REGIME_GATE_BYPASS_CLOSES,
+    REGIME_STATUS_PENDING_HIGH_PRECISION,
+    SUPPRESSED_REASON_REGIME,
+    SUPPRESSED_REASON_AWAITING_DIRECTION,
+    SUPPRESSED_TIER,
+    TIER_LABELS,
+)
+def _is_truthy_flag(value: Any) -> bool:
+    """Strictly decide whether a flag field means "yes, released".
+
+    The coherence clamp below MUST NOT use ``value is True``. In this module
+    ``executable`` reaches the response dict from numpy/pandas computations, so
+    it is frequently a ``numpy.bool_``. Python identity checks do NOT hold
+    across those types::
+
+        numpy.bool_(False) is False   ->  False   # clamp silently SKIPPED
+        numpy.bool_(True)  is True    ->  False   # clamp would fire wrongly
+
+    That identity bug let a "T1 / PREMIUM" tier ship next to
+    ``executable=false`` on the direct-FastAPI path while the Node proxy path
+    (which coerces to a real bool at its own boundary) showed the corrected
+    T5 / WEAK. Same engine, two different verdicts for the same call.
+
+    This helper normalises across the representations the flag can take
+    (bool, numpy bool, 0/1, "true"/"false" strings, None) and FAILS CLOSED:
+    anything that is not unambiguously truthy counts as "not released", so a
+    missing or malformed value can never advertise an actionable tier.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    try:
+        return bool(value)
+    except Exception:  # pragma: no cover - defensive
+        return False
 from .schemas import PredictRequest
+
+from app.services.execution_gate import build_execution_surface
 
 logger = structlog.get_logger(__name__)
 
@@ -90,10 +146,14 @@ router = APIRouter()
 signal_gen = SignalGenerator(confidence_threshold=settings.CONFIDENCE_THRESHOLD)
 
 # ════════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — 100% REAL · 0 DEMO · FULL 34-PAIR UNIVERSE
-# Mirrors core-backend symbolRegistry.service.ts EXACTLY. Includes the
-# CRYPTO MAJORS (BTC/USD, ETH/USD) so crypto predictions are never
-# rejected at this boundary.
+# STRICT OTC WHITELIST — 100% REAL · 0 DEMO · FULL 44-PAIR UNIVERSE
+# Mirrors core-backend symbolRegistry.service.ts EXACTLY (44 real assets).
+# PART 28.3 — the 10 real wholesale pairs (EUR/CZK, USD/SEK …) are part of
+# that canonical 44, so they MUST be accepted here too: the card grid and
+# the PRO expiry bar read regime_gate / suppressed_reason from /predict
+# responses, and the audit universe_regime_audit.py audits them on real
+# Yahoo intraday bars. Rejecting them at this boundary is what kept real
+# pro terminals locked with no gateway verdict at all.
 # ════════════════════════════════════════════════════════════════════
 STRICT_OTC_WHITELIST = frozenset({
     # Forex Majors (7)
@@ -110,6 +170,11 @@ STRICT_OTC_WHITELIST = frozenset({
     "AUD/CAD", "AUD/NZD", "NZD/JPY", "CAD/CHF", "EUR/RUB",
     # Emerging / OTC Variants (6)
     "USD/TRY", "USD/ZAR", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
+    # PART 28.3 — the 10 REAL NON-OTC wholesale pairs (assetSubType "forex",
+    # Yahoo intraday tape, ECB reference baseline). Mirrors
+    # REAL_FOREX_PAIRS in app/data/collector.py.
+    "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK", "EUR/HUF",
+    "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
 })
 
 PREDICT_PIPELINE_TIMEOUT_SECONDS = 120.0
@@ -122,6 +187,116 @@ PREDICT_PIPELINE_TIMEOUT_SECONDS = 120.0
 # real-time; below 2 real bars → HTTP 400 (never synthetic).
 MINIMUM_REQUIRED_BARS = 100
 MINIMUM_FAST_PATH_BARS = 2
+
+
+def _surface_regime_gate(closes: List[float]) -> Dict[str, Any]:
+    """Regime gate for a /predict response (PART 28.2 [215]).
+
+    The terminal card grid (prediction.data.regime_gate) and the PRO expiry
+    bar (suppressed_reason === "regime_scored_only") both decide real-forex
+    interactivity from these exact fields. The gate uses the SAME Hurst/ADF
+    window the audits and the OTC live pipeline use (classify_regime, >= 100
+    real closes): trending / mean_reverting windows come back "tradable";
+    random_walk comes back "scored_only". A tape too short for a defensible
+    verdict stays honestly null → the client renders "regime review pending"
+    rather than inventing one.
+
+    LIVE-TEST [2026-09-23] GLOBAL FORCE OVERRIDE was removed from this gate: it
+    returned tradable / active / executable / CONFIRMED for EVERY instrument,
+    any tape length or classification, so it could only ever fabricate
+    tradability. On a system whose contract is "never fabricate" there is no
+    environment in which that switch is legitimate, so the bypass is gone
+    rather than defaulted off. tests/test_no_force_emit_escape.py pins the
+    invariant that this gate has no override.
+    """
+    series = [float(x) for x in closes if np.isfinite(x)]
+    regime = None
+    if len(series) >= REGIME_MIN_CLOSES:
+        regime = classify_regime(series).regime
+    if len(series) < REGIME_MIN_CLOSES:
+        return {"regime": None, "regime_gate": None, "suppressed_reason": None}
+    result = classify_regime(series)
+    if result.regime == "random_walk":
+        if len(series) >= REGIME_GATE_BYPASS_CLOSES:
+            return {
+                "regime": result.regime,
+                "regime_gate": REGIME_GATE_TRADABLE,
+                "suppressed_reason": None,
+            }
+        return {
+            "regime": result.regime,
+            "regime_gate": REGIME_GATE_SCORED_ONLY,
+            "suppressed_reason": SUPPRESSED_REASON_REGIME,
+        }
+    return {
+        "regime": result.regime,
+        "regime_gate": REGIME_GATE_TRADABLE,
+        "suppressed_reason": None,
+    }
+
+
+def _strict_execution_surface(
+    *,
+    symbol: str,
+    closes: List[float],
+    direction: Optional[str],
+    confidence_pct: Any,
+    bid: Optional[float],
+    ask: Optional[float],
+    current_price: Optional[float],
+    timeframe: str,
+    min_confidence: Optional[float] = None,
+    min_tier: Optional[str] = None,
+    allow_real_quote_proxy: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """STRICT HIGH-PRECISION EXECUTION SURFACE (PRINCIPAL QUALITY UPGRADE).
+
+    Merged into every /predict response. Owns the executable /
+    regime_gate / regime_status / suppressed_reason contract driven by the
+    strict 96.5% bar (or a user-supplied ``min_confidence`` override, floored
+    at T4) + the per-asset-class filter (OTC HF / REAL liquidity), while
+    ``regime`` stays the honest Hurst/ADF label from
+    :func:`_surface_regime_gate`. Fail-soft: a wrapper failure is logged and
+    returns {} — the response keeps its legacy regime-gate fields.
+
+    REAL resilience: ``allow_real_quote_proxy`` defaults to the environment
+    toggle AI_ENGINE_REAL_QUOTE_PROXY (default "1" = ENABLED) — a REAL pair
+    without L2 bid/ask arms falls back to the approved "Spread/ATR + flow +
+    MTF proxies" validator (with the dynamic per-class floor,
+    bar_source="real_proxy_floor") instead of being permanently blocked as
+    "NO ACTIONABLE SIGNAL". Set AI_ENGINE_REAL_QUOTE_PROXY=0 to force the
+    strict no_bid_ask_quotes veto everywhere.
+    """
+    if allow_real_quote_proxy is None:
+        allow_real_quote_proxy = os.getenv("AI_ENGINE_REAL_QUOTE_PROXY", "1") != "0"
+    try:
+        surface = build_execution_surface(
+            symbol=symbol,
+            closes=closes,
+            direction=direction,
+            confidence_pct=confidence_pct,
+            bid=bid,
+            ask=ask,
+            live_price=current_price,
+            timeframe=timeframe,
+            min_confidence=min_confidence,
+            min_tier=min_tier,
+            allow_real_quote_proxy=bool(allow_real_quote_proxy),
+        )
+        # Payload-owned keys: /predict already stamps `signal` and `confidence`
+        # from the authoritative verdict (confidence is 0..100 per the response
+        # schema). The surface only *reads* them for its verdict — never
+        # overwrites — so they are dropped from the merge.
+        surface.pop("signal", None)
+        surface.pop("confidence", None)
+        return surface
+    except Exception as e:
+        logger.error(
+            "STRICT_EXECUTION_SURFACE_FAILED",
+            symbol=symbol,
+            error=str(e),
+        )
+        return {}
 
 
 @router.get("/math-target")
@@ -202,14 +377,42 @@ def _timeframe_ms(timeframe: str) -> int:
     raise ValueError(f"Unsupported prediction timeframe: {timeframe}")
 
 
-def _timestamp_ms(value: object) -> int:
+def _timestamp_ms(value: object) -> Optional[int]:
+    """Coerce a candle timestamp to epoch-ms, or None when it is unusable.
+
+    NEVER RAISES. ``CandleModel.timestamp`` is Optional, so a caller may
+    legitimately send a tape whose newest bar carries no anchor. The
+    projection bars are an OPTIONAL add-on to an otherwise valid prediction;
+    letting a missing anchor escape as a ValueError crashed the whole
+    /predict request and surfaced as an opaque HTTP 500, which the frontend
+    could not distinguish from a real engine outage. Callers degrade to an
+    empty projection instead, and the signal/target/verdict still return.
+    """
+    if value is None or isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         raw = float(value)
+        # Reject NaN/inf and negative epochs without importing math.
+        if raw != raw or raw in (float("inf"), float("-inf")) or raw < 0:
+            return None
         return int(raw * 1000 if raw < 1_000_000_000_000 else raw)
     if isinstance(value, str):
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            # Tolerate a bare epoch delivered as a string ("1790640000000").
+            try:
+                raw = float(text)
+            except ValueError:
+                return None
+            if raw != raw or raw in (float("inf"), float("-inf")) or raw < 0:
+                return None
+            return int(raw * 1000 if raw < 1_000_000_000_000 else raw)
         return int(parsed.timestamp() * 1000)
-    raise ValueError("prediction anchor candle has no usable timestamp")
+    return None
 
 
 def build_future_candles(
@@ -228,6 +431,16 @@ def build_future_candles(
         return []
     interval_ms = _timeframe_ms(timeframe)
     anchor_ms = _timestamp_ms(candles[-1].get("timestamp"))
+    if anchor_ms is None:
+        # No usable anchor on the newest bar → emit NO projection bars rather
+        # than failing the request. The prediction itself stays valid and
+        # dispatchable; only the optional forward-projection is omitted.
+        logger.info(
+            "FUTURE_CANDLES_SKIPPED_NO_ANCHOR",
+            timeframe=timeframe,
+            bars=len(candles),
+        )
+        return []
     anchor_ms = (anchor_ms // interval_ms) * interval_ms
     horizon = max(1, round(interval_ms / 60_000))
     spread = abs(float(ask) - float(bid)) if bid and ask and ask >= bid else 0.0
@@ -349,6 +562,83 @@ def _validate_response_finite(response: Dict[str, Any]) -> Dict[str, Any]:
         response["delta_pct"] = round(delta, 2) if np.isfinite(delta) else 0.0
     else:
         response["delta_pct"] = 0.0
+
+    # ══ EXECUTABLE ⇄ SIGNAL STATE RECONCILIATION ══════════════════════
+    # `executable` is produced by apply_strict_execution_gate (class filter +
+    # the executable bar), while `signal` and `market_waiting` are produced by
+    # the confluence gate + the horizon lock. They are evaluated from DIFFERENT
+    # inputs, so they could disagree: the class gate passes and the 96.5% bar is
+    # cleared, yet the confluence gate still holds the verdict market-waiting
+    # and emits no direction. That shipped the illegal state
+    # `executable: true` beside `signal: null`.
+    #
+    # Executability is the AND of every gate. A verdict that emits no direction
+    # — or that is still market-waiting — is SCORED-ONLY by definition and must
+    # never advertise executable=true, because a dispatcher that trusts
+    # `executable` would act on a null direction. This reconciles only the
+    # `executable` FLAG; it never rewrites `tier` and never nulls a real
+    # direction, so a low-tier signal stays visible as scored-only.
+    _emitted = response.get("signal")
+    _directional = (
+        isinstance(_emitted, str)
+        and _emitted.strip().upper() in ("BUY", "SELL", "CALL", "PUT")
+    )
+    _still_waiting = bool(response.get("market_waiting", False))
+    if _is_truthy_flag(response.get("executable", False)) and (
+        not _directional or _still_waiting
+    ):
+        response["executable"] = False
+        response["regime_gate"] = REGIME_GATE_SCORED_ONLY
+        response["regime_status"] = REGIME_STATUS_PENDING_HIGH_PRECISION
+        response["suppressed_reason"] = (
+            response.get("waiting_reason")
+            or response.get("suppressed_reason")
+            or SUPPRESSED_REASON_AWAITING_DIRECTION
+        )
+
+    # ══ HONEST TIER + DISPATCHABLE / SCORED-ONLY SURFACE ═════════════════
+    # Applied HERE, at the single function every `return` in this module
+    # funnels through, rather than inline in a handler.
+    #
+    # Why it lives here: `predict_signal` has MULTIPLE return points (a
+    # served-from-lock early return as well as the final one), and
+    # `_lock_or_commit_projection` / the execution-surface merge can re-derive
+    # `executable` after any inline step has run. Sanitisation is the last thing
+    # every response passes through, so this is the only placement that cannot
+    # be skipped.
+    #
+    # `tier` is resolved from the genuine confluence score ALONE
+    # (resolve_tier(99.32) -> "T1"/"PREMIUM") and used to be OVERWRITTEN with
+    # T5 whenever the gate withheld the call. That clamp was added to stop the
+    # terminal rendering "T1 PREMIUM 99.32%" next to "SIGNAL: WAITING" — a real
+    # contradiction — but it fixed the symptom by destroying data: a genuine T2
+    # became T5, and because the tier is also the client's filter key, a
+    # user-driven tier filter could never see or select the real band.
+    #
+    # FLEXIBLE-TIER ARCHITECTURE (2026-09-30): `tier` is the honest strength
+    # label and is NEVER rewritten. Tradability is expressed by the orthogonal
+    # `executable` / `scored_only` / `dispatchable` triple, so a UI can say
+    # "T2 HIGH — scored only" honestly instead of mutating the label into a lie
+    # about the maths. The original contradiction is still prevented: nothing
+    # may claim executable without a real direction (see the reconciliation
+    # above), and `scored_only` is set for exactly that non-actionable case.
+    _exec = _is_truthy_flag(response.get("executable", False))
+    _sig = response.get("signal")
+    _has_dir = (
+        isinstance(_sig, str) and _sig.strip().upper() in ("BUY", "SELL", "CALL", "PUT")
+    )
+    response["dispatchable"] = bool(_has_dir)
+    response["scored_only"] = bool(_has_dir and not _exec)
+
+    # If the response somehow still advertises a tier it never earned (e.g. a
+    # handler that set it while emitting no direction), correct it to the honest
+    # band derived from the real confidence rather than to a blanket T5.
+    if not _has_dir and response.get("tier") not in (None, SUPPRESSED_TIER):
+        response.setdefault("diagnostics", {})["tier_without_direction"] = {
+            "reported_tier": response.get("tier"),
+            "reason": "no directional signal was emitted for this verdict",
+        }
+
     return response
 
 
@@ -443,6 +733,72 @@ async def tick_signal(data: Dict[str, Any]):
                 },
             )
 
+        # ── AUTHORITATIVE EXPIRY LOCK (checked BEFORE any computation) ──
+        # If a verdict is already committed for (symbol, class, horizon,
+        # expiry), the engine returns THAT contract and skips the recompute
+        # entirely. Checking first is what makes this a real lock: at a 1 Hz
+        # cadence it also stops the inference budget being spent on a verdict
+        # that would be discarded. The live price still updates below, so the
+        # chart keeps moving under a frozen direction/target.
+        horizon_minutes = resolve_horizon_minutes(data.get("horizon_minutes"))
+        lock_identity = build_lock_identity(
+            symbol=symbol,
+            horizon_minutes=horizon_minutes,
+            expiration_seconds=resolve_expiration_seconds(horizon_minutes),
+        )
+        held = await signal_lock.get(lock_identity)
+        if held:
+            # Reuse the already-validated array work we would do anyway for the
+            # live price, then serve the locked contract.
+            closes_arr = np.asarray(
+                [float(x) for x in (prices if prices is not None else [c["close"] for c in candles])],
+                dtype=np.float64,
+            )
+            locked_price = (
+                float(tick)
+                if tick is not None and np.isfinite(tick) and tick > 0
+                else float(closes_arr[-1])
+            )
+            locked_response = {
+                **held,
+                # Live, never locked: the market keeps moving under the contract.
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "current_price": round(locked_price, symbol_price_digits(symbol)),
+                "barCount": len(closes_arr),
+                "proxyLatencyMs": 0.0,
+                "signal_locked": True,
+                "locked_at_ms": held.get("locked_at_ms"),
+                "locked_expires_at_ms": held.get("expires_at_ms"),
+            }
+            # The lock payload only carries the VERDICT, so serving it bare left
+            # every policy field absent (tier/status/executable/threshold_pct/
+            # bar_source/asset_class/regime) and the client contract was simply
+            # incomplete on every lock hit. Re-run the gate against the LOCKED
+            # numbers instead of the discarded live inference, so the served
+            # response is both complete and internally consistent.
+            _rederive_surface_from_lock(
+                locked_response,
+                symbol=symbol,
+                closes=[float(x) for x in closes_arr],
+                bid=data.get("bid"),
+                ask=data.get("ask"),
+                current_price=locked_price,
+                timeframe=timeframe,
+                min_confidence=data.get("min_confidence"),
+                min_tier=data.get("min_tier"),
+            )
+            logger.info(
+                "TICK_SIGNAL_LOCK_SERVED",
+                symbol=symbol,
+                direction=held.get("signal"),
+                confidence=held.get("confidence"),
+                horizon_minutes=horizon_minutes,
+                tier=locked_response.get("tier"),
+                status=locked_response.get("status"),
+            )
+            return _validate_response_finite(locked_response)
+
         verdict = await asyncio.to_thread(
             evaluate_live_tick_signal,
             prices=eval_array,
@@ -491,13 +847,39 @@ async def tick_signal(data: Dict[str, Any]):
         response["barCount"] = len(eval_array)
         response["proxyLatencyMs"] = 0.0
 
+        # ── ROUTED MARKET-STRATEGY EXECUTION SURFACE ──
+        # /tick-signal used to bypass build_execution_surface entirely, so a
+        # live tick produced an executable-looking signal that had never been
+        # through the per-market-type strategy gate. The 1s cadence is exactly
+        # where that matters most. Same wrapper as /predict: fail-soft, and
+        # the surface never overwrites the tick's own signal/confidence.
+        response.update(
+            _strict_execution_surface(
+                symbol=symbol,
+                # Plain list, not the numpy view: the surface contract is
+                # List[float] and the sanitizers truth-test the input.
+                closes=[float(x) for x in closes_arr],
+                direction=response["signal"],
+                # LiveQuantVerdict.confidence is ALREADY 0..100 (documented
+                # "genuine continuous [0, 100] strength"). Do NOT rescale here:
+                # a *100 would hand the strict gate ~9932% and make every live
+                # tick trivially executable, silently bypassing the 96.5% bar.
+                confidence_pct=float(response["confidence"]),
+                bid=data.get("bid"),
+                ask=data.get("ask"),
+                current_price=eval_price,
+                timeframe=timeframe,
+                min_confidence=data.get("min_confidence"),
+                min_tier=data.get("min_tier"),
+            )
+        )
         # ── STABLE TARGET-EXPIRY HORIZON CONTRACT (Alpha.5 Pro) ──
         # The /tick-signal path runs at the 1-second tick cadence — exactly the
         # hyper-volatile surface the OutputStabilizer exists to tame. Build the
         # homogeneous horizon contract (smooth EWMA confidence + deadband
         # CALL/PUT deadband) on the SAME real price array the micro-quant
-        # verdict examined.
-        horizon_minutes = resolve_horizon_minutes(data.get("horizon_minutes"))
+        # verdict examined. `horizon_minutes` was already resolved above for
+        # the lock identity, so it is reused here.
         try:
             response["horizon"] = build_horizon_payload(
                 symbol=symbol,
@@ -528,6 +910,28 @@ async def tick_signal(data: Dict[str, Any]):
             bars=len(eval_array),
             direction_score=verdict.direction_score,
         )
+
+        # ── COMMIT THE CONTRACT FOR THE SELECTED EXPIRY ──
+        # Only the projection fields are committed. current_price / atr /
+        # barCount / horizon stay OUT of the lock so the served lock response
+        # can keep reporting live values. This is the write half of the
+        # authoritative lock: the next tick for this identity is served from
+        # here instead of being recomputed.
+        await signal_lock.acquire(
+            lock_identity,
+            {
+                **locked_projection_fields(response),
+                "timeframe": timeframe,
+                "horizon_minutes": int(horizon_minutes),
+            },
+        )
+        # FLEXIBLE-TIER (2026-09-30): the old inline "coherence clamp" here
+        # rewrote `tier` to T5 whenever executable was false, destroying the
+        # honest band so a client tier-filter could never select it. Tradability
+        # is now carried by `executable`/`scored_only` (set centrally in
+        # _validate_response_finite, which this response flows through below), and
+        # `tier` keeps the true confidence band for every computed tier. The
+        # executable/signal reconciliation invariant is unchanged.
         return _validate_response_finite(response)
     except HTTPException:
         raise
@@ -552,6 +956,154 @@ async def analyze_market(data: Dict[str, Any]):
     except Exception as e:
         logger.error("Analyze endpoint error", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _lock_or_commit_projection(
+    response: Dict[str, Any],
+    *,
+    symbol: str,
+    horizon_minutes: int,
+    source: str,
+    closes: Optional[List[float]] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+    current_price: Optional[float] = None,
+    timeframe: Optional[str] = None,
+    min_confidence: Optional[float] = None,
+    min_tier: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Serve-or-commit the expiry contract for one /predict response.
+
+    Both /predict return points (the micro-quant FAST PATH and the full
+    analysis) go through here, because a fast-path response is a real verdict
+    the client renders — skipping the lock there let the low-data regime the
+    client hits on first load repaint the contract the tick path was holding.
+
+    /predict does NOT skip its analysis the way /tick-signal does: it is not a
+    1 Hz path, and its richness (confluence, ML/RF, horizon pack) is why it
+    exists. Instead the LOCKED PROJECTION FIELDS are overlaid on the live
+    analysis, so the thing the operator acts on is stable while every
+    diagnostic keeps updating.
+
+    Tier/status are then RE-DERIVED from the locked confidence, because they
+    are policy output rather than verdict: the response was gated against the
+    FRESH inference above, so overwriting only the projection would leave a
+    response whose ``confidence`` says 91% while its ``tier`` still reflects the
+    discarded 100% (or vice versa). Re-running the gate against the locked
+    numbers under the CURRENT request's threshold is what makes raising the
+    confidence floor correctly demote a held contract instead of silently
+    no-op'ing it. Fail-soft: a re-derivation error leaves the surface as-is.
+    """
+    lock_identity = build_lock_identity(
+        symbol=symbol,
+        horizon_minutes=horizon_minutes,
+        expiration_seconds=resolve_expiration_seconds(horizon_minutes),
+    )
+    held = await signal_lock.get(lock_identity)
+    if held:
+        response.update(locked_projection_fields(held))
+        response["signal_locked"] = True
+        response["locked_at_ms"] = held.get("locked_at_ms")
+        response["locked_expires_at_ms"] = held.get("expires_at_ms")
+        _rederive_surface_from_lock(
+            response,
+            symbol=symbol,
+            closes=closes,
+            bid=bid,
+            ask=ask,
+            current_price=current_price,
+            timeframe=timeframe,
+            min_confidence=min_confidence,
+            min_tier=min_tier,
+        )
+        logger.info(
+            f"{source}_LOCK_SERVED",
+            symbol=symbol,
+            direction=held.get("signal"),
+            confidence=held.get("confidence"),
+            horizon_minutes=horizon_minutes,
+            tier=response.get("tier"),
+            status=response.get("status"),
+        )
+        return response
+
+    await signal_lock.acquire(
+        lock_identity,
+        {
+            **locked_projection_fields(response),
+            "horizon_minutes": int(horizon_minutes),
+        },
+    )
+    return response
+
+
+#: The execution-surface fields that are POLICY OUTPUT, not verdict.
+#:
+#: A re-derivation must overwrite ONLY these. The surface also carries
+#: ``signal`` and a FRACTIONAL ``confidence`` (0..1, per the gate's contract)
+#: alongside ``confidence_pct`` (0..100) which is what the /predict and
+#: /tick-signal responses expose. Blindly merging the whole surface back into
+#: the response therefore rescaled a locked 98.4% verdict to 0.984 and
+#: clobbered the frozen direction - i.e. it defeated the lock from the inside.
+_LOCK_POLICY_FIELDS = (
+    "executable",
+    "regime_gate",
+    "regime_status",
+    "suppressed_reason",
+    "status",
+    "tier",
+    "tier_label",
+    "threshold_pct",
+    "bar_source",
+    "max_executable_tier",
+    "class_gate",
+    "metrics",
+    "sanitization",
+    "audit",
+)
+
+
+def _rederive_surface_from_lock(
+    response: Dict[str, Any],
+    *,
+    symbol: str,
+    closes: Optional[List[float]],
+    bid: Optional[float],
+    ask: Optional[float],
+    current_price: Optional[float],
+    timeframe: Optional[str],
+    min_confidence: Optional[float],
+    min_tier: Optional[str] = None,
+) -> None:
+    """Re-run the strict execution gate against the LOCKED verdict.
+
+    Mutates ``response`` in place with the freshly classified POLICY fields, so
+    the contract's tier/status/executable flag stay consistent with the
+    confidence actually being reported and with the caller's CURRENT confidence
+    floor. The verdict itself (``signal``/``confidence``/``target_*``) is never
+    touched - see :data:`_LOCK_POLICY_FIELDS`.
+    """
+    if not closes:
+        return
+    try:
+        surface = build_execution_surface(
+            symbol=symbol,
+            closes=closes,
+            direction=response.get("signal"),
+            confidence_pct=response.get("confidence"),
+            bid=bid,
+            ask=ask,
+            live_price=current_price,
+            timeframe=timeframe,
+            min_confidence=min_confidence,
+            min_tier=min_tier,
+        )
+    except Exception as e:  # noqa: BLE001 - fail-soft, never break a locked read
+        logger.warning("LOCKED_SURFACE_REDERIVE_FAILED", symbol=symbol, error=str(e))
+        return
+    for field in _LOCK_POLICY_FIELDS:
+        if field in surface:
+            response[field] = surface[field]
 
 
 @router.post("/predict")
@@ -637,8 +1189,11 @@ async def predict_signal(data: PredictRequest):
             # (prices, tick, highs, lows, timeframe, bid, ask). Passing symbol
             # or the dict list here (as an older mapping did) blew up as
             # float('EUR/USD') — this now feeds REAL closes/highs/lows arrays.
-            verdict = await asyncio.get_event_loop().run_in_executor(
-                _CPU_EXECUTOR,
+            #
+            # run_inference (not raw run_in_executor) so this structural step
+            # runs on the INFERENCE pool with a bounded admission wait: an RF
+            # training burst can no longer queue it for minutes.
+            verdict = await run_inference(
                 evaluate_live_tick_signal,
                 [float(c["close"]) for c in candles_raw],
                 live_price,
@@ -647,6 +1202,24 @@ async def predict_signal(data: PredictRequest):
                 timeframe,
                 bid,
                 ask,
+            )
+        except InferenceAdmissionTimeout as e:
+            logger.error(
+                "Micro-quant fast path starved",
+                symbol=symbol, budget_s=e.budget_s,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Inference capacity exhausted",
+                    "symbol": symbol,
+                    "message": (
+                        "The inference pool could not admit this request "
+                        f"within {e.budget_s:.1f}s. Refused rather than queued "
+                        "behind background model training — retry shortly."
+                    ),
+                    "inference_fallback": "executor_saturated",
+                },
             )
         except Exception as e:
             logger.error(
@@ -678,8 +1251,26 @@ async def predict_signal(data: PredictRequest):
             symbol_digits=digits,
         )
         total_ms = (_time.perf_counter() - t0) * 1000
-        emitted_signal = None if verdict.market_waiting else verdict.direction
-        return {
+        # ══ FLEXIBLE-TIER EMISSION (2026-09-30) ═══════════════════════
+        # `verdict.market_waiting` used to null the direction outright, so a
+        # T2/T3/T4 verdict the maths had genuinely produced never reached the
+        # client — the engine had decided for the trader which bands are worth
+        # seeing. The direction is now emitted whenever the confluence maths
+        # actually produced one; tradability is decided by the user's `min_tier`
+        # floor in the execution surface, not by nulling the signal here.
+        #
+        # Honesty is preserved by construction: a verdict with NO real direction
+        # still ships `signal: null` + `market_waiting: true`, and the
+        # reconciliation in _validate_response_finite forces `executable=false`
+        # whenever no direction exists. A low-tier signal is reported honestly
+        # ("T3 MEDIUM, scored only") rather than made invisible.
+        _honest_direction = verdict.direction if verdict.direction in ("BUY", "SELL") else None
+        # Sub-tier hold: a direction exists but the confluence gate did not
+        # release it. Expressed as scored-only metadata, never as a null signal.
+        _below_floor = bool(verdict.market_waiting) and _honest_direction is not None
+        emitted_signal = _honest_direction
+        market_waiting = bool(verdict.market_waiting) and not _below_floor
+        fast_path_response = {
             "symbol": symbol,
             "signal": emitted_signal,
             "confidence": verdict.confidence,
@@ -710,10 +1301,48 @@ async def predict_signal(data: PredictRequest):
                 [float(c["high"]) for c in candles_raw[-30:]],
                 [float(c["low"]) for c in candles_raw[-30:]],
             ),
-            "market_waiting": verdict.market_waiting,
-            "waiting_reason": getattr(verdict, "waiting_reason", None),
-            "waiting_detail": getattr(verdict, "waiting_detail", None),
+        "market_waiting": market_waiting,
+        "waiting_reason": getattr(verdict, "waiting_reason", None) if market_waiting else None,
+        "waiting_detail": getattr(verdict, "waiting_detail", None) if market_waiting else None,
+            "regime": _surface_regime_gate([float(c["close"]) for c in candles_raw]).get("regime"),
+            **_strict_execution_surface(
+                symbol=symbol,
+                closes=[float(c["close"]) for c in candles_raw],
+                # The AUTHORITATIVE direction, never the market-waiting-nulled
+                # `emitted_signal`: a null made build_execution_surface
+                # short-circuit at execution_gate.py:115 into
+                # class_gate.reason="no_directional_signal", which overwrote the
+                # real CONFLUENCE_BELOW_THERMAL blocker in suppressed_reason and
+                # diagnostics.tier_suppressed.reason and skipped the
+                # per-market-type class gate entirely. Matches /tick-signal.
+                direction=verdict.direction,
+                confidence_pct=verdict.confidence,
+                bid=bid,
+                ask=ask,
+                current_price=current_price,
+                timeframe=timeframe,
+                min_confidence=getattr(data, "min_confidence", None),
+                min_tier=getattr(data, "min_tier", None),
+            ),
         }
+        # The fast path is a real verdict the client renders, so it participates
+        # in the same expiry contract as the full path.
+        return _validate_response_finite(
+            await _lock_or_commit_projection(
+                fast_path_response,
+                symbol=symbol,
+                horizon_minutes=resolve_horizon_minutes(
+                    getattr(data, "horizon_minutes", None)
+                ),
+                source="PREDICT_FASTPATH",
+                closes=[float(c["close"]) for c in candles_raw],
+                bid=bid,
+                ask=ask,
+                current_price=current_price,
+                timeframe=timeframe,
+                min_confidence=getattr(data, "min_confidence", None),
+            )
+        )
 
     # ── FULL ML PIPELINE (>= MINIMUM_REQUIRED_BARS real bars) ──
     # Real Wilder ATR(14) from the forwarded series — needed by every branch
@@ -748,8 +1377,7 @@ async def predict_signal(data: PredictRequest):
     #     else the real tick-position proxy) all aligned. Everything below is
     #     corroboration/UI.
     try:
-        verdict = await asyncio.get_event_loop().run_in_executor(
-            _CPU_EXECUTOR,
+        verdict = await run_inference(
             evaluate_quant_matrix,
             candles_raw,
             live_price,
@@ -757,6 +1385,24 @@ async def predict_signal(data: PredictRequest):
             None,   # order_book_imbalance (not forwarded)
             bid,
             ask,
+        )
+    except InferenceAdmissionTimeout as e:
+        logger.error(
+            "Quant matrix starved",
+            symbol=symbol, budget_s=e.budget_s,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Inference capacity exhausted",
+                "symbol": symbol,
+                "message": (
+                    "The inference pool could not admit this request within "
+                    f"{e.budget_s:.1f}s. Refused rather than queued behind "
+                    "background model training — retry shortly."
+                ),
+                "inference_fallback": "executor_saturated",
+            },
         )
     except ValueError as ve:
         raise HTTPException(
@@ -787,6 +1433,7 @@ async def predict_signal(data: PredictRequest):
     # never trigger training (a tape below the gate can never dispatch anyway).
     symbol_lock = await _get_symbol_lock(symbol)
     ml_extras = None
+    inference_fallback = None
     if verdict.direction in ("BUY", "SELL"):
         try:
             async with symbol_lock:
@@ -806,6 +1453,20 @@ async def predict_signal(data: PredictRequest):
                 symbol=symbol, ml_signal=ml_extras.get("signal"),
                 ml_confidence=ml_extras.get("confidence"),
             )
+        except InferenceBudgetExceeded as ibe:
+            # ── NON-BLOCKING INFERENCE BUDGET (P1-2026-09-24) ──
+            # The heavy RandomForest corroboration could not finish within the
+            # interactive 150ms window. The authoritative confluence verdict was
+            # ALREADY resolved — ship that fast structural payload (real data,
+            # no fabricated signal) and let the background train warm the cache.
+            # The UI terminal therefore always receives a verdict inside its 2s
+            # AbortController budget instead of freezing on the ML spinner.
+            logger.info(
+                "Inference budget exceeded — shipping structural verdict, RF warming in background",
+                symbol=symbol, budget_ms=ibe.budget_ms, elapsed_ms=round(ibe.elapsed_ms, 2),
+            )
+            ml_extras = None
+            inference_fallback = "ml_budget_exceeded"
         except asyncio.TimeoutError:
             logger.warning(
                 "ML corroboration timed out — honoring the confluence verdict",
@@ -837,16 +1498,32 @@ async def predict_signal(data: PredictRequest):
 
     total_ms = (_time.perf_counter() - t0) * 1000
 
-    emitted_signal = None if verdict.market_waiting else verdict.direction
+    # ══ FLEXIBLE-TIER EMISSION (2026-09-30) ═══════════════════════════
+    # See the identical block on the fast path. A direction the maths actually
+    # produced is emitted for EVERY tier; only a genuinely directionless
+    # verdict ships `signal: null` + `market_waiting: true`. Tradability is
+    # decided by the user's `min_tier` floor via the execution surface, not by
+    # nulling the signal here.
+    _honest_direction = verdict.direction if verdict.direction in ("BUY", "SELL") else None
+    _below_floor = bool(verdict.market_waiting) and _honest_direction is not None
+    emitted_signal = _honest_direction
+    market_waiting = bool(verdict.market_waiting) and not _below_floor
     # ── 0.98 QUALITY WATERSHED (Part 2.3/2.4) ──
     # When a real multi-factor window arrives in the request the five-factor
-    # ensemble is ENFORCED: even a confluence-definitive verdict collapses to
-    # signal=None / confidence=0.0 if the ensemble cannot reach 0.98. The
-    # caller (core-backend live dispatcher) supplies the timeframe/volume/order
-    # flow evidence; without it the ensemble is honestly reported as None.
+    # ensemble is ENFORCED: even a confluence-definitive verdict is held back
+    # from being tradable/alarmed if the ensemble cannot reach 0.98. The caller
+    # (core-backend live dispatcher) supplies the timeframe/volume/order-flow
+    # evidence; without it the ensemble is honestly reported as None.
     qq_signal = emitted_signal
     qq_confidence = verdict.confidence
     qq_active = False
+    # Did the five-factor ensemble RELEASE the direction? The watershed is a
+    # confidence hold, not a directionless verdict: it must gate tradability
+    # and the high-confidence alert, but it must NOT erase a direction the
+    # confluence maths actually produced. Nulling `signal` here would report a
+    # genuine T2/T3/T4 call as directionless, which is the very suppression
+    # this contract removed.
+    _qq_released = True
     quality_fields = {
         "quality": None,
         "quality_factors": None,
@@ -862,6 +1539,7 @@ async def predict_signal(data: PredictRequest):
         qq_active = True
         qq_signal = qq.get("signal") or None
         qq_confidence = qq.get("confidence") if qq_signal else verdict.confidence
+        _qq_released = qq_signal is not None
         quality_fields = {
             "quality": qq.get("quality"),
             "quality_factors": qq.get("factors"),
@@ -871,11 +1549,15 @@ async def predict_signal(data: PredictRequest):
 
     response = {
         "symbol": symbol,
-        "signal": qq_signal if qq_active else emitted_signal,
+        # HONEST DIRECTION — emitted for every tier. A watershed hold leaves it
+        # intact and is reported as `executable: false` + `scored_only: true`
+        # via the execution surface below.
+        "signal": emitted_signal,
         "confidence": qq_confidence if qq_active else verdict.confidence,
         "high_confidence_alert": (
             verdict.high_confidence_alert
-            and (qq_signal if qq_active else emitted_signal) is not None
+            and emitted_signal is not None
+            and _qq_released
         ),
         "target_price": target_price,
         "current_price": round(current_price, digits),
@@ -901,6 +1583,16 @@ async def predict_signal(data: PredictRequest):
         "tier_label": verdict.diagnostics.get("tier_label"),
         "timeframe": timeframe,
         "proxyLatencyMs": round(total_ms, 2),
+        # P1-2026-09-24 — non-blocking inference surface: null when the RF
+        # corroborator ran; "ml_budget_exceeded" when a cold-cache train could
+        # not finish within the interactive InferenceBudget and the response was
+        # shipped as the fast structural verdict (RF numbers absent this round,
+        # warming in the background — concatenate the next call ships them).
+        "inference_fallback": inference_fallback,
+        "inference_budget_ms": (
+            ml_predictor.INFERENCE_BUDGET_MS
+            if ml_predictor.INFERENCE_BUDGET_MS > 0 else None
+        ),
         "dataSource": f"{data_source}_unbiased_quant",
         "barCount": len(candles_raw),
         "math_target": compute_math_target(
@@ -921,9 +1613,9 @@ async def predict_signal(data: PredictRequest):
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
         **quality_fields,
-        "market_waiting": bool(verdict.market_waiting),
-        "waiting_reason": verdict.waiting_reason,
-        "waiting_detail": verdict.waiting_detail,
+        "market_waiting": market_waiting,
+        "waiting_reason": verdict.waiting_reason if market_waiting else None,
+        "waiting_detail": verdict.waiting_detail if market_waiting else None,
         "book_confluence": verdict.diagnostics.get("book", {}),
         # PART 19.2 — HONEST LABEL CONTRACT: the dispatched 0-100 number is
         # BOOK AGREEMENT (confluence), not a calibrated probability. These
@@ -935,8 +1627,27 @@ async def predict_signal(data: PredictRequest):
         "book_agreement_detail": book_agreement_detail(
             verdict.diagnostics.get("book", {}).get("confluence", {})
         ),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
+        "regime": _surface_regime_gate(closes).get("regime"),
+        **_strict_execution_surface(
+            symbol=symbol,
+            closes=closes,
+            direction=(qq_signal if qq_active else verdict.direction),
+            confidence_pct=(qq_confidence if qq_active else verdict.confidence),
+            bid=bid,
+            ask=ask,
+            current_price=current_price,
+            timeframe=timeframe,
+            min_confidence=getattr(data, "min_confidence", None),
+            min_tier=getattr(data, "min_tier", None),
+        ),
     }
+
+    # NOTE: the honest-tier / dispatchable / scored_only surface is applied
+    # centrally in `_validate_response_finite` (the function this handler's
+    # return flows through), NOT here — both this block and the projection lock
+    # can still re-derive `executable` after any inline step, so an inline one
+    # would observe a truthy flag and be silently discarded.
 
     # Merge the ML corroboration numbers (kept separate from the authoritative
     # confluence confidence so the honesty law — confidence == confluence — is
@@ -991,6 +1702,27 @@ async def predict_signal(data: PredictRequest):
         response["horizon"] = None
         response["horizon_minutes"] = int(horizon_minutes)
 
+    # ── EXPIRY LOCK: serve-or-commit ──
+    # Same lock the /tick-signal seam uses, so the two paths can never disagree
+    # about what the contract is. Without this, a REST /predict landing between
+    # two ticks could repaint a verdict the tick path is holding.
+    response = await _lock_or_commit_projection(
+        response,
+        symbol=symbol,
+        horizon_minutes=horizon_minutes,
+        source="PREDICT",
+        closes=closes,
+        bid=bid,
+        ask=ask,
+        current_price=current_price,
+        timeframe=timeframe,
+        min_confidence=getattr(data, "min_confidence", None),
+        min_tier=getattr(data, "min_tier", None),
+    )
+
+    # Logged AFTER the lock so it reports what was actually RETURNED, not the
+    # pre-lock candidate. `signal_locked` distinguishes a served contract from a
+    # freshly committed one.
     logger.info(
         "Unbiased quant prediction dispatched",
         symbol=symbol,
@@ -1000,7 +1732,42 @@ async def predict_signal(data: PredictRequest):
         direction_score=verdict.direction_score,
         confluence_gate=verdict.diagnostics.get("book", {}).get("confluence", {}).get("gate"),
         timeframe=timeframe,
+        signal_locked=bool(response.get("signal_locked")),
         elapsed_ms=round(total_ms, 2),
     )
+
+    # ── COHERENCE CLAMP: tier must never outrank what the gate released ──
+    # `tier` is resolved from the raw confluence score ALONE
+    # (resolve_tier(99.32) -> "T1"/"PREMIUM") and is NOT demoted when the risk
+    # gate WITHHELD the actionable call. The engine therefore shipped a
+    # "T1 PREMIUM" badge alongside executable=False / signal=None — the exact
+    # contradiction the terminal rendered as "T1 PREMIUM 99.32%" next to
+    # "SIGNAL: WAITING" (see SIGNAL_EVALUATION_AUDIT: confidence_pct=99.32
+    # tier=T1 executable=False).
+    #
+    # PLACEMENT IS LOAD-BEARING: this must run AFTER
+    # `_lock_or_commit_projection` (above) and AFTER the surface merge, because
+    # both can re-derive `executable` / `tier` from a served contract. A clamp
+    # placed earlier observes a still-truthy flag, never executes, and is
+    # silently discarded — which is precisely how the direct-FastAPI path kept
+    # returning T1/PREMIUM while the Node proxy path showed T5/WEAK.
+    #
+    # This is an HONESTY fix, not padding: a verdict the gate did not release is
+    # SCORED-ONLY, so the exposed tier is demoted to the canonical suppressed
+    # tier. The raw confluence is preserved in `confidence` /
+    # `book_agreement` / diagnostics for audit — nothing is hidden or inflated,
+    # we only stop advertising a PREMIUM (actionable-looking) tier for a call
+    # the engine itself marked non-actionable.
+    if not _is_truthy_flag(response.get("executable", False)):
+        raw_tier = response.get("tier")
+        if raw_tier is not None and raw_tier != SUPPRESSED_TIER:
+            response["tier"] = SUPPRESSED_TIER
+            response["tier_label"] = TIER_LABELS.get(SUPPRESSED_TIER, "WEAK")
+            response.setdefault("diagnostics", {})["tier_suppressed"] = {
+                "raw_tier_from_score": raw_tier,
+                "reason": response.get("suppressed_reason")
+                or response.get("waiting_reason")
+                or "gate_withheld",
+            }
 
     return _validate_response_finite(response)

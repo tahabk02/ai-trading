@@ -77,6 +77,7 @@ from __future__ import annotations
 import numpy as np
 import structlog
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Dict, Any, Optional, List
 
 from .quant_matrix import (
@@ -99,6 +100,8 @@ from .signal_gatekeeper import (
     TIER_LABELS,
     resolve_tier,
     is_dispatchable_tier,
+    MIN_EXECUTABLE_TIER,
+    CONFLUENCE_DISPATCH_TIER,
 )
 
 logger = structlog.get_logger(__name__)
@@ -458,7 +461,7 @@ def evaluate_live_tick_signal(
     definitive = bool(
         direction in ("BUY", "SELL")
         and conf_score >= dynamic_threshold
-        and is_dispatchable_tier(confluence_gate)
+        and is_dispatchable_tier(confluence_gate, CONFLUENCE_DISPATCH_TIER)
     )
 
     if definitive:
@@ -503,12 +506,28 @@ def evaluate_live_tick_signal(
     if confidence_gated:
         market_waiting = True
         waiting_reason = "CONFLUENCE_BELOW_THERMAL"
-        waiting_detail = (
-            f"Direction {gated_direction} held below thermal: 10-book multiplicative "
-            f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% "
-            f"thermal gate (market_stress={market_stress:.2f}; gate={confluence_gate}; "
-            f"blockers: {', '.join(confluence.get('blockers', [])) or 'none'})"
-        )
+        # `confidence_gated` has TWO distinct causes and the old single message
+        # asserted the wrong one whenever the tier demotion was the real reason:
+        # it always claimed "X% < Y% thermal gate" even when X cleared Y and the
+        # hold came from incomplete evidence pillars capping the dispatch tier.
+        _blockers = [str(b) for b in (confluence.get("blockers") or [])]
+        _blocker_txt = ", ".join(_blockers) if _blockers else "none"
+        _books = f"{book.aligned_count}/{book.active_count} active books aligned"
+        if conf_score < dynamic_threshold:
+            waiting_detail = (
+                f"Direction {gated_direction} held below thermal: multiplicative "
+                f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% thermal "
+                f"gate ({_books}; market_stress={market_stress:.2f}; "
+                f"gate={confluence_gate}; blockers: {_blocker_txt})"
+            )
+        else:
+            waiting_detail = (
+                f"Direction {gated_direction} cleared the {dynamic_threshold:.1f}% "
+                f"thermal gate at {confidence:.2f}% ({_books}) but incomplete "
+                f"evidence pillars cap the dispatch tier at {confluence_gate}, "
+                f"below the {MIN_EXECUTABLE_TIER} bar "
+                f"(market_stress={market_stress:.2f}; blockers: {_blocker_txt})"
+            )
     else:
         market_waiting = False
         waiting_reason = None
@@ -631,5 +650,5 @@ def build_tick_signal_payload(
         "waiting_detail": verdict.waiting_detail,
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
-        "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
