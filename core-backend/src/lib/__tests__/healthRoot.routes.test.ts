@@ -50,6 +50,7 @@ vi.mock("axios", () => ({
 }));
 
 import { rootHealthBody, rootHealthRouter } from "../../routes/health.routes";
+import { realtimeTickBuffer } from "../../services/realtimeTickBuffer.service";
 
 type JsonBody = Record<string, unknown>;
 const capture = (): {
@@ -193,5 +194,39 @@ describe("ROOT GET /health (MASTER MISSION 1.3 — autopilot probe)", () => {
     expect(code).toBe(200);
     expect(typeof body.latency_ms).toBe("number");
     expect(typeof body.timestamp).toBe("string");
+  });
+
+  it("test_health_ticks_returns_tape — root /health/ticks dumps the last-N tape (PART 43.5 [472])", async () => {
+    const sym = "TICKS/TEST";
+    realtimeTickBuffer.clearSymbol(sym);
+    // A static market proxy re-served: constant price, non-PO source.
+    realtimeTickBuffer.append(sym, 1.2345, { source: "frankfurter" });
+    realtimeTickBuffer.append(sym, 1.2345, { source: "frankfurter" });
+    const layer = findLayer("/ticks");
+    expect(layer).toBeDefined();
+    const target = capture();
+    const handle = layer!.route!.stack[0].handle as (
+      req: Request,
+      res: Response,
+      next: () => void,
+    ) => void;
+    handle(
+      { query: { symbol: sym, n: "2" } } as unknown as Request,
+      target.res,
+      () => {},
+    );
+    await target.done;
+    const { code, body } = target.calls[0];
+    const tape = body as {
+      count: number;
+      allPricesConstant: boolean;
+      newestSourceIsPo: boolean;
+      ticks: unknown[];
+    };
+    expect(code).toBe(200);
+    expect(tape.count).toBe(2);
+    expect(tape.allPricesConstant).toBe(true);
+    expect(tape.newestSourceIsPo).toBe(false);
+    expect(Array.isArray(tape.ticks)).toBe(true);
   });
 });

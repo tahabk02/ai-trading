@@ -377,3 +377,38 @@ describe("phase 2 — structural height model", () => {
     expect(chart).not.toMatch(/100vh/);
   });
 });
+
+/**
+ * PART 43.5 [473]/[474] — PO-offline OTC is not "live". A proxy tick must not
+ * keep the HUD green, the verdict withheld, or the target layer drawn. jsdom
+ * cannot mount the lightweight-charts HUD, so this is a source-level contract on
+ * the exact wiring (same style as the layout contract above).
+ */
+describe("[473]/[474] PO-offline OTC — HUD, target and panel wiring", () => {
+  it("Pro page derives the OTC PO-offline truth and feeds the chart", () => {
+    expect(pro).toMatch(/isPoOfflineOtc\(/);
+    expect(pro).toMatch(/poOfflineOtc=\{activePoOffline\}/);
+  });
+
+  it("chart suppresses the green LIVE badge and renders a PO OFFLINE badge", () => {
+    expect(chart).toMatch(/poOfflineOtc\?: boolean/);
+    expect(chart).toMatch(/chart-po-offline-badge/);
+    // The LIVE badge must be gated OFF whenever poOfflineOtc is set.
+    expect(chart).toMatch(/!stalePrice && !poOfflineOtc/);
+  });
+
+  it("chart withholds the target layer + verdict when poOfflineOtc", () => {
+    // The target suppression branch reads the mirrored poOffline ref…
+    expect(chart).toMatch(/poOfflineRef\.current/);
+    expect(chart).toMatch(/hud-po-offline/);
+    // …and the TGT slot can never show a target while offline.
+    expect(chart).toMatch(/!hudPoOffline && hudTargetState\.showTarget/);
+  });
+
+  it("panel locks execution and names the state when PO is offline", () => {
+    expect(panel).toMatch(/panel-po-offline-banner/);
+    expect(panel).toMatch(/panel-po-offline-signal/);
+    // streamLive excludes PO-offline so the buttons can never be armed.
+    expect(panel).toMatch(/!stalePrice && !poOffline/);
+  });
+});

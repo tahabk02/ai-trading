@@ -150,6 +150,14 @@ interface FinancialChartProps {
   lookaheadHorizon?: number;
   streamStalled?: boolean;
   stalePrice?: boolean;
+  /**
+   * PART 43.5 [473]/[474] — true when this OTC instrument is priced by a NON-PO
+   * market proxy (PO offline). The proxy's per-second re-served tick must not
+   * keep the green LIVE badge (it is NOT a PO print), and the target layer +
+   * verdict + T-HI/T-LO are withheld until a PO print returns. REAL/crypto and
+   * a genuine PO print are never this state.
+   */
+  poOfflineOtc?: boolean;
   candleParityBreach?: {
     symbol: string;
     timeframe: string;
@@ -490,6 +498,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   confidence,
   streamStalled = false,
   stalePrice = false,
+  poOfflineOtc = false,
   candleParityBreach = null,
 }) => {
   const activeSymbol = symbol.trim().toUpperCase();
@@ -614,6 +623,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   feedStatusRef.current = feedStatus;
   const hasCandlesRef = useRef(hasCandles);
   hasCandlesRef.current = hasCandles;
+  // PART 43.5 [473]/[474] — mirrored so the target-layer callback reads the
+  // LATEST OTC PO-offline state without re-creating its identity every flip.
+  const poOfflineRef = useRef(poOfflineOtc);
+  poOfflineRef.current = poOfflineOtc;
 
   const predictionLike: {
     signal?: string | null;
@@ -1050,10 +1063,16 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
 
       // ── SUPPRESSION: candles ALWAYS render when live tip + target exist ──
       // The 96.5% confidence gate ONLY affects the BUY/SELL label, never the
-      // candle rendering. Suppress when the regime gate withholds the target or
-      // when required data is genuinely absent. Never anchor Date.now(); never
-      // gate on feedStatus/confidence.
-      if (!showTarget || tipGridMs <= 0 || targetPrice <= 0) {
+      // candle rendering. Suppress when the regime gate withholds the target,
+      // when this OTC instrument is PO-offline (proxy ticks are not authorized
+      // to carry a projection — PART 43.5 [474]), or when required data is
+      // genuinely absent. Never anchor Date.now(); never gate on confidence.
+      if (
+        !showTarget ||
+        poOfflineRef.current ||
+        tipGridMs <= 0 ||
+        targetPrice <= 0
+      ) {
         lastTargetIntervalsRef.current = 0;
         if (projectionRef.current.currentKey !== "") {
           projectionRef.current.reset();
@@ -1689,7 +1708,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // hudZone, so the TGT / TARGET CANDLES / EXPIRY cards can never disagree
   // with the candle shape's own tier gate.
   const hudView = currentSignalView();
-  const hudSignal = hudView.gatedSignal;
+  // PART 43.5 [473]/[474] — PO-offline OTC: the proxy tape may be flowing, but
+  // no PO print authorizes a verdict or a target shape.
+  const hudPoOffline = poOfflineOtc;
+  const hudSignal = hudPoOffline ? null : hudView.gatedSignal;
   const hudTargetCandles = targetCandlesLabelFor(hudView, targetCandleCount);
   const hudZone = hudTargetCandles.enabled;
   // PART 40 [394]/[395] — the ONE pure gate + the reason copy every
@@ -1697,11 +1719,14 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // gate is open and the withheld reason when it is not — same view, same
   // decision, no blank.
   const hudTargetState = targetRenderState(hudView, hudTarget);
-  const hudTargetCopy = targetReasonCopy(
-    hudTargetState.reason,
-    hudTargetState.detail,
-  );
-  const hudTargetShown = hudTargetState.showTarget && hudTarget > 0;
+  const hudTargetCopy = hudPoOffline
+    ? {
+        label: "PO OFFLINE — NO VERDICT",
+        hint: "No Pocket Option print for this OTC pair — the market may be closed or the feed is unavailable. The verdict and target resume only when PO quotes return; proxy ticks are not tradable.",
+      }
+    : targetReasonCopy(hudTargetState.reason, hudTargetState.detail);
+  const hudTargetShown =
+    !hudPoOffline && hudTargetState.showTarget && hudTarget > 0;
   const hudDigits = getPriceDigits(activeSymbol);
   const hudLive = Number(currentPriceRef.current) || 0;
   const hudDeltaPct =
@@ -1754,7 +1779,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           candle accumulating ticks in real-time, not a static history bar.
           When the stream stalls / the feed is desynced the badge flips to an
           amber AWAITING indicator — never fabricated bars. */}
-      {hasCandles && !feedOffline && !feedWaiting && !streamStalled && !stalePrice && (
+      {hasCandles && !feedOffline && !feedWaiting && !streamStalled && !stalePrice && !poOfflineOtc && (
         <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5">
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -1769,9 +1794,26 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         </div>
       )}
 
+      {/* PART 43.5 [473] — PO-OFFLINE OTC BADGE. This OTC instrument is priced
+          by a non-PO market proxy (PO offline / market closed). Proxy ticks may
+          flow every second but they are NOT PO prints, so the tape is amber —
+          never the green LIVE badge — and no verdict/target is authorized. */}
+      {hasCandles && !feedOffline && !feedWaiting && !streamStalled && poOfflineOtc ? (
+        <div
+          data-testid="chart-po-offline-badge"
+          className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5"
+        >
+          <AssetClassBadge symbol={activeSymbol} />
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+          <span className="text-[9px] font-mono text-amber-400 uppercase tracking-widest font-black">
+            PO OFFLINE · PROXY TICKS
+          </span>
+        </div>
+      ) : null}
+
       {/* STALE PRICE BADGE — the last price packet is >2s old. Warn instead of
           pretending the frozen price is live. */}
-      {hasCandles && !feedOffline && !feedWaiting && !streamStalled && stalePrice && (
+      {hasCandles && !feedOffline && !feedWaiting && !streamStalled && stalePrice && !poOfflineOtc && (
         <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5">
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -1888,7 +1930,21 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           target expiry aligned to PO candle closures. */}
       {hasCandles && !feedOffline ? (
         <div className="pointer-events-none absolute top-10 right-2 z-10 flex flex-col items-end gap-1">
-          {hudSignal != null || (Number.isFinite(hudConf) && hudConf > 0) ? (
+          {/* PART 43.5 [474] — PO-offline OTC has NO verdict: replace the
+              BUY/SELL/MARKET-WAIT chip with an explicit offline chip so no
+              stale verdict is ever shown while only proxy ticks flow. */}
+          {hudPoOffline ? (
+            <div
+              data-testid="hud-po-offline"
+              className="flex items-center gap-2 rounded-md border border-amber-400/40 bg-amber-500/10 backdrop-blur-sm px-2 py-1"
+            >
+              <span className="text-[10px] font-mono font-black uppercase tracking-widest text-amber-300">
+                PO OFFLINE — PROXY TICKS
+              </span>
+            </div>
+          ) : null}
+          {!hudPoOffline &&
+          (hudSignal != null || (Number.isFinite(hudConf) && hudConf > 0)) ? (
             <div
               className="flex items-center gap-2 rounded-md border border-white/10 bg-obsidian/85 backdrop-blur-sm px-2 py-1"
               style={{ boxShadow: `0 0 14px ${hudSignalColor}33` }}
@@ -1936,8 +1992,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           <div
             data-testid="hud-target-slot"
             data-state={hudTargetShown ? "target" : "withheld"}
-            data-reason={hudTargetState.reason ?? ""}
-            data-detail={hudTargetState.detail ?? ""}
+            data-reason={hudPoOffline ? "po_offline" : hudTargetState.reason ?? ""}
+            data-detail={hudPoOffline ? "" : hudTargetState.detail ?? ""}
             className={`flex items-center gap-2 rounded-md backdrop-blur-sm px-2 py-1 font-mono text-[10px] ${
               hudTargetShown
                 ? "border border-white/10 bg-obsidian/85"
@@ -1974,7 +2030,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             <span className="uppercase tracking-widest text-slate-400">TIME</span>
             <span className="font-bold tabular-nums text-slate-200">{tf}</span>
           </div>
-          {formatTargetCandlesLabel(hudTargetCandles) !== null ? (
+          {!hudPoOffline && formatTargetCandlesLabel(hudTargetCandles) !== null ? (
             <div className="flex items-center gap-2 rounded-md border border-sky-500/25 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
               <span className="uppercase tracking-widest text-slate-400">
                 TARGET CANDLES
@@ -1984,7 +2040,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               </span>
             </div>
           ) : null}
-          {hudZone && hudCountdown ? (
+          {!hudPoOffline && hudZone && hudCountdown ? (
             <div className="flex items-center gap-2 rounded-md border border-white/10 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
               <span className="uppercase tracking-widest text-slate-400">EXPIRY</span>
               <span className="font-black tabular-nums text-sky-300">{hudCountdown}</span>

@@ -27,6 +27,7 @@
  */
 
 import { logger } from "../utils/logger";
+import { isPocketOptionSource } from "../lib/pocketOptionSource";
 
 // 10-BOOK WINDOW PRESERVATION — the ring must comfortably hold the live-quant
 // scorer's full window (≥2 min of a 1Hz tape) so a strong momentum run never
@@ -80,6 +81,13 @@ interface TickEntry {
    * can never be presented as a live one.
    */
   stale?: boolean;
+  /**
+   * PART 43.5 [473] — authoring feed of THIS entry (`pocket_option_ssot`,
+   * `frankfurter`, …). Kept per-entry (not just per-symbol) so the OTC
+   * live-freshness gate can measure "newest PO-sourced print" without a non-PO
+   * market proxy resetting it. Absent on legacy callers that never stamped one.
+   */
+  source?: string;
 }
 
 /** Single-symbol live quote snapshot for the market terminal grid. Every field
@@ -110,6 +118,17 @@ export interface SymbolQuoteSnapshot {
   /** Hysteresis-free "no live price" state for the terminal: true when there is
    *  no genuinely fresh tick younger than QUOTE_STALE_AFTER_MS. */
   staleLive: boolean;
+  /**
+   * PART 43.5 [473] — age of the newest NON-STALE *Pocket Option-sourced* print,
+   * or null when no PO print has been observed at all. This is the freshness an
+   * OTC instrument must be judged on: a market proxy (Frankfurter/ER-API/…)
+   * re-served every second must NOT read as live for a PO instrument.
+   */
+  poFreshAgeMs: number | null;
+  /** True when there is no genuinely fresh PO-sourced tick (< QUOTE_STALE_AFTER_MS). */
+  poStaleLive: boolean;
+  /** Source of the newest PO-sourced print ever observed, or null (provenance). */
+  poSource: string | null;
 }
 
 /**
@@ -225,6 +244,7 @@ class RealtimeTickBufferService {
       bid: opts?.bid,
       ask: opts?.ask,
       ...(opts?.stale ? { stale: true } : {}),
+      ...(opts?.source ? { source: opts.source } : {}),
     });
     this.ticks.set(norm, ring);
     this.lastTickAt.set(norm, new Date(now).toISOString());
@@ -370,7 +390,16 @@ class RealtimeTickBufferService {
    * must measure — a held print is never a live quote no matter how recent its
    * insertion timestamp is.
    */
-  public getLatestFreshAgeMs(symbol: string): number | null {
+  public getLatestFreshAgeMs(
+    symbol: string,
+    opts?: {
+      /**
+       * PART 43.5 [473] — when true, only a PO-sourced non-stale print counts.
+       * The OTC live gate uses this so a non-PO market proxy cannot reset it.
+       */
+      poOnly?: boolean;
+    },
+  ): number | null {
     const norm = (symbol || "").trim().toUpperCase();
     const ring = this.ticks.get(norm);
     if (!ring) return null;
@@ -382,9 +411,59 @@ class RealtimeTickBufferService {
     const entries = ring.tail();
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
-      if (!entry.stale) return Math.max(0, Date.now() - entry.tsMs);
+      if (entry.stale) continue;
+      if (opts?.poOnly && !isPocketOptionSource(entry.source)) continue;
+      return Math.max(0, Date.now() - entry.tsMs);
     }
     return null;
+  }
+
+  /**
+   * PART 43.5 [473] — the source of the newest PO-sourced print observed for a
+   * symbol (newest first), or null when none exists. Lets a consumer name the
+   * last real PO tier even while a market proxy currently owns the tape.
+   */
+  public getLatestPoSource(symbol: string): string | null {
+    const norm = (symbol || "").trim().toUpperCase();
+    const ring = this.ticks.get(norm);
+    if (!ring) return null;
+    const entries = ring.tail();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const src = entries[i].source;
+      if (isPocketOptionSource(src)) return src ?? null;
+    }
+    return null;
+  }
+
+  /**
+   * PART 43.5 [472] — raw tail dump for the tape-diagnostic endpoint: the last
+   * `maxCount` entries (oldest → newest) with their OWN source, price and
+   * timestamp. Purely observational — used to confirm whether a pair is being
+   * fed a genuine PO tick or a static market proxy re-served every second.
+   */
+  public getTapeDebug(
+    symbol: string,
+    maxCount = 30,
+  ): Array<{
+    price: number;
+    tsMs: number;
+    iso: string;
+    source: string | null;
+    stale: boolean;
+    heldMsAgo: number;
+  }> {
+    const norm = (symbol || "").trim().toUpperCase();
+    const ring = this.ticks.get(norm);
+    if (!ring) return [];
+    const now = Date.now();
+    return ring.tail(Math.max(1, maxCount)).map((t) => ({
+      price: t.price,
+      tsMs: t.tsMs,
+      iso: new Date(t.tsMs).toISOString(),
+      source: t.source ?? null,
+      stale: t.stale === true,
+      heldMsAgo: Math.max(0, now - t.tsMs),
+    }));
   }
 
   /**
@@ -414,6 +493,9 @@ class RealtimeTickBufferService {
     const spread = this.getLatestSpread(norm);
     const bid = Number.isFinite(spread.bid) ? (spread.bid as number) : null;
     const ask = Number.isFinite(spread.ask) ? (spread.ask as number) : null;
+    const freshAgeMs = this.getLatestFreshAgeMs(norm);
+    // PART 43.5 [473] — PO-only freshness for the OTC gate.
+    const poFreshAgeMs = this.getLatestFreshAgeMs(norm, { poOnly: true });
     return {
       symbol: norm,
       price: Number.isFinite(last.price) && last.price > 0 ? last.price : null,
@@ -425,11 +507,11 @@ class RealtimeTickBufferService {
       ageMs: this.getLatestAgeMs(norm),
       source: this.lastSource.get(norm) ?? null,
       stale: last.stale === true,
-      freshAgeMs: this.getLatestFreshAgeMs(norm),
-      staleLive: (() => {
-        const fresh = this.getLatestFreshAgeMs(norm);
-        return fresh == null || fresh > QUOTE_STALE_AFTER_MS;
-      })(),
+      freshAgeMs,
+      staleLive: freshAgeMs == null || freshAgeMs > QUOTE_STALE_AFTER_MS,
+      poFreshAgeMs,
+      poStaleLive: poFreshAgeMs == null || poFreshAgeMs > QUOTE_STALE_AFTER_MS,
+      poSource: this.getLatestPoSource(norm),
     };
   }
 

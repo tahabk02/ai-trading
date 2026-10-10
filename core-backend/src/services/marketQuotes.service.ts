@@ -14,6 +14,7 @@
 import { symbolRegistry } from "./symbolRegistry.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { isForexMarketClosed } from "../lib/marketSchedule";
+import { resolveQuoteLiveness } from "../lib/quoteLiveness";
 import { logger } from "../utils/logger";
 
 export interface MarketQuote {
@@ -39,6 +40,14 @@ export interface MarketQuote {
   freshAgeMs: number | null;
   /** Terminal-facing "this price is NOT live" flag (>15s without a fresh tick). */
   staleLive: boolean;
+  /**
+   * PART 43.5 [473] — true when this OTC instrument is currently priced by a
+   * non-Pocket-Option market proxy (Frankfurter / ER-API / GitHub / last-known),
+   * i.e. PO is offline for it. Real-forex fallbacks, crypto feeds, market-closed
+   * and genuine PO prints are all NOT this state. Lets every consumer withhold
+   * the OTC verdict/target/execution on the same server-derived truth.
+   */
+  poOffline: boolean;
   /**
    * PART 42.1 [421]/[422] — true when this REAL pair's weekly forex market is
    * closed (Fri ~17:00 → Sun ~17:00 New York). The price is the LAST CLOSE,
@@ -77,6 +86,19 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
       // live-freshness gate can treat the carried print as a current quote.
       const marketClosed =
         (meta?.assetSubType ?? "otc") === "forex" && isForexMarketClosed();
+      // PART 43.5 [473] — an OTC instrument is live ONLY on a PO-sourced print.
+      // A non-PO market proxy re-served every second must not read as live, and
+      // freshness is measured against the newest PO tick (poFreshAgeMs), not
+      // the any-source tape. A PO-offline OTC card is flagged for withholding.
+      const live = resolveQuoteLiveness({
+        assetSubType: meta?.assetSubType,
+        marketClosed,
+        source: q.source,
+        freshAgeMs: q.freshAgeMs,
+        staleLive: q.staleLive,
+        poFreshAgeMs: q.poFreshAgeMs,
+        poStaleLive: q.poStaleLive,
+      });
       out.push({
         symbol: q.symbol,
         name: meta?.name ?? q.symbol,
@@ -94,8 +116,9 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
         ageMs: q.ageMs,
         source: q.source,
         stale: q.stale,
-        freshAgeMs: q.freshAgeMs,
-        staleLive: marketClosed ? true : q.staleLive,
+        freshAgeMs: live.freshAgeMs,
+        staleLive: live.staleLive,
+        poOffline: live.poOffline,
         marketClosed,
       });
     }

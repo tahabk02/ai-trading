@@ -225,7 +225,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   // exactly like a disconnected stream — every trade button locks and the
   // signal badge switches to "Waiting for Real-time Tick".
   const streamLive =
-    socketConnected && currentPrice > 0 && !stalePrice;
+    socketConnected && currentPrice > 0 && !stalePrice && !poOffline;
 
   // PART 24 [161]/[162] — SELECTION IS NEVER GATED. The grid reports the
   // engine's regime/tier + bucket-timing state; it never enforces it. A
@@ -329,16 +329,28 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         <div
           className={cn(
             "flex items-center justify-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl font-bold text-xs sm:text-sm uppercase tracking-wider transition-all duration-300",
-            stalePrice
+            poOffline
               ? "bg-amber-500/10 text-amber-400 border border-amber-500/40"
-              : isCall
-                ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(34,197,94,0.2)]"
-                : isPut
-                  ? "bg-rose-500/15 text-rose-400 border border-rose-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(239,68,68,0.2)]"
-                  : "bg-slate-800 text-slate-300 border border-slate-700",
+              : stalePrice
+                ? "bg-amber-500/10 text-amber-400 border border-amber-500/40"
+                : isCall
+                  ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(34,197,94,0.2)]"
+                  : isPut
+                    ? "bg-rose-500/15 text-rose-400 border border-rose-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(239,68,68,0.2)]"
+                    : "bg-slate-800 text-slate-300 border border-slate-700",
           )}
         >
-          {stalePrice ? (
+          {poOffline ? (
+            <>
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              <span
+                data-testid="panel-po-offline-signal"
+                className="truncate"
+              >
+                PO OFFLINE — PROXY TICKS
+              </span>
+            </>
+          ) : stalePrice ? (
             <>
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
               <span className="truncate">Connecting / Waiting</span>
@@ -509,10 +521,35 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         )
       )}
 
+      {/* PART 43.5 [474] — PO-OFFLINE OTC BANNER. This OTC pair is priced by a
+          non-PO market proxy while Pocket Option is offline: the proxy tick is
+          NOT a tradeable execution price, so BUY/SELL are locked and the
+          verdict is withheld. Distinct from a feed outage and from a stale
+          tick — the proxy tape may be flowing perfectly; it is simply not PO. */}
+      {poOffline &&
+      feedStatus !== "awaiting_ssid" &&
+      feedStatus !== "auth_failed" ? (
+        <div
+          data-testid="panel-po-offline-banner"
+          className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-xl"
+        >
+          <p className="text-[9px] sm:text-[10px] text-amber-400 font-black uppercase tracking-wider flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+            PO Offline — Proxy Ticks
+          </p>
+          <p className="text-[9px] sm:text-[10px] text-amber-400/90 font-mono mt-1">
+            No Pocket Option price for this OTC pair — the market is closed or
+            PO is unavailable. The proxy feed is not a tradeable execution
+            price; signals and execution resume when PO quotes return.
+          </p>
+        </div>
+      ) : null}
+
       {/* Stale Price — Waiting for Real-time Tick (2-second rule) */}
-      {(feedStatus === "stalled" ||
-        feedStatus === "degraded" ||
-        (socketConnected && currentPrice > 0 && stalePrice)) && (
+      {!poOffline &&
+        (feedStatus === "stalled" ||
+          feedStatus === "degraded" ||
+          (socketConnected && currentPrice > 0 && stalePrice)) && (
         <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-xl">
           <p className="text-[9px] sm:text-[10px] text-amber-400 font-black uppercase tracking-wider flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />

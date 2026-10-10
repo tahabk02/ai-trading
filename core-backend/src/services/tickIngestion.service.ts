@@ -28,6 +28,7 @@ import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { githubDataProvider } from "./githubData.provider";
 import { symbolRegistry } from "./symbolRegistry.service";
+import { pocketOptionBridgeService } from "./pocketOptionBridge.service";
 import {
   exponentialBackoffMs,
   classifyFeedLog,
@@ -385,17 +386,48 @@ export class LiveTickIngestionService {
     }
   }
 
+  /**
+   * PART 43.5 [473] — TRUE only while the Pocket Option bridge is genuinely
+   * LIVE and authoritative (relay connected + report status ONLINE, with its
+   * own 12s heartbeat watchdog having not degraded it).
+   *
+   * The PO-authority guards below use this INSTEAD OF a bare cached-price age
+   * check so a stale cached PO print can never suppress the HTTP fallback once
+   * the bridge has gone idle, is awaiting an SSID, or has degraded. While the
+   * bridge IS live the guards keep the exact divergence protection they were
+   * written for; the instant it is not, the fallback resumes authoring real
+   * ticks so no single-symbol consumer (the Pro Terminal) is left with a dead
+   * tape — the BUILDING HISTORY / EVALUATING HORIZON / "--" desync.
+   */
+  private isPocketOptionActivelyLive(): boolean {
+    return (
+      pocketOptionBridgeService.isConnected() &&
+      pocketOptionBridgeService.getStatus() === "ONLINE"
+    );
+  }
+
   private async pollOnce(symbol: string): Promise<void> {
     this.inFlightPolls.add(symbol);
     try {
       // ════════════════════════════════════════════════════════════════
       // PO-AUTHORITY GUARD — skip HTTP polling entirely when the PO
-      // bridge is actively delivering real ticks for this symbol.
+      // bridge is ACTIVELY LIVE and delivering real ticks for this symbol.
       // This eliminates the root cause of price divergence: two sources
       // (PO socket vs Frankfurter/ER-API) writing different values for
       // the same symbol within the same 1-second window.
+      //
+      // PART 43.5 [473] — gated on ACTUAL bridge liveness (see
+      // isPocketOptionActivelyLive), NOT merely a cached PO price. A stale
+      // cached print whose bridge has since gone idle/awaiting_ssid/degraded
+      // must not suppress the fallback: doing so starved the Pro Terminal pair
+      // (no live_tick → /predict "awaiting live data" → BUILDING HISTORY /
+      // EVALUATING HORIZON / price "--") while the all-pairs market_quotes
+      // grid kept serving the buffer's last value.
       // ════════════════════════════════════════════════════════════════
-      if (forexDataService.isPocketOptionCovered(symbol, 20_000)) {
+      if (
+        this.isPocketOptionActivelyLive() &&
+        forexDataService.isPocketOptionCovered(symbol, 20_000)
+      ) {
         return;
       }
 
@@ -463,12 +495,21 @@ export class LiveTickIngestionService {
       // bridge), this fallback poll must NOT inject a divergent value into the
       // shared candle buffer — that would cause the exact misalignment the
       // parity overhaul is eliminating. We only author here when PO is not
-      // actively covering the pair.
+      // ACTIVELY LIVE and covering the pair.
+      //
+      // PART 43.5 [473] — the suppression is gated on bridge liveness. A
+      // cached PO print whose bridge has since gone offline is NOT
+      // authoritative; holding it back here was the second half of the
+      // Pro-Terminal starvation (the fallback had already been allowed past the
+      // first guard, then refused to write because a stale print still sat in
+      // the cache).
+      const poLive = this.isPocketOptionActivelyLive();
       const isPoSource =
         spot.source === "pocket_option_ssot" ||
         spot.source === "pocket_option_held";
-      const poAlreadyAuthored = forexDataService.isPocketOptionCovered(symbol, 15_000);
-      if (isPoSource || poAlreadyAuthored) {
+      const poAlreadyAuthored =
+        poLive && forexDataService.isPocketOptionCovered(symbol, 15_000);
+      if (poLive && (isPoSource || poAlreadyAuthored)) {
         // PO is authoritative — do not double-write. Skip mutation (broadcast
         // of TICKS is exclusively the bridge's job when it is live).
         return;

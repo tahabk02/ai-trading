@@ -10,6 +10,7 @@ import { TradingPanel } from "@/components/trading/trading-panel";
 import { Header } from "@/components/shared/header";
 import { FeedHealthBar } from "@/components/shared/feed-health";
 import { resolveProSymbol, resolveTfParam } from "@/lib/pro-deep-link";
+import { isPoOfflineOtc } from "@/lib/quoteProvenance";
 import { useSignalViewStore, selectSignalView } from "@/lib/signalViewStore";
 
 // ── CLIENT-ONLY CHART ISOLATION ──
@@ -174,6 +175,13 @@ function ProTerminalInner() {
 
   const [selectedSymbol, setSelectedSymbol] = useState(activeSymbol);
   const appliedDeepLinkRef = useRef<string | null>(null);
+
+  // PART 43.5 [473]/[474] — the canonical symbol this page renders. The chart
+  // HUD/target gate needs the SAME OTC PO-offline truth the grid card + panel
+  // use: a proxy-only OTC tape must not show LIVE or authorize a verdict/target.
+  const proSymbol = (selectedSymbol || activeSymbol).toUpperCase();
+  const proQuote = useMarketTerminalStore((s) => s.quotes[proSymbol]);
+  const activePoOffline = isPoOfflineOtc(proSymbol, proQuote ?? null);
 
   // ═══ FOCUS MODE (chart-only) ═══
   // Hides both side rails AND the AI panel so the chart owns the full viewport
@@ -582,6 +590,7 @@ function ProTerminalInner() {
                       signal={predictionData?.signal ?? null}
                       streamStalled={streamStalled}
                       stalePrice={stalePrice}
+                      poOfflineOtc={activePoOffline}
                       candleParityBreach={candleParityBreach}
                     />
                   </ErrorBoundary>

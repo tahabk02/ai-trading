@@ -173,6 +173,18 @@ export const rootHealthRouter: Router = (() => {
       });
     }
   });
+  // GET /health/ticks?symbol=XYZ&n=30 — tape diagnostic (PART 43.5 [472]).
+  r.get("/ticks", (req: Request, res: Response) => {
+    const symbol = String(req.query.symbol ?? req.query.s ?? "")
+      .trim()
+      .toUpperCase();
+    if (!symbol) {
+      res.status(400).json({ error: "symbol is required" });
+      return;
+    }
+    const n = Math.min(Math.max(Number(req.query.n) || 30, 1), 200);
+    res.json(buildTapeDebugSnapshot(symbol, n));
+  });
   return r;
 })();
 
@@ -290,12 +302,75 @@ router.get("/data", (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /health/ticks?symbol=XYZ&n=30 — PART 43.5 [472] TAPE DIAGNOSTIC.
+ *
+ * Dumps the last `n` raw ring entries for a symbol (oldest → newest) with the
+ * AUTHORING SOURCE, price and timestamp of each. Lets an operator confirm at a
+ * glance whether a pair is fed a genuine PO tick or a static market proxy that
+ * a fallback re-serves every second (constant price, source != pocket_option*,
+ * last tick < 1s old = the PO-offline-proxy hypothesis). Purely observational.
+ */
+export function buildTapeDebugSnapshot(
+  symbol: string,
+  n = 30,
+): {
+  symbol: string;
+  count: number;
+  newest: {
+    price: number;
+    iso: string;
+    source: string | null;
+    heldMsAgo: number;
+    stale: boolean;
+  } | null;
+  distinctPrices: number;
+  allPricesConstant: boolean;
+  newestSourceIsPo: boolean;
+  ticks: ReturnType<typeof realtimeTickBuffer.getTapeDebug>;
+} {
+  const ticks = realtimeTickBuffer.getTapeDebug(symbol, n);
+  const newest = ticks.length > 0 ? ticks[ticks.length - 1] : null;
+  const distinct = new Set(ticks.map((t) => t.price));
+  return {
+    symbol: String(symbol || "").trim().toUpperCase(),
+    count: ticks.length,
+    newest: newest
+      ? {
+          price: newest.price,
+          iso: newest.iso,
+          source: newest.source,
+          heldMsAgo: newest.heldMsAgo,
+          stale: newest.stale,
+        }
+      : null,
+    distinctPrices: distinct.size,
+    allPricesConstant: ticks.length > 1 && distinct.size === 1,
+    newestSourceIsPo:
+      newest?.source != null && /^pocket_option/i.test(newest.source),
+    ticks,
+  };
+}
+
+/**
  * GET /health/feed — live-feed health snapshot (mirror of root namespace).
  * Reports feed status, last genuine tick, ticks_received and candles_emitted
  * so the market terminal can surface live bridge health.
  */
 router.get("/feed", (_req: Request, res: Response) => {
   res.json(buildFeedHealthSnapshot());
+});
+
+// GET /health/ticks?symbol=XYZ&n=30 — tape diagnostic (PART 43.5 [472]).
+router.get("/ticks", (req: Request, res: Response) => {
+  const symbol = String(req.query.symbol ?? req.query.s ?? "")
+    .trim()
+    .toUpperCase();
+  if (!symbol) {
+    res.status(400).json({ error: "symbol is required" });
+    return;
+  }
+  const n = Math.min(Math.max(Number(req.query.n) || 30, 1), 200);
+  res.json(buildTapeDebugSnapshot(symbol, n));
 });
 
 /**

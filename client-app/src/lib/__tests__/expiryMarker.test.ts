@@ -482,9 +482,10 @@ describe("PART 37 chart wiring (source-level)", () => {
     const markerAt = fn.indexOf("syncExpiryMarker(tipSec, tfSec, expSec)");
     // PART 40 [394] — the suppression branch now ALSO carries the regime-gate
     // condition (`!showTarget`); the marker must still be positioned above it.
-    const suppressAt = fn.indexOf(
-      "if (!showTarget || tipGridMs <= 0 || targetPrice <= 0)",
-    );
+    // PART 43.5 [474] added a further `poOfflineRef.current` clause, so match on
+    // the STABLE tail of the condition (`tipGridMs <= 0`) rather than the exact
+    // full expression.
+    const suppressAt = fn.indexOf("tipGridMs <= 0");
     expect(markerAt).toBeGreaterThan(-1);
     expect(suppressAt).toBeGreaterThan(-1);
     // A time marker must not vanish because a price is missing.

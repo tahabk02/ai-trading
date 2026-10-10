@@ -1,5 +1,5 @@
-﻿/**
- * trading-panel.po-offline.dom.test.tsx â€” PART 43.4 [469].
+/**
+ * trading-panel.po-offline.dom.test.tsx — PART 43.4 [469].
  *
  * For an OTC pair priced by a NON-PO feed (PO OFFLINE / market proxy) the panel
  * must NOT print a tradeable execution price: it shows "---" and names the
@@ -76,7 +76,7 @@ function arm(overrides: Record<string, unknown> = {}) {
   });
 }
 
-describe("[469] trading panel â€” OTC priced by a market proxy shows no price", () => {
+describe("[469] trading panel — OTC priced by a market proxy shows no price", () => {
   beforeEach(() => {
     resetAll();
     setSocketConnected(true);
@@ -101,5 +101,76 @@ describe("[469] trading panel â€” OTC priced by a market proxy shows no pri
 
     expect(screen.queryByTestId("panel-po-offline-marker")).toBeNull();
     expect(screen.getAllByText(/\$1\.0845/).length).toBeGreaterThan(0);
+  });
+});
+
+describe("[473]/[474] trading panel — PO-offline OTC is not tradeable", () => {
+  beforeEach(() => {
+    resetAll();
+    setSocketConnected(true);
+  });
+
+  it("locks BUY/SELL and shows the PO OFFLINE signal + banner (never a verdict)", () => {
+    arm();
+    useMarketTerminalStore.getState().setQuotes([
+      quote({ source: "open_er_api:live" }),
+    ]);
+    ui(<TradingPanel stalePrice={false} />);
+
+    expect(screen.getByTestId("panel-po-offline-signal")).toHaveTextContent(
+      /PO OFFLINE/i,
+    );
+    expect(screen.getByTestId("panel-po-offline-banner")).toBeInTheDocument();
+    expect(screen.getByTestId("action-call")).toBeDisabled();
+    expect(screen.getByTestId("action-put")).toBeDisabled();
+  });
+
+  it("does not treat a fresh proxy tick as live even when the socket is up", () => {
+    // Fresh non-PO source (age < 2s) but PO offline — the panel must still lock.
+    arm();
+    useMarketTerminalStore.getState().setQuotes([
+      quote({ source: "frankfurter:live", freshAgeMs: 300, staleLive: false }),
+    ]);
+    ui(<TradingPanel stalePrice={false} />);
+
+    expect(screen.getByTestId("action-call")).toBeDisabled();
+    expect(screen.getByTestId("action-put")).toBeDisabled();
+  });
+
+  it("leaves a genuine PO OTC verdict tradeable (no PO OFFLINE surfaces)", () => {
+    arm();
+    useMarketTerminalStore.getState().setQuotes([quote()]);
+    ui(<TradingPanel stalePrice={false} />);
+
+    expect(screen.queryByTestId("panel-po-offline-signal")).toBeNull();
+    expect(screen.queryByTestId("panel-po-offline-banner")).toBeNull();
+    expect(screen.getByTestId("action-call")).not.toBeDisabled();
+    expect(screen.getByTestId("action-put")).not.toBeDisabled();
+  });
+
+  it("never shows PO OFFLINE for a REAL forex pair on a proxy fallback", () => {
+    act(() => {
+      useTradingStore.setState({
+        activeSymbol: "EUR/SEK",
+        currentPrice: 11.2345,
+        feedStatus: "live",
+        lastPriceUpdate: new Date().toISOString(),
+        isKillSwitchLocked: false,
+        isTradeActive: false,
+        predictionData: { signal: "BUY", confidence: 0.97, tier: "T1" },
+      } as never);
+    });
+    useMarketTerminalStore.getState().setQuotes([
+      quote({
+        symbol: "EUR/SEK",
+        type: "forex",
+        assetSubType: "forex",
+        source: "frankfurter:live",
+      }),
+    ]);
+    ui(<TradingPanel stalePrice={false} />);
+
+    expect(screen.queryByTestId("panel-po-offline-signal")).toBeNull();
+    expect(screen.queryByTestId("panel-po-offline-banner")).toBeNull();
   });
 });

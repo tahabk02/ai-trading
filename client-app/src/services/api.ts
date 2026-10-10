@@ -393,6 +393,9 @@ export interface MarketQuote {
   /** PART 42.1 — this REAL pair's weekly forex market is closed. `price` is the
    *  last close, never live. OTC/crypto are 24/7 and never set this. */
   marketClosed?: boolean;
+  /** PART 43.5 [473] — OTC pair whose fresh ticks are NOT Pocket Option prints
+   *  (PO offline / market closed); the price is a non-tradeable market proxy. */
+  poOffline?: boolean;
 }
 
 export interface QuotesResponse {

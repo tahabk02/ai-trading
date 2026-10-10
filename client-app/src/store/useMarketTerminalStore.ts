@@ -85,6 +85,7 @@ const QUOTE_RENDER_FIELDS = [
   "stale",
   "staleLive",
   "marketClosed",
+  "poOffline",
 ] as const satisfies readonly (keyof MarketQuote)[];
 
 /**

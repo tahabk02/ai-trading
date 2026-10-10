@@ -850,3 +850,74 @@ browser extension in the operator's own profile; no app change.
   `trading-panel.dom` (10), `verdict-state` (13),
   `predictVsSocketLock.dom` (5), `predictCoalescing.singleFlight.dom` (3) - all passed.
 - backend / ai-engine: untouched this part.
+
+## DONE - PART 43.5: OTC "live" means a PO-sourced tick [472]-[476]
+
+### [472] Tape diagnostic: `/health/ticks` dumps the last-N ring, with source
+
+The root symptom was an OTC pair whose grid card looked live (a 1s-fresh print)
+while the Pro chart starved. The ring's freshness gate counted ANY non-stale
+entry, so a proxy feed (Frankfurter / ER-API / GitHub / last-known-real)
+re-stamped every second painted exactly like a PO tick.
+
+- `lib/pocketOptionSource.ts` (new) - `isPocketOptionSource()` (startswith
+  `pocket_option`, strips the `:live` HTTP stamp).
+- `services/realtimeTickBuffer.service.ts` - per-entry `source?`; the snapshot
+  now carries `poFreshAgeMs` (age of the newest PO-sourced non-stale print),
+  `poStaleLive` and `poSource`; `getLatestFreshAgeMs(symbol, { poOnly })`,
+  `getLatestPoSource()`, `getTapeDebug(symbol, n)` (price/tsMs/iso/source/stale).
+- `routes/health.routes.ts` - `GET /health/ticks?symbol=XYZ&n=30` (root + the
+  `/api/v1` router) -> `buildTapeDebugSnapshot()` with `allPricesConstant`,
+  `newestSourceIsPo`, `distinctPrices`. The live op dump is the operator's
+  one-shot proof of which feed is authoring.
+- Test: `healthRoot.routes.test.ts` tapes-dump case.
+
+### [473] OTC liveness gate: only a PO print is "live" (backend)
+
+- `lib/quoteLiveness.ts` (new, pure) - `resolveQuoteLiveness()` -> for an OTC
+  instrument `{ freshAgeMs, staleLive, poOffline }` decided SOLELY from PO
+  freshness; REAL pairs keep the pre-existing freshness rule; `marketClosed`
+  still forces not-live.
+- `services/marketQuotes.service.ts` - `MarketQuote.poOffline` (OTC priced by a
+  non-PO feed); OTC `freshAgeMs`/`staleLive` now come from `poFreshAgeMs` /
+  `poStaleLive` so a proxy tick can never reset the gate.
+- `services/tickIngestion.service.ts` - the two PO-authority guards are gated on
+  `isPocketOptionActivelyLive()` (bridge connected AND status ONLINE), not a bare
+  cached-price age: when the bridge is idle / awaiting SSID / degraded the HTTP
+  fallback resumes authoring real `live_tick`s, fixing the Pro-Terminal
+  BUILDING-HISTORY / EVALUATING-HORIZON / "--" starvation.
+- Tests: `realtimeTickBuffer.otcPoGate.test.ts` (10),
+  `tickIngestion.poAuthority.test.ts` (6).
+
+### [474] Client: a proxy tick is not "live" - HUD, verdict and target withheld
+
+- `components/trading/financial-chart.tsx` - new `poOfflineOtc` prop. The green
+  LIVE badge is suppressed and an amber `PO OFFLINE / PROXY TICKS` badge
+  (`chart-po-offline-badge`) is shown; the HUD verdict chip is replaced by
+  `hud-po-offline`; the target layer (candles + TGT/ANC/T-HI/T-LO) is cleared
+  and the TGT slot states "PO OFFLINE - NO VERDICT".
+- `components/trading/trading-panel.tsx` - `streamLive` excludes PO-offline so
+  BUY/SELL lock; a distinct `panel-po-offline-signal` badge and
+  `panel-po-offline-banner` replace the stale/connecting copy.
+- `app/(dashboard)/dashboard/pro/page.tsx` - derives `activePoOffline` from the
+  canonical per-symbol quote (`isPoOfflineOtc`) and feeds `poOfflineOtc`.
+- `services/api.ts` - `MarketQuote.poOffline?`; `store/useMarketTerminalStore.ts`
+  adds `poOffline` to the render fields.
+
+### [475] Tests
+
+- client-app: `trading-panel.po-offline.dom` +4 (lock + banner + real-pair
+  false-negative), `layout-contract.dom` +4 (chart HUD/target + panel + Pro
+  wiring), `expiryMarker` source-contract updated for the new suppression clause.
+
+### [476] Commits
+
+- PART 43.4 [469]-[471] and PART 43.5 [472]-[476] committed separately.
+
+### Verification run for PART 43.5
+
+- core-backend: `npm run build` OK; `npx vitest run` 340 passed.
+- client-app: `npx tsc --noEmit` OK; `npm run lint` clean; `npx vitest run`
+  827 passed.
+- Live bridge unfakeable without an SSID: [472]'s `/health/ticks` dump is the
+  operator-side proof.
