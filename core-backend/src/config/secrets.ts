@@ -16,8 +16,41 @@
  */
 
 import { isConfigured, loadServiceEnv, describeEnvSources } from "./env";
+import { readFileSync, existsSync } from "fs";
 
 loadServiceEnv();
+
+/**
+ * Read a mounted SECRET FILE (Docker secrets / read-only volume) and fall back
+ * to the plain env value only when the file cannot be used. The file path comes
+ * from the environment; the file's CONTENTS are never logged or echoed.
+ * PART 43.6 [481]: in a container, credentials arrive as mounted files, never
+ * as env or image layers.
+ */
+function readSecretFile(
+  filePath: string | undefined,
+  envFallback: string | undefined,
+): string {
+  const p = (filePath || "").trim();
+  if (!p) {
+    return envFallback || "";
+  }
+  try {
+    if (existsSync(p)) {
+      return readFileSync(p, "utf8").trim();
+    }
+    console.warn(
+      `[secrets] secret file '${p}' does not exist — falling back to the env value`,
+    );
+  } catch (err) {
+    console.warn(
+      `[secrets] could not read secret file '${p}': ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  return envFallback || "";
+}
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const IS_TEST = process.env.NODE_ENV === "test";
@@ -223,10 +256,18 @@ export const secrets = {
   // The bridge normally refreshes its SSID from a captured browser session
   // (no credentials involved). PO_EMAIL/PO_PASSWORD are an OPT-IN LAST RESORT:
   // only used by session/refresh_ssid.py when the stored session is dead AND
-  // PO_EMAIL_LOGIN is enabled AND both halves are present. Keep them in the
-  // gitignored .env — never commit live values.
-  PO_EMAIL: process.env.PO_EMAIL || "",
-  PO_PASSWORD: process.env.PO_PASSWORD || "",
+  // PO_EMAIL_LOGIN is enabled AND PO_TOS_CONSENT is recorded AND both halves
+  // are present. In a container the values are mounted FILE secrets managed by
+  // PO_EMAIL_FILE / PO_PASSWORD_FILE; the plain env form is a dev fallback.
+  // They are forwarded to the REFRESHER child ONLY — never to the bridge, the
+  // request path, logs, /health, or process args (PART 43.6 [480]).
+  PO_EMAIL: readSecretFile(process.env.PO_EMAIL_FILE, process.env.PO_EMAIL),
+  PO_PASSWORD: readSecretFile(
+    process.env.PO_PASSWORD_FILE,
+    process.env.PO_PASSWORD,
+  ),
+  PO_EMAIL_FILE: (process.env.PO_EMAIL_FILE || "").trim(),
+  PO_PASSWORD_FILE: (process.env.PO_PASSWORD_FILE || "").trim(),
   PO_EMAIL_LOGIN: (process.env.PO_EMAIL_LOGIN || "false").trim().toLowerCase(),
   // Pixel/UX budget (seconds) for the headless credential login form.
   PO_LOGIN_TIMEOUT: Number(process.env.PO_LOGIN_TIMEOUT) || 45,
@@ -237,6 +278,22 @@ export const secrets = {
   PO_AUTH_NODE_TRIGGER: (process.env.PO_AUTH_NODE_TRIGGER || "false")
     .trim()
     .toLowerCase(),
+  // PART 43.6 [482] — the broker's WRITTEN answer on automated login must be
+  // recorded (docs/legal/po-automated-login-tos-consent.md) BEFORE this is set
+  // anywhere. It gates the credential tier in both Node and the refresher.
+  // Empty value = credential tier never enabled. Default OFF.
+  PO_TOS_CONSENT: (process.env.PO_TOS_CONSENT || "").trim(),
+  // PART 43.6 [480] — shared secret required to POST /health/po-auth/refresh
+  // or /health/po-auth/reset from a NON-loopback source. Empty = internal-only
+  // (loopback requests only). Default: internal-only.
+  PO_HEALTH_ADMIN_KEY: (process.env.PO_HEALTH_ADMIN_KEY || "").trim(),
+  // PART 43.6 [483] — minutes a dead/stale PO session is tolerated before an
+  // alert fires (email + Telegram when configured). Default 15.
+  PO_SESSION_STALE_ALERT_MIN:
+    Number(process.env.PO_SESSION_STALE_ALERT_MIN) || 15,
+  // PART 43.6 [483] — session/circuit alert destination (empty = alerts are
+  // logged through NotificationService but not emailed).
+  PO_ALERT_EMAIL: (process.env.PO_ALERT_EMAIL || "").trim(),
   POCKET_BRIDGE_HOST: process.env.POCKET_BRIDGE_HOST || "127.0.0.1",
   POCKET_BRIDGE_PORT: Number(process.env.POCKET_BRIDGE_PORT) || 8788,
   // How often (ms) the backend re-tries connecting to the relay once down.

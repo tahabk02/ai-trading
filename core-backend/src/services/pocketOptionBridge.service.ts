@@ -208,6 +208,13 @@ export class PocketOptionBridgeService {
     return this.lastStatus;
   }
 
+  /** Raw relay status string ("connected" | "stalled" | "awaiting_ssid" |
+   *  "connection_error" | "session_expired" ...) — the precise signal the
+   *  PART 43.6 [483] session monitor uses to detect a dead session. */
+  public getLastRelayStatus(): string {
+    return this.lastRelayStatus;
+  }
+
   /**
    * FORCE INITIAL TICK HANDSHAKE — push an ACTIVE subscription for a symbol to
    * the Python relay the moment a browser client (Socket.IO "subscribe" room
@@ -456,7 +463,11 @@ export class PocketOptionBridgeService {
           cwd: bridgeDir,
           stdio: ["ignore", "pipe", "pipe"],
           env: {
-            ...process.env,
+            // PART 43.6 [480]: the bridge gets the parent env with every PO
+            // credential var STRIPPED. Only refresh_ssid.py receives the
+            // credential — a process that plays no part in login must never be
+            // able to read an email/password from its environment.
+            ...poAuthManager.withoutPoCredentials(),
             PYTHONUNBUFFERED: "1",
             // Force the spawned bridge to bind the EXACT relay socket the WS
             // client connects to — otherwise a user override of
@@ -468,10 +479,6 @@ export class PocketOptionBridgeService {
             // backend goes live immediately (not stuck in awaiting_ssid) when
             // the SSID is configured at the backend layer.
             POCKET_OPTION_SSID: secrets.POCKET_OPTION_SSID || "",
-            // Forward the OPT-IN last-resort credential fallback so the
-            // Python refresher inherits it from the backend layer. Empty when
-            // unset — the bridge stays session-only, exactly as before.
-            ...poAuthManager.bridgeCredentialEnv(),
           },
         },
       );

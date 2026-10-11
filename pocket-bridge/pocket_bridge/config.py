@@ -123,9 +123,12 @@ def auth_message(auth: dict) -> str:
 # is never attempted while the session path works, so the normal steady state
 # never sends email/password anywhere.
 #
-# It is opt-in (PO_EMAIL_LOGIN=1) AND requires both PO_EMAIL and PO_PASSWORD.
-# Keep them in the gitignored `pocket-bridge/.env`; this repository's
-# `.env.example` only documents the names.
+# It is opt-in (PO_EMAIL_LOGIN=1) AND requires both PO_EMAIL and PO_PASSWORD
+# AND a recorded written answer from Pocket Option on automated login
+# (PO_TOS_CONSENT, PART 43.6 [482] — see docs/legal/po-automated-login-tos-consent.md).
+# Keep them in the gitignored `pocket-bridge/.env` or—in a container—in mounted
+# secret FILES (PO_EMAIL_FILE / PO_PASSWORD_FILE, PART 43.6 [481]); this
+# repository's `.env.example` only documents the names.
 CREDENTIAL_LOGIN_URL = "https://pocketoption.com/en/login"
 
 
@@ -135,6 +138,32 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def read_secret_file(path: Optional[str], fallback: str = "") -> str:
+    """Read a mounted SECRET FILE (Docker secret / read-only volume).
+
+    PART 43.6 [481]: the value travels as a *file's contents*, a path in the
+    environment — never the secret itself in the env. The contents are returned
+    trimmed and are NEVER logged. A missing/unreadable file falls back to
+    ``fallback`` (used by the dev/local env form).
+    """
+    p = (path or "").strip()
+    if not p:
+        return fallback
+    try:
+        text = Path(p).read_text(encoding="utf-8")
+        return text.strip()
+    except OSError:
+        return fallback
+
+
+def resolve_secret(env_file: str, env_value: str) -> str:
+    """File-mounted secret first, then the plain env value (dev fallback)."""
+    file_val = read_secret_file(os.getenv(env_file, ""))
+    if file_val:
+        return file_val
+    return (os.getenv(env_value, "") or "").strip()
 
 
 @dataclass(frozen=True)
@@ -148,6 +177,7 @@ class CredentialLogin:
     email: str = ""
     password: str = field(default="", repr=False)
     enabled: bool = False
+    tos_consent: bool = False
     login_url: str = CREDENTIAL_LOGIN_URL
     timeout_s: float = 45.0
 
@@ -158,20 +188,28 @@ class CredentialLogin:
 
     @property
     def usable(self) -> bool:
-        """Credential login is only usable when opted-in AND fully configured."""
-        return self.enabled and self.configured
+        """Trimmed-down usable: opted-in AND fully configured AND the broker's
+        written answer on automated login is recorded (PO_TOS_CONSENT, PART
+        43.6 [482]). Without consent the tier is inert no matter the credentials."""
+        return self.enabled and self.configured and self.tos_consent
 
 
 def load_credential_login() -> CredentialLogin:
-    """Read the last-resort credential-login settings from the environment."""
+    """Read the last-resort credential-login settings from the environment.
+
+    PART 43.6 [481]: in a container, ``PO_EMAIL``/``PO_PASSWORD`` come from
+    mounted secret files (``PO_EMAIL_FILE``/``PO_PASSWORD_FILE`` — Docker
+    secrets), never from the env or an image layer.
+    """
     try:
         timeout = float(os.getenv("PO_LOGIN_TIMEOUT", "45"))
     except (TypeError, ValueError):
         timeout = 45.0
     return CredentialLogin(
-        email=(os.getenv("PO_EMAIL", "") or "").strip(),
-        password=os.getenv("PO_PASSWORD", "") or "",
+        email=resolve_secret("PO_EMAIL_FILE", "PO_EMAIL"),
+        password=resolve_secret("PO_PASSWORD_FILE", "PO_PASSWORD"),
         enabled=_bool_env("PO_EMAIL_LOGIN", False),
+        tos_consent=_bool_env("PO_TOS_CONSENT", False),
         login_url=(os.getenv("PO_LOGIN_URL", "") or CREDENTIAL_LOGIN_URL).strip()
         or CREDENTIAL_LOGIN_URL,
         timeout_s=max(5.0, timeout),
@@ -184,6 +222,7 @@ def credential_login_status() -> Dict[str, Any]:
     return {
         "credential_login_enabled": cfg.enabled,
         "credential_login_configured": cfg.configured,
+        "credential_login_tos_consent": cfg.tos_consent,
         "credential_login_available": cfg.usable,
         "credential_login_email": mask_secret(cfg.email, 3),
     }

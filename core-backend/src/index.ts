@@ -36,6 +36,7 @@ import { errorMiddleware } from "./middlewares/error.middleware";
 import apiRouter from "./routes/index";
 import { rootHealthRouter } from "./routes/health.routes";
 import { historyCollector } from "./services/historyCollector.service";
+import { poSessionMonitor } from "./services/poSessionMonitor.service";
 import { warmUpModels } from "./controllers/signal.controller";
 import {
   allowedOrigins,
@@ -742,6 +743,12 @@ httpServer.listen(PORT, () => {
   // the bridge reports a clean awaiting_ssid state (no fabricated data).
   pocketOptionBridgeService.start();
 
+  // ── PART 43.6 [483] PO SESSION-STATE ALERTING ──
+  // Watch the raw relay status: when the SSID dies (session_expired) for longer
+  // than PO_SESSION_STALE_ALERT_MIN, alert by email + platform sink — the UI
+  // banner is not the only alarm.
+  poSessionMonitor.start();
+
   // â”€â”€ 30-MINUTE HISTORICAL DATA LAYER (Alpha.5 Pro, Part 3) â”€â”€
   // Persist the REAL observed tick tape into minute-bucketed AssetHistory +
   // TickHistory rows every 60s so the math-target / precision-gate pipeline
@@ -810,6 +817,7 @@ async function shutdown(signal: string): Promise<void> {
     tickIngestionService.stopAllStreams();
     clearInterval(marketQuotesTimer);
     pocketOptionBridgeService.stop();
+    poSessionMonitor.stop();
     realtimeCandleAggregatorService.stop();
     historyCollector.stop();
     io.close();

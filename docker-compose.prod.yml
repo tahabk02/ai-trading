@@ -266,6 +266,25 @@ services:
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # ── PO SSID SELF-HEALING (opt-in, OFF by default; PART 43.6) ──
+      # Inert unless ALL credential gates are set. The backend forwards these to
+      # the refresh_ssid.py child ONLY — never the bridge, logs, or /health.
+      PO_EMAIL_LOGIN: ${PO_EMAIL_LOGIN:-false}
+      PO_EMAIL_FILE: ${PO_EMAIL_FILE:-}
+      PO_PASSWORD_FILE: ${PO_PASSWORD_FILE:-}
+      PO_EMAIL: ${PO_EMAIL:-}
+      PO_PASSWORD: ${PO_PASSWORD:-}
+      PO_LOGIN_TIMEOUT: ${PO_LOGIN_TIMEOUT:-45}
+      PO_TOS_CONSENT: ${PO_TOS_CONSENT:-}
+      # A second concurrent login doubles ban exposure; keep the Node trigger OFF
+      # (the Python bridge refreshes on its own schedule).
+      PO_AUTH_NODE_TRIGGER: ${PO_AUTH_NODE_TRIGGER:-false}
+      # Gates POST /health/po-auth/{refresh,reset} from a NON-loopback caller
+      # (header `X-PO-Admin-Key`). Empty = loopback-only (internal).
+      PO_HEALTH_ADMIN_KEY: ${PO_HEALTH_ADMIN_KEY:-}
+      # Session-stale alerting: fire once the PO session has been dead this long.
+      PO_SESSION_STALE_ALERT_MIN: ${PO_SESSION_STALE_ALERT_MIN:-15}
+      PO_ALERT_EMAIL: ${PO_ALERT_EMAIL:-}
       # ── RATE LIMITING ──
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
@@ -397,6 +416,16 @@ services:
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # ── PO SSID SELF-HEALING (opt-in, OFF by default; PART 43.6) ──
+      # The bridge's own refresh_ssid.py (session tier, then last-resort
+      # credential tier) reads these. Inert unless EVERY gate is set:
+      # PO_EMAIL_LOGIN + a credential + a recorded PO_TOS_CONSENT. Prefer the
+      # mounted secret FILES over the plain env values in production.
+      PO_EMAIL_LOGIN: ${PO_EMAIL_LOGIN:-false}
+      PO_EMAIL_FILE: ${PO_EMAIL_FILE:-}
+      PO_PASSWORD_FILE: ${PO_PASSWORD_FILE:-}
+      PO_LOGIN_TIMEOUT: ${PO_LOGIN_TIMEOUT:-45}
+      PO_TOS_CONSENT: ${PO_TOS_CONSENT:-}
     env_file:
       - path: ./pocket-bridge/.env
         required: false

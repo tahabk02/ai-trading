@@ -1,4 +1,5 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
+import { timingSafeEqual, createHash } from "crypto";
 import { PrismaClient } from "@prisma/client";
 import { CacheService } from "../services/cache.service";
 import { logger } from "../utils/logger";
@@ -192,9 +193,22 @@ export const rootHealthRouter: Router = (() => {
     res.json(poAuthManager.buildSnapshot());
   });
   // POST /health/po-auth/refresh — trigger a background SSID refresh.
-  r.post("/po-auth/refresh", async (req: Request, res: Response) => {
-    res.json(await runPoAuthRefresh(req.query.reason));
-  });
+  // GUARDED (PART 43.6 [480]): admin key or internal-only.
+  r.post(
+    "/po-auth/refresh",
+    poAuthRefreshGuard,
+    async (req: Request, res: Response) => {
+      res.json(await runPoAuthRefresh(req.query.reason));
+    },
+  );
+  // POST /health/po-auth/reset — HUMAN-ONLY circuit-breaker reset.
+  r.post(
+    "/po-auth/reset",
+    poAuthRefreshGuard,
+    (req: Request, res: Response) => {
+      res.json(runPoAuthReset(req.query.reason));
+    },
+  );
   return r;
 })();
 
@@ -306,8 +320,79 @@ async function runPoAuthRefresh(reasonRaw: unknown): Promise<{
     typeof reasonRaw === "string" && reasonRaw.trim()
       ? reasonRaw.trim()
       : "manual";
-  const result = await poAuthManager.refresh(reason);
+  const result = await poAuthManager.refresh(reason, { humanReset: true });
   return { ...result, snapshot: poAuthManager.buildSnapshot() };
+}
+
+/**
+ * Human-triggered circuit-breaker reset (PART 43.6 [480]): clears the open
+ * circuit / challenge interlock after the operator has investigated. Mutation
+ * is intentional here — a human decided to retry.
+ */
+function runPoAuthReset(reasonRaw: unknown): {
+  ok: true;
+  reason: string;
+  snapshot: ReturnType<typeof poAuthManager.buildSnapshot>;
+} {
+  const reason =
+    typeof reasonRaw === "string" && reasonRaw.trim()
+      ? reasonRaw.trim()
+      : "operator";
+  poAuthManager.resetBreaker(reason);
+  return { ok: true, reason, snapshot: poAuthManager.buildSnapshot() };
+}
+
+/**
+ * PART 43.6 [480] — POST /health/po-auth/refresh|reset are MUTATING surfaces,
+ * so they are gated:
+ *
+ *   • When PO_HEALTH_ADMIN_KEY is configured, the caller must present it in the
+ *     `X-PO-Admin-Key` header (compared timing-safe). No key → 401, wrong key →
+ *     403.
+ *   • When it is NOT configured, only loopback sources are accepted
+ *     (internal-only); anything else → 403.
+ *
+ * GET /health/po-auth (read-only snapshot) is NOT gated.
+ */
+export function poAuthRefreshGuard(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const configured = (secrets.PO_HEALTH_ADMIN_KEY || "").trim();
+  const supplied = (req.get("x-po-admin-key") || "").trim();
+  const ip = (req.ip || (req.socket && req.socket.remoteAddress) || "") as string;
+  const isLoopback =
+    ip === "localhost" ||
+    ip === "::1" ||
+    ip.startsWith("127.") ||
+    ip.startsWith("::ffff:127.");
+  if (configured) {
+    if (supplied && safeEqualString(supplied, configured)) {
+      next();
+      return;
+    }
+    res.status(supplied ? 403 : 401).json({
+      error: supplied
+        ? "forbidden: invalid X-PO-Admin-Key"
+        : "unauthorized: X-PO-Admin-Key required",
+    });
+    return;
+  }
+  if (isLoopback) {
+    next();
+    return;
+  }
+  res.status(403).json({
+    error:
+      "forbidden: internal-only — set PO_HEALTH_ADMIN_KEY to allow a remote caller",
+  });
+}
+
+function safeEqualString(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a).digest();
+  const hb = createHash("sha256").update(b).digest();
+  return timingSafeEqual(ha, hb);
 }
 
 /**
@@ -420,10 +505,29 @@ router.get("/po-auth", (_req: Request, res: Response) => {
  * POST /health/po-auth/refresh — trigger a background SSID refresh via
  * session/refresh_ssid.py (session tier, then the opt-in credential tier).
  * Returns the refresh outcome + a fresh snapshot. Never throws.
+ * GUARDED (PART 43.6 [480]): admin key or internal-only. This is the human
+ * path and may run while the circuit breaker is open.
  */
-router.post("/po-auth/refresh", async (req: Request, res: Response) => {
-  res.json(await runPoAuthRefresh(req.query.reason));
-});
+router.post(
+  "/po-auth/refresh",
+  poAuthRefreshGuard,
+  async (req: Request, res: Response) => {
+    res.json(await runPoAuthRefresh(req.query.reason));
+  },
+);
+
+/**
+ * POST /health/po-auth/reset — HUMAN-ONLY circuit-breaker reset after an
+ * operator has investigated (captcha/2FA interlock or 3x login failure).
+ * GUARDED like /po-auth/refresh.
+ */
+router.post(
+  "/po-auth/reset",
+  poAuthRefreshGuard,
+  (req: Request, res: Response) => {
+    res.json(runPoAuthReset(req.query.reason));
+  },
+);
 
 /**
  * GET /health

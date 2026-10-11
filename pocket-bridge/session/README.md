@@ -49,21 +49,39 @@ capture_session.py`** and **stops retrying** to avoid an account/IP ban;
 
 `refresh_ssid.py` has a TWO-TIER recovery. Tier 1 is the session reuse above —
 credential-free and always preferred. **Tier 2 (credential login) is ONLY used
-when tier 1 produced no auth frame**, i.e. the stored session is dead, AND
-`PO_EMAIL_LOGIN=1` AND both `PO_EMAIL` and `PO_PASSWORD` are present. In that
-state it drives the login form headlessly to mint a brand-new session, writes a
-fresh `po_session.json`, and rotates the SSID into `.env` exactly as tier 1.
-While a session works, the credential is never sent anywhere.
+when tier 1 produced no auth frame**, i.e. the stored session is dead, AND ALL
+of these gates are set:
 
-- Opt-in and masked: `PO_EMAIL_LOGIN=1` is required; logs/health show only the
-  first 3 characters of the email, never the password.
-- Ban-safety: the bridge still stops retrying after the LAST-RESORT also fails,
-  and the Node backend's own `PO_AUTH_NODE_TRIGGER` is OFF by default so two
-  browser logins can never run concurrently.
-- Operate from the backend layer: `PO_EMAIL` / `PO_PASSWORD` set in
-  `core-backend/.env` are forwarded to the spawned bridge (see
-  `core-backend/src/services/poAuthManager.ts`), or set them in
-  `pocket-bridge/.env` directly.
+- `PO_EMAIL_LOGIN=1` (opt-in),
+- an email + password (via the plain `PO_EMAIL`/`PO_PASSWORD`, or the preferred
+  secret files `PO_EMAIL_FILE`/`PO_PASSWORD_FILE` — file wins over env), **and**
+- `PO_TOS_CONSENT` recorded (your written acknowledgement of Pocket Option's
+  terms on automated login — see
+  `docs/legal/po-automated-login-tos-consent.md`). Without it the tier is inert.
+
+In that state it drives the login form headlessly to mint a brand-new session,
+writes a fresh `po_session.json`, and rotates the SSID into `.env` exactly as
+tier 1. While a session works, the credential is never sent anywhere.
+
+- Opt-in and masked: logs/health show only the first 3 characters of the email,
+  never the password.
+- **Credential isolation (PART 43.6 [480]):** the core-backend forwards the
+  credential to the `refresh_ssid.py` child process ONLY. It is stripped from
+  the bridge's own environment (`withoutPoCredentials()`), never placed in
+  process argv, and never exposed on `/health` or in logs.
+- **Circuit breaker:** 3 consecutive failed logins OPEN the circuit — auto-refresh
+  halts and an alert fires. Auto-refresh also backs off exponentially (60 s base,
+  2×, capped at 30 min). A human resets it via
+  `POST /health/po-auth/reset` (guard-gated).
+- **Challenge interlock:** a captcha/2FA prompt stops the automated login
+  immediately (`CHALLENGE_DETECTED=...`, exit code 3) and it is **never
+  auto-retried** until a human resets the breaker — after a manual login.
+- Ban-safety: the Node backend's own `PO_AUTH_NODE_TRIGGER` is OFF by default so
+  two browser logins can never run concurrently.
+
+Set the credential either in `pocket-bridge/.env` (read by the bridge's own
+scheduler) or in `core-backend/.env` (forwarded to the `refresh_ssid.py` child
+spawned by `core-backend/src/services/poAuthManager.ts`).
 
 ## Runtime states (what the logs mean)
 
@@ -74,6 +92,8 @@ While a session works, the credential is never sent anywhere.
 | `SESSION_RELOADED captured_at=...` | The 10s hot-reloader noticed a changed `po_session.json` and reconnected. |
 | `SSID_EXPIRED — run capture_session.py to refresh` | Auth failed; terminal state reached. |
 | `SESSION_EXPIRED — re-run capture_session.py` | Auth failed AND the automatic refresh failed too. |
+| `LOGIN_ATTEMPTED=1` | The last-resort credential login is being attempted (orchestrator counts these separately from session refreshes). |
+| `CHALLENGE_DETECTED=captcha\|2fa\|unknown` (exit 3) | Anti-bot/2FA hit; automated login halted. **Never auto-retried** — human reset required. |
 
 ## Security
 
@@ -84,7 +104,20 @@ While a session works, the credential is never sent anywhere.
   file is then stored as `FERNET:<base64>` and only this service can read it.
 - The bridge never sends email/password anywhere while a session works; the
   credential login is an opt-in last resort used only after the session tier
-  fails, and is masked in every log/health surface.
+  fails, gated by a recorded `PO_TOS_CONSENT`, and masked in every log/health
+  surface.
+- The credential is delivered to the `refresh_ssid.py` child ONLY — never the
+  bridge or a sibling process, never argv, never `/health` or logs. Prefer the
+  mounted secret files (`PO_EMAIL_FILE`/`PO_PASSWORD_FILE`) over plain env in
+  production.
+- The `POST /health/po-auth/{refresh,reset}` routes are gated: when
+  `PO_HEALTH_ADMIN_KEY` is set a non-loopback caller must present it in the
+  `X-PO-Admin-Key` header; when unset, only loopback callers are accepted.
+  `GET /health/po-auth` is read-only and ungated.
+- Session-stale alerting: once the PO session has been dead for
+  `PO_SESSION_STALE_ALERT_MIN` (default 15) minutes, the backend raises ONE
+  alert (email to `PO_ALERT_EMAIL` + platform sink) and a matching recovery
+  alert. No alert storm.
 
 ## Container notes
 

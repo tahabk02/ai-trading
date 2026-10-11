@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { Request, Response } from "express";
 import express from "express";
 import http from "node:http";
@@ -9,11 +9,16 @@ vi.mock("@prisma/client", () => ({
 vi.mock("../../utils/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
-vi.mock("../../config/secrets", () => ({
-  secrets: {
+const secretsMock = vi.hoisted(() => {
+  const value: Record<string, string> = {
     AI_ENGINE_URL: "http://127.0.0.1:8000",
     AI_ENGINE_API_KEY: "test",
-  },
+    PO_HEALTH_ADMIN_KEY: "",
+  };
+  return { value };
+});
+vi.mock("../../config/secrets", () => ({
+  secrets: secretsMock.value,
 }));
 vi.mock("../../services/cache.service", () => ({
   CacheService: { getInstance: () => ({ isConnected: () => false }) },
@@ -49,7 +54,7 @@ vi.mock("axios", () => ({
   },
 }));
 
-import { rootHealthBody, rootHealthRouter } from "../../routes/health.routes";
+import { poAuthRefreshGuard, rootHealthBody, rootHealthRouter } from "../../routes/health.routes";
 import { realtimeTickBuffer } from "../../services/realtimeTickBuffer.service";
 
 type JsonBody = Record<string, unknown>;
@@ -245,5 +250,90 @@ describe("ROOT GET /health (MASTER MISSION 1.3 — autopilot probe)", () => {
     expect(typeof snap.session.filePresent).toBe("boolean");
     expect(typeof snap.refreshScript.present).toBe("boolean");
     expect(typeof snap.refresh.inFlight).toBe("boolean");
+  });
+});
+
+describe("PART 43.6 [480] — po-auth mutating endpoints are gated", () => {
+  afterEach(() => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "";
+  });
+
+  const routeStack = (method: string, path: string) => {
+    const layer = rootHealthRouter.stack.find(
+      (l) =>
+        l.route !== undefined &&
+        l.route.path === path &&
+        l.route.methods?.[method] === true,
+    );
+    return layer?.route?.stack ?? [];
+  };
+
+  it("POST /po-auth/refresh mounts the guard as its FIRST middleware", () => {
+    const stack = routeStack("post", "/po-auth/refresh");
+    expect(stack.length).toBeGreaterThanOrEqual(2);
+    expect(stack[0].handle).toBe(poAuthRefreshGuard);
+  });
+
+  it("POST /po-auth/reset mounts the guard as its FIRST middleware", () => {
+    const stack = routeStack("post", "/po-auth/reset");
+    expect(stack.length).toBeGreaterThanOrEqual(2);
+    expect(stack[0].handle).toBe(poAuthRefreshGuard);
+  });
+
+  function guarded(args: { ip?: string; key?: string }): {
+    passed: boolean;
+    status: number;
+  } {
+    const req = {
+      ip: args.ip ?? "127.0.0.1",
+      get: (name: string) =>
+        name.toLowerCase() === "x-po-admin-key" ? args.key ?? "" : undefined,
+    } as unknown as Request;
+    let passed = false;
+    let status = 0;
+    const res = {
+      status(code: number) {
+        status = code;
+        return res;
+      },
+      json() {
+        return res;
+      },
+    } as unknown as Response;
+    poAuthRefreshGuard(req, res, () => {
+      passed = true;
+    });
+    return { passed, status };
+  }
+
+  it("returns 401 when an admin key is configured but none is supplied", () => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "secret-key";
+    const r = guarded({ ip: "203.0.113.7", key: "" });
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe(401);
+  });
+
+  it("returns 403 when the supplied admin key does not match", () => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "secret-key";
+    const r = guarded({ ip: "203.0.113.7", key: "wrong-key" });
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe(403);
+  });
+
+  it("passes through when the timing-safe admin key matches", () => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "secret-key";
+    const r = guarded({ ip: "203.0.113.7", key: "secret-key" });
+    expect(r.passed).toBe(true);
+  });
+
+  it("returns 403 for a remote caller when NO admin key is configured (internal-only)", () => {
+    const r = guarded({ ip: "203.0.113.7", key: "" });
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe(403);
+  });
+
+  it("passes through for loopback when NO admin key is configured", () => {
+    const r = guarded({ ip: "::ffff:127.0.0.1", key: "" });
+    expect(r.passed).toBe(true);
   });
 });
