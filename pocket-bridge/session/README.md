@@ -57,7 +57,9 @@ of these gates are set:
   secret files `PO_EMAIL_FILE`/`PO_PASSWORD_FILE` — file wins over env), **and**
 - `PO_TOS_CONSENT` recorded (your written acknowledgement of Pocket Option's
   terms on automated login — see
-  `docs/legal/po-automated-login-tos-consent.md`). Without it the tier is inert.
+  `docs/legal/po-automated-login-tos-consent.md`; this is an **operator
+  acknowledgement only, NOT Pocket Option's authorization** — [482] stays open
+  until PO's written answer exists). Without it the tier is inert.
 
 In that state it drives the login form headlessly to mint a brand-new session,
 writes a fresh `po_session.json`, and rotates the SSID into `.env` exactly as

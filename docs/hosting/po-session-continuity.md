@@ -18,7 +18,7 @@ when the broker session dies.
 |---|---|
 | Password sitting in the app's environment for its whole life | Credential is forwarded **only** to the `refresh_ssid.py` child that needs it; it is stripped from the bridge's env (`withoutPoCredentials()`), never in argv, logs or `/health`. |
 | Password baked into an image layer | `.dockerignore` excludes `.env*`; credentials come from mounted **secret files** (`PO_EMAIL_FILE`/`PO_PASSWORD_FILE`) or the runtime env, never the image. |
-| A stray remote caller triggering logins | `POST /health/po-auth/{refresh,reset}` are guard-gated (`PO_HEALTH_ADMIN_KEY` or loopback-only). `GET /health/po-auth` is read-only. |
+| A stray remote caller triggering logins | `POST /health/po-auth/{refresh,reset}` are guard-gated and **fail closed** when hosted: with no `PO_HEALTH_ADMIN_KEY` they answer **404** (disabled) — never loopback-only. When a key is set, **every** caller (loopback included) must send `X-PO-Admin-Key` (401 absent / 403 wrong). `GET /health/po-auth` is read-only. |
 | A brute-force login loop getting the account banned | Circuit breaker (3 failed logins → halt + alert) and a **never-retry** captcha/2FA interlock, both requiring a human reset. |
 | Silent data loss when the session dies | Session-stale alerting after `PO_SESSION_STALE_ALERT_MIN` minutes (email + platform), plus one recovery alert. |
 
@@ -50,22 +50,46 @@ as a secret (it is gitignored; use `PO_SESSION_KEY` for at-rest encryption).
    PO_AUTH_NODE_TRIGGER=false
    ```
 
-4. **Gate the mutating routes** (recommended for any non-loopback caller):
+4. **Keep the mutating routes fail-closed.** With `PO_HEALTH_HOSTED=true`
+   (the production default) and no key, `POST /health/po-auth/{refresh,reset}`
+   answer **404**. If you want them reachable at all, create the key — then
+   **every** caller, loopback included, must present it:
    ```bash
    printf '%s' "$(openssl rand -hex 32)" | docker secret create po_health_admin_key -
-   # expose it to core-backend as PO_HEALTH_ADMIN_KEY
+   # expose it to core-backend as PO_HEALTH_ADMIN_KEY (and PO_HEALTH_HOSTED=true)
    ```
 
-5. **Configure alerting:**
+5. **Configure alerting** (email and/or a single external webhook):
    ```dotenv
    PO_SESSION_STALE_ALERT_MIN=15   # minutes dead before the first alert
    PO_ALERT_EMAIL=oncall@example.com
+   # Slack-compatible / generic JSON POST receiver. Empty = disabled.
+   PO_ALERT_WEBHOOK_URL=
    ```
 
-6. **Verify:**
+6. **Verify** (read-only snapshot is always open):
    ```bash
    curl -s http://127.0.0.1:4000/health/po-auth | jq .
    ```
+
+6a. **Verify the guard from OUTSIDE the host**, through the real stack (this is
+   the "stray remote caller" check — run it against the published port / proxy,
+   not from inside the container):
+   ```bash
+   BASE=https://<your-host>   # the same URL the reverse proxy serves
+   # No key configured (hosted) → 404, indistinguishable from "no route":
+   curl -s -o /dev/null -w 'refresh=%{http_code}\n' -X POST "$BASE/health/po-auth/refresh"
+   # With PO_HEALTH_ADMIN_KEY set → 401 without the header, 403 with a wrong one,
+   # 200/202 only with the correct key. A spoofed X-Forwarded-For must NOT help.
+   curl -s -o /dev/null -w 'no-key=%{http_code}\n'  -X POST "$BASE/health/po-auth/refresh"
+   curl -s -o /dev/null -w 'bad-key=%{http_code}\n' -X POST "$BASE/health/po-auth/refresh" -H "X-PO-Admin-Key: nope"
+   curl -s -o /dev/null -w 'ok=%{http_code}\n'      -X POST "$BASE/health/po-auth/refresh" -H "X-PO-Admin-Key: $PO_HEALTH_ADMIN_KEY"
+   # Expected: refresh/no-key = 404 (no key set) OR 401 (key set); bad-key = 403; ok = 2xx.
+   ```
+   The guard reads `req.ip` (not the raw socket), so it relies on
+   `app.set("trust proxy", 1)` — exactly one trusted proxy hop. If you front the
+   service with more than one proxy, update that setting or the derived client IP
+   (and therefore the guard) is wrong.
 
 ### 2a. If you must enable auto-refresh inside the container
 
@@ -209,10 +233,11 @@ short end.
 # Posture (no secret exposed)
 curl -s http://127.0.0.1:4000/health/po-auth | jq '{session,circuit,credentialFallback}'
 
-# The gated refresh from a remote host (expect 401 without the header)
+# The gated refresh from a remote host. No key set (hosted) → 404; with a key
+# set → 401 without the header (never a login either way).
 curl -s -o /dev/null -w '%{http_code}\n' http://<host>:4000/health/po-auth/refresh -X POST
 
-# Guard present (expect 200/403, never a login)
+# Guard present and reachable only with the key (expect 200/403, never a login)
 curl -s -X POST http://127.0.0.1:4000/health/po-auth/reset -H "X-PO-Admin-Key: $PO_HEALTH_ADMIN_KEY"
 ```
 

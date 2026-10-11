@@ -1,12 +1,21 @@
 # Pocket Option automated login — ToS consent record (PART 43.6 [482])
 
+> **This document is an OPERATOR ACKNOWLEDGEMENT — it is NOT Pocket Option's
+> authorization.** Setting `PO_TOS_CONSENT` records that *the operator* accepts
+> the risk of automated login. It is **not** a licence, permission, or approval
+> from Pocket Option, and this repository holds **no written answer from Pocket
+> Option**. Task **[482] remains OPEN** until such a written answer is obtained
+> and attached here. Until then the credential tier stays **OFF by default** and
+> enabling it is entirely at the operator's own risk.
+
 This document records the operator's acknowledgement that the **last-resort
 credential login** path — `pocket-bridge/session/refresh_ssid.py` driving the
 Pocket Option login form headlessly — is used **at the operator's own risk**, and
 that turning it on is an explicit, deliberate act.
 
-It is a *policy + audit* record, not legal advice. Confirm the current terms on
-the broker's site before relying on any statement here.
+It is a *policy + audit* record, not legal advice, and not a grant of access.
+Confirm the current terms on the broker's site, and obtain Pocket Option's
+written position, before relying on any statement here.
 
 ## What the consent gate does
 

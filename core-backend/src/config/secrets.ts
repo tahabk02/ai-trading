@@ -55,6 +55,13 @@ function readSecretFile(
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const IS_TEST = process.env.NODE_ENV === "test";
 
+/** Parse a boolean env flag ("1"/"true"/"yes"/"on" → true), with a default. */
+function boolFlag(raw: string | undefined, dflt: boolean): boolean {
+  const v = (raw || "").trim().toLowerCase();
+  if (!v) return dflt;
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
 /**
  * Fail-fast configuration check.
  *
@@ -283,10 +290,16 @@ export const secrets = {
   // anywhere. It gates the credential tier in both Node and the refresher.
   // Empty value = credential tier never enabled. Default OFF.
   PO_TOS_CONSENT: (process.env.PO_TOS_CONSENT || "").trim(),
-  // PART 43.6 [480] — shared secret required to POST /health/po-auth/refresh
-  // or /health/po-auth/reset from a NON-loopback source. Empty = internal-only
-  // (loopback requests only). Default: internal-only.
+  // PART 43.7 [486] — shared secret required to POST /health/po-auth/refresh
+  // or /health/po-auth/reset. When set, EVERY caller (loopback included) must
+  // present it in the `X-PO-Admin-Key` header (timing-safe compare).
   PO_HEALTH_ADMIN_KEY: (process.env.PO_HEALTH_ADMIN_KEY || "").trim(),
+  // PART 43.7 [486] — "hosted" posture for the mutating /health/po-auth routes.
+  // When hosted and PO_HEALTH_ADMIN_KEY is unset, the routes FAIL CLOSED: they
+  // answer 404 (disabled) instead of the dev "loopback-only" fallback, because
+  // behind a reverse proxy `req.ip` can be loopback for a remote caller.
+  // Default: true in production, false in development/test.
+  PO_HEALTH_HOSTED: boolFlag(process.env.PO_HEALTH_HOSTED, IS_PRODUCTION),
   // PART 43.6 [483] — minutes a dead/stale PO session is tolerated before an
   // alert fires (email + Telegram when configured). Default 15.
   PO_SESSION_STALE_ALERT_MIN:
@@ -294,6 +307,9 @@ export const secrets = {
   // PART 43.6 [483] — session/circuit alert destination (empty = alerts are
   // logged through NotificationService but not emailed).
   PO_ALERT_EMAIL: (process.env.PO_ALERT_EMAIL || "").trim(),
+  // PART 43.7 [488] — single external alert sink (a Slack-compatible / generic
+  // webhook URL) for PO session/auth alerts. Empty = no webhook.
+  PO_ALERT_WEBHOOK_URL: (process.env.PO_ALERT_WEBHOOK_URL || "").trim(),
   POCKET_BRIDGE_HOST: process.env.POCKET_BRIDGE_HOST || "127.0.0.1",
   POCKET_BRIDGE_PORT: Number(process.env.POCKET_BRIDGE_PORT) || 8788,
   // How often (ms) the backend re-tries connecting to the relay once down.

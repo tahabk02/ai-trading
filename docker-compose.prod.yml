@@ -279,12 +279,17 @@ services:
       # A second concurrent login doubles ban exposure; keep the Node trigger OFF
       # (the Python bridge refreshes on its own schedule).
       PO_AUTH_NODE_TRIGGER: ${PO_AUTH_NODE_TRIGGER:-false}
-      # Gates POST /health/po-auth/{refresh,reset} from a NON-loopback caller
-      # (header `X-PO-Admin-Key`). Empty = loopback-only (internal).
+      # Gates POST /health/po-auth/{refresh,reset}. When set, EVERY caller
+      # (loopback included) must send it in `X-PO-Admin-Key` (timing-safe).
       PO_HEALTH_ADMIN_KEY: ${PO_HEALTH_ADMIN_KEY:-}
+      # Hosted fail-closed: with no key above the routes answer 404, never
+      # "loopback-only". Defaults to true here (production).
+      PO_HEALTH_HOSTED: ${PO_HEALTH_HOSTED:-true}
       # Session-stale alerting: fire once the PO session has been dead this long.
       PO_SESSION_STALE_ALERT_MIN: ${PO_SESSION_STALE_ALERT_MIN:-15}
       PO_ALERT_EMAIL: ${PO_ALERT_EMAIL:-}
+      # Single external alert sink (Slack-compatible / generic webhook).
+      PO_ALERT_WEBHOOK_URL: ${PO_ALERT_WEBHOOK_URL:-}
       # ── RATE LIMITING ──
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
@@ -340,9 +345,14 @@ services:
   # ===========================================================================
 
   # ── EXECUTION ENGINE ──────────────────────────────────────────────────────
-  # Absent from docker-compose.prod.yml, so nothing consumed the
-  # `trading_signals` Redis channel: signals were produced and never acted on.
+  # PART 43.7 [457] — OFF by default. This engine can place REAL orders, so it
+  # must NOT start in a plain `docker compose up`. It sits behind the
+  # "execution" profile: start it explicitly with
+  # `docker compose --profile execution up -d` once exchange credentials are
+  # configured (REQUIRE_CREDENTIALS=true turns an unconfigured exchange into a
+  # hard boot failure rather than a silent no-op).
   execution-engine:
+    profiles: ["execution"]
     build:
       context: ./execution-engine
       dockerfile: Dockerfile

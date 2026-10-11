@@ -127,7 +127,11 @@ services:
     restart: always
 
   # --- EXECUTION LAYER ---
+  # PART 43.7 [457] — OFF by default: this engine can place REAL orders, so it
+  # does not start on a plain `docker compose up`. Enable explicitly with
+  # `docker compose --profile execution up -d`.
   execution-engine:
+    profiles: ["execution"]
     build:
       context: ./execution-engine
       dockerfile: Dockerfile

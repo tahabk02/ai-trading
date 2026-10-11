@@ -14,6 +14,7 @@ const secretsMock = vi.hoisted(() => {
     AI_ENGINE_URL: "http://127.0.0.1:8000",
     AI_ENGINE_API_KEY: "test",
     PO_HEALTH_ADMIN_KEY: "",
+    PO_HEALTH_HOSTED: "",
   };
   return { value };
 });
@@ -256,6 +257,7 @@ describe("ROOT GET /health (MASTER MISSION 1.3 — autopilot probe)", () => {
 describe("PART 43.6 [480] — po-auth mutating endpoints are gated", () => {
   afterEach(() => {
     secretsMock.value.PO_HEALTH_ADMIN_KEY = "";
+    secretsMock.value.PO_HEALTH_HOSTED = "";
   });
 
   const routeStack = (method: string, path: string) => {
@@ -335,5 +337,142 @@ describe("PART 43.6 [480] — po-auth mutating endpoints are gated", () => {
   it("passes through for loopback when NO admin key is configured", () => {
     const r = guarded({ ip: "::ffff:127.0.0.1", key: "" });
     expect(r.passed).toBe(true);
+  });
+});
+
+describe("PART 43.7 [486] — po-auth guard FAILS CLOSED when hosted", () => {
+  afterEach(() => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "";
+    secretsMock.value.PO_HEALTH_HOSTED = "";
+  });
+
+  function guarded(args: {
+    ip?: string;
+    key?: string;
+    hosted?: boolean;
+  }): { passed: boolean; status: number } {
+    secretsMock.value.PO_HEALTH_HOSTED = args.hosted ? "true" : "";
+    const req = {
+      ip: args.ip ?? "127.0.0.1",
+      get: (name: string) =>
+        name.toLowerCase() === "x-po-admin-key" ? args.key ?? "" : undefined,
+    } as unknown as Request;
+    let passed = false;
+    let status = 0;
+    const res = {
+      status(code: number) {
+        status = code;
+        return res;
+      },
+      json() {
+        return res;
+      },
+    } as unknown as Response;
+    poAuthRefreshGuard(req, res, () => {
+      passed = true;
+    });
+    return { passed, status };
+  }
+
+  it("hosted + NO key → 404 for a remote caller (routes disabled)", () => {
+    const r = guarded({ hosted: true, ip: "203.0.113.7", key: "" });
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe(404);
+  });
+
+  it("hosted + NO key → 404 even for LOOPBACK (no loopback fallback)", () => {
+    const r = guarded({ hosted: true, ip: "127.0.0.1", key: "" });
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe(404);
+  });
+
+  it("hosted + key set → 401 with no key even from loopback (no bypass)", () => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "secret-key";
+    const r = guarded({ hosted: true, ip: "127.0.0.1", key: "" });
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe(401);
+  });
+
+  it("hosted + key set → passes for a remote caller presenting the key", () => {
+    secretsMock.value.PO_HEALTH_ADMIN_KEY = "secret-key";
+    const r = guarded({ hosted: true, ip: "203.0.113.7", key: "secret-key" });
+    expect(r.passed).toBe(true);
+  });
+
+  it("non-hosted + NO key → 403 remote, pass loopback (dev convenience)", () => {
+    const remote = guarded({ hosted: false, ip: "203.0.113.7", key: "" });
+    expect(remote.passed).toBe(false);
+    expect(remote.status).toBe(403);
+    const local = guarded({ hosted: false, ip: "::1", key: "" });
+    expect(local.passed).toBe(true);
+  });
+
+  // Real HTTP through the SAME trust-proxy boundary index.ts installs, so the
+  // X-Forwarded-For → req.ip derivation is exercised end-to-end, not mocked.
+  it("real HTTP (trust proxy=1): XFF remote cannot reach hosted routes without a key, loopback 404s, and the key unlocks both", async () => {
+    const app = express();
+    app.set("trust proxy", 1);
+    app.post("/health/po-auth/refresh", poAuthRefreshGuard, (_req, res) => {
+      res.status(200).json({ ok: true });
+    });
+    const server = app.listen(0);
+    const port = (server.address() as { port: number }).port;
+    const post = (
+      headers: Record<string, string>,
+    ): Promise<{ status: number; body: JsonBody }> =>
+      new Promise((resolve, reject) => {
+        const req = http.request(
+          {
+            host: "127.0.0.1",
+            port,
+            path: "/health/po-auth/refresh",
+            method: "POST",
+            headers,
+          },
+          (res) => {
+            let raw = "";
+            res.on("data", (c) => (raw += c));
+            res.on("end", () =>
+              resolve({
+                status: res.statusCode ?? 0,
+                body: JSON.parse(raw || "{}") as JsonBody,
+              }),
+            );
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+    try {
+      secretsMock.value.PO_HEALTH_HOSTED = "true";
+      secretsMock.value.PO_HEALTH_ADMIN_KEY = "";
+      // A caller arriving via the trusted proxy with a real public IP.
+      const remote = await post({ "x-forwarded-for": "203.0.113.7" });
+      expect(remote.status).toBe(404);
+      // A caller the proxy forwarded with no XFF is seen as loopback — still 404.
+      const direct = await post({});
+      expect(direct.status).toBe(404);
+
+      // Configure a key: the XFF-derived remote caller must present it.
+      secretsMock.value.PO_HEALTH_ADMIN_KEY = "secret-key";
+      const remoteNoKey = await post({ "x-forwarded-for": "203.0.113.7" });
+      expect(remoteNoKey.status).toBe(401);
+      const remoteBadKey = await post({
+        "x-forwarded-for": "203.0.113.7",
+        "x-po-admin-key": "nope",
+      });
+      expect(remoteBadKey.status).toBe(403);
+      const remoteGoodKey = await post({
+        "x-forwarded-for": "203.0.113.7",
+        "x-po-admin-key": "secret-key",
+      });
+      expect(remoteGoodKey.status).toBe(200);
+      // Loopback also needs the key now (no bypass).
+      const loopbackNoKey = await post({});
+      expect(loopbackNoKey.status).toBe(401);
+    } finally {
+      server.close();
+    }
   });
 });

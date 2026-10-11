@@ -343,14 +343,46 @@ function runPoAuthReset(reasonRaw: unknown): {
 }
 
 /**
- * PART 43.6 [480] — POST /health/po-auth/refresh|reset are MUTATING surfaces,
- * so they are gated:
+ * PART 43.7 [486] — client IP derivation for the mutating-route guard.
  *
- *   • When PO_HEALTH_ADMIN_KEY is configured, the caller must present it in the
- *     `X-PO-Admin-Key` header (compared timing-safe). No key → 401, wrong key →
- *     403.
- *   • When it is NOT configured, only loopback sources are accepted
- *     (internal-only); anything else → 403.
+ * `req.ip` is used, NOT the raw socket address, because the service sits behind
+ * a reverse proxy (DevTunnels / nginx) that terminates TLS and appends the real
+ * client to `X-Forwarded-For`. `index.ts` sets `app.set("trust proxy", 1)` so
+ * Express trusts exactly ONE hop: `req.ip` becomes the address that trusted
+ * proxy reported (the real client). A caller cannot forge it by sending its own
+ * `X-Forwarded-For` — spoofed entries sit to the LEFT of the trusted hop and are
+ * ignored. With no trust-proxy setting, `req.ip` would be the proxy's loopback
+ * address for EVERY remote caller, which is precisely why the hosted posture
+ * fails closed instead of trusting "loopback" (see below).
+ */
+function clientIp(req: Request): string {
+  return String(req.ip || req.socket?.remoteAddress || "");
+}
+
+/** Loopback (IPv4/IPv6, incl. IPv4-mapped) — dev-only convenience path. */
+export function isLoopbackIp(ip: string): boolean {
+  const v = (ip || "").trim();
+  return (
+    v === "localhost" ||
+    v === "::1" ||
+    v.startsWith("127.") ||
+    v.startsWith("::ffff:127.")
+  );
+}
+
+/**
+ * PART 43.6 [480] / PART 43.7 [486] — POST /health/po-auth/refresh|reset are
+ * MUTATING surfaces. They are gated and, when hosted, FAIL CLOSED:
+ *
+ *   • FAIL CLOSED (hosted): with NO PO_HEALTH_ADMIN_KEY the routes are
+ *     effectively DISABLED — 404, indistinguishable from a route that does not
+ *     exist. They never fall back to "loopback-only", which a reverse proxy
+ *     defeats by presenting the caller on loopback.
+ *   • KEY configured (hosted or not): the caller MUST present it in the
+ *     `X-PO-Admin-Key` header (constant-time compare). Absent → 401, wrong →
+ *     403. There is NO loopback bypass once a key exists.
+ *   • DEV only (PO_HEALTH_HOSTED=false, no key): loopback callers pass;
+ *     non-loopback → 403. Convenience for local development only.
  *
  * GET /health/po-auth (read-only snapshot) is NOT gated.
  */
@@ -360,35 +392,42 @@ export function poAuthRefreshGuard(
   next: NextFunction,
 ): void {
   const configured = (secrets.PO_HEALTH_ADMIN_KEY || "").trim();
-  const supplied = (req.get("x-po-admin-key") || "").trim();
-  const ip = (req.ip || (req.socket && req.socket.remoteAddress) || "") as string;
-  const isLoopback =
-    ip === "localhost" ||
-    ip === "::1" ||
-    ip.startsWith("127.") ||
-    ip.startsWith("::ffff:127.");
-  if (configured) {
-    if (supplied && safeEqualString(supplied, configured)) {
+
+  if (!configured) {
+    // Hosted + no key → fail closed: the mutating routes must not exist.
+    if (secrets.PO_HEALTH_HOSTED) {
+      res.status(404).json({ error: "Not Found" });
+      return;
+    }
+    // Development-only: internal (loopback) callers.
+    if (isLoopbackIp(clientIp(req))) {
       next();
       return;
     }
-    res.status(supplied ? 403 : 401).json({
-      error: supplied
-        ? "forbidden: invalid X-PO-Admin-Key"
-        : "unauthorized: X-PO-Admin-Key required",
+    res.status(403).json({
+      error:
+        "forbidden: internal-only — set PO_HEALTH_ADMIN_KEY to allow a remote caller",
     });
     return;
   }
-  if (isLoopback) {
+
+  const supplied = (req.get("x-po-admin-key") || "").trim();
+  if (supplied && safeEqualString(supplied, configured)) {
     next();
     return;
   }
-  res.status(403).json({
-    error:
-      "forbidden: internal-only — set PO_HEALTH_ADMIN_KEY to allow a remote caller",
+  res.status(supplied ? 403 : 401).json({
+    error: supplied
+      ? "forbidden: invalid X-PO-Admin-Key"
+      : "unauthorized: X-PO-Admin-Key required",
   });
 }
 
+/**
+ * Constant-time string equality. Both inputs are SHA-256 hashed first so hashing
+ * runs over fixed-length buffers (no early exit on a length difference) and the
+ * comparison itself is `crypto.timingSafeEqual`.
+ */
 function safeEqualString(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
   const hb = createHash("sha256").update(b).digest();
