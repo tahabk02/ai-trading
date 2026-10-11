@@ -446,6 +446,21 @@ export interface TradeHistoryResponse {
   count: number;
 }
 
+// ── PART 44 [455] unified execution response envelope ──
+// Every signal-evaluation / trade-execution endpoint returns this frame; the
+// endpoint-specific record is nested under `result`.
+export interface ExecutionResponse<T = unknown> {
+  status: "executed" | "rejected" | "dry_run" | "failed";
+  executionId: string;
+  provenance: string;
+  latencyMs: number;
+  error: string | null;
+  timestamp: string;
+  result?: T;
+}
+
+export interface TradeExecutionResponse extends ExecutionResponse<TradeResponse> {}
+
 // ── ADVANCED RISK MANAGEMENT & KILL SWITCH ──
 export interface RiskStateSnapshot {
   dayKey: string;
@@ -1005,8 +1020,8 @@ const apiClient = {
     return data;
   },
 
-  async executeTrade(trade: TradeRequest): Promise<TradeResponse> {
-    const { data } = await api.post<TradeResponse>("/trades", trade);
+  async executeTrade(trade: TradeRequest): Promise<TradeExecutionResponse> {
+    const { data } = await api.post<TradeExecutionResponse>("/trades", trade);
     return data;
   },
 

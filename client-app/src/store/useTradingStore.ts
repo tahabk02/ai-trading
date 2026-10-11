@@ -1870,16 +1870,19 @@ const lastRealtimePublish = new Map<string, number>();
       }, 1000);
 
       try {
-        const trade = await apiClient.executeTrade({
+        const execution = await apiClient.executeTrade({
           symbol: activeSymbol,
           direction,
           investment: 0, // Signal-only mode — no investment amount
           expiration: expirationSeconds,
         });
 
+        const trade = execution.result;
         set((state) => ({
-          tradeHistory: [trade, ...state.tradeHistory].slice(0, 50),
-          lastTradeResult: `${direction} signal on ${activeSymbol} — ${trade.status}`,
+          tradeHistory: trade
+            ? [trade, ...state.tradeHistory].slice(0, 50)
+            : state.tradeHistory,
+          lastTradeResult: `${direction} signal on ${activeSymbol} — ${trade ? trade.status : execution.status}`,
         }));
       } catch (err: unknown) {
         clearInterval(countdownInterval);
