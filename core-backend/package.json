@@ -12,6 +12,7 @@
     "publish:data": "ts-node --transpile-only scripts/publishMarketData.ts",
     "publish:data:loop": "ts-node --transpile-only scripts/publishMarketData.ts --loop",
     "publish:data:dry": "ts-node --transpile-only scripts/publishMarketData.ts --dry",
+    "audit:history": "ts-node --transpile-only scripts/audit-asset-history.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "test": "vitest run"

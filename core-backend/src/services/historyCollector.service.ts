@@ -12,6 +12,8 @@
 import { PrismaClient } from "@prisma/client";
 import { logger } from "../utils/logger";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { symbolRegistry } from "./symbolRegistry.service";
+import { isPocketOptionSource } from "../lib/pocketOptionSource";
 
 export const HISTORY_WINDOW_MINUTES = 30;
 export const HISTORY_BUCKET_MS = 60_000;
@@ -24,6 +26,11 @@ export interface HistoryTickInput {
   price: number;
   tsMs: number;
   volume?: number | null;
+  /**
+   * PART 44 [494] — authoring feed of the tick (`pocket_option`, `frankfurter`,
+   * `held_stale_real`, …), or null/undefined when the writer never stamped one.
+   */
+  source?: string | null;
 }
 
 export interface HistoryBar {
@@ -34,6 +41,13 @@ export interface HistoryBar {
   close: number;
   volume: number | null;
   tick_count: number;
+  /**
+   * PART 44 [494] — PROVENANCE of the bar: the source of the newest tick that
+   * formed it (a tick that carried one), or null when no contributing tick was
+   * ever stamped (legacy tape). Persisted so an OTC bar fed by a non-PO proxy
+   * is detectable by the [495] audit instead of masquerading as a PO print.
+   */
+  source: string | null;
 }
 
 /** Epoch ms of the 1-minute bucket a tick falls into. */
@@ -45,6 +59,12 @@ export function minuteBucket(tsMs: number): number {
  * Pure OHLCV rollup: group real ticks by minute bucket, oldest bucket first.
  * Only finite positive prices participate; volume accumulates ONLY real feed
  * volume (stays null when the tape carries none).
+ *
+ * PART 44 [494]: each bar also records its provenance — the source of the
+ * NEWEST contributing tick that carried one. A legacy source-less print never
+ * erases a known provenance (that would let an unstamped tick whitewash a
+ * PO-authored bar), so a bar formed by PO ticks then a proxy tick stays
+ * stamped `pocket_option` for the [495] audit.
  */
 export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
   const buckets = new Map<
@@ -56,6 +76,7 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
       close: number;
       volume: number | null;
       tickCount: number;
+      source: string | null;
     }
   >();
   for (const tick of ticks) {
@@ -70,6 +91,7 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
         close: tick.price,
         volume: null,
         tickCount: 0,
+        source: null,
       };
       buckets.set(b, bar);
     }
@@ -77,6 +99,9 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
     bar.low = Math.min(bar.low, tick.price);
     bar.close = tick.price;
     bar.tickCount += 1;
+    if (tick.source != null && String(tick.source).trim() !== "") {
+      bar.source = String(tick.source).trim();
+    }
     if (tick.volume != null) {
       const real = Number(tick.volume);
       bar.volume = (bar.volume ?? 0) + Math.max(0, real);
@@ -92,6 +117,7 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
       close: bar.close,
       volume: bar.volume,
       tick_count: bar.tickCount,
+      source: bar.source,
     }));
 }
 
@@ -244,6 +270,15 @@ class HistoryCollectorService {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm) return { bars: 0, ticksInserted: 0, barsFound: 0, ticksInWindow: 0 };
 
+    // PART 44 [494] — DATA PROVENANCE GATE. An OTC instrument is bullish ONLY
+    // on the Pocket Option tape: a proxy (Frankfurter/ER-API), a helpfully
+    // re-served GitHub print, or a held re-pended continuity print is NOT a PO
+    // print and must never author an OTC bar — a bar of proxy prices persisted
+    // as if it were PO history is indistinguishable from a real PO dataset to
+    // every downstream reader. Source-less (legacy) ticks are KEPT for
+    // back-compat so the pre-provenance tape still persists; what they become
+    // is exactly what the [495] audit exists to surface.
+    const isOtc = symbolRegistry.getAssetSubType(norm) === "otc";
     const windowTicks = realtimeTickBuffer
       .getRecentWindow(norm, HISTORY_TICKS_WINDOW)
       .filter(
@@ -251,10 +286,14 @@ class HistoryCollectorService {
           Number.isFinite(t.price) &&
           t.price > 0 &&
           Number.isFinite(t.tsMs) &&
-          t.tsMs >= nowMs - HISTORY_WINDOW_MINUTES * HISTORY_BUCKET_MS,
+          t.tsMs >= nowMs - HISTORY_WINDOW_MINUTES * HISTORY_BUCKET_MS &&
+          (!isOtc ||
+            (t.stale !== true && (t.source == null || isPocketOptionSource(t.source)))),
       );
 
-    const bars = buildMinuteBars(windowTicks.map((t) => ({ price: t.price, tsMs: t.tsMs })));
+    const bars = buildMinuteBars(
+      windowTicks.map((t) => ({ price: t.price, tsMs: t.tsMs, source: t.source ?? null })),
+    );
 
     if (bars.length === 0 && windowTicks.length === 0) {
       return { bars: 0, ticksInserted: 0, barsFound: 0, ticksInWindow: 0 };
@@ -270,6 +309,7 @@ class HistoryCollectorService {
         close: bar.close,
         volume: bar.volume,
         tickCount: bar.tick_count,
+        source: bar.source,
       };
       const persisted = await this.db(
         "assetHistory.upsert",
@@ -367,6 +407,10 @@ class HistoryCollectorService {
    * keyed (symbol, timeframe, bucketStartMs); the same unique key the local
    * tape collector writes, so the ai-engine's real observations reconcile the
    * same store without duplicating rows.
+   *
+   * PART 44 [494]: the ingest may carry an optional per-bar `source` stamp.
+   * The ai-engine's own observations are labelled `ai_engine` so consumers can
+   * tell a synthesized/observed bar from a raw tape bar at a glance.
    */
   public async upsertBars(
     symbol: string,
@@ -379,6 +423,7 @@ class HistoryCollectorService {
       close: number;
       volume?: number | null;
       tickCount?: number;
+      source?: string | null;
     }>,
   ): Promise<number> {
     const norm = (symbol || "").trim().toUpperCase();
@@ -400,6 +445,7 @@ class HistoryCollectorService {
         close,
         volume: bar.volume == null ? null : Number(bar.volume),
         tickCount: bar.tickCount == null ? 1 : Math.max(0, Math.round(Number(bar.tickCount))),
+        source: bar.source == null || String(bar.source).trim() === "" ? null : String(bar.source).trim(),
       };
       const persisted = await this.db(
         "assetHistory.upsert(ingest)",
@@ -499,6 +545,7 @@ class HistoryCollectorService {
       close: r.close,
       volume: r.volume,
       tick_count: r.tickCount,
+      source: r.source ?? null,
     }));
   }
 
@@ -541,6 +588,7 @@ class HistoryCollectorService {
         close: r.close,
         volume: r.volume,
         tick_count: r.tickCount,
+        source: r.source ?? null,
       }))
       .reverse();
   }

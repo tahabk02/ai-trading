@@ -29,10 +29,9 @@ import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { githubDataProvider } from "./githubData.provider";
 import { symbolRegistry } from "./symbolRegistry.service";
 import { pocketOptionBridgeService } from "./pocketOptionBridge.service";
-import {
-  exponentialBackoffMs,
-  classifyFeedLog,
-} from "../lib/feedResilience";
+import { exponentialBackoffMs } from "../lib/feedResilience";
+import { restoredFeedStatus } from "../lib/feedStatus";
+import { feedStateReporter, FeedStateReport } from "../lib/feedStateLog";
 import { feedMetrics } from "../lib/feedMetrics";
 import { isForexMarketClosed } from "../lib/marketSchedule";
 
@@ -82,6 +81,15 @@ export class LiveTickIngestionService {
    * no status-event spam over the socket channel.
    */
   private streamDegraded: Map<string, boolean> = new Map();
+  /**
+   * PART 44 [496] — per-symbol OTC-PROXY broadcast latch. When the HTTP cascade
+   * recovers an OTC pair onto a NON-PO source (Frankfurter/ER-API/GitHub), the
+   * tape is alive on PROXY prices — that is DEGRADED, never ONLINE. This latch
+   * ensures the "PO offline (proxy prices)" DEGRADED broadcast fires at most
+   * once per incident, WITHOUT clearing `streamDegraded`, so the eventual
+   * genuine Pocket Option recovery still flips the engine back to ONLINE.
+   */
+  private streamDegradedProxy: Map<string, boolean> = new Map();
   private readonly MAX_CONSECUTIVE_ERRORS = 5;
   private readonly POLLING_INTERVAL_MS = 1000; // Real-time 1-second tick cadence
 /**
@@ -229,6 +237,7 @@ export class LiveTickIngestionService {
     this.streamConsecutiveErrors.set(norm, 0);
     this.nextAllowedPollAt.delete(norm);
     this.streamDegraded.delete(norm);
+    this.streamDegradedProxy.delete(norm);
 
     // Ensure the GitHub data provider is running (shared polling loop)
     this.ensureGitHubProviderRunning();
@@ -259,6 +268,7 @@ export class LiveTickIngestionService {
       this.streamConsecutiveErrors.delete(norm);
       this.nextAllowedPollAt.delete(norm);
       this.streamDegraded.delete(norm);
+      this.streamDegradedProxy.delete(norm);
       this.heldStalePendedAt.delete(norm);
       this.marketClosedUntil.delete(norm);
       this.marketClosedLatched.delete(norm);
@@ -474,19 +484,50 @@ export class LiveTickIngestionService {
       // A successful probe after a DEGRADED latch flips the engine status back
       // so subscribers see the feed heal the instant it does. Also emits the
       // single info line that closes the incident (rate-limited log policy).
+      //
+      // PART 44 [496] — PROVENANCE-GATED RECOVERY: an OTC pair "recovered" onto
+      // a NON-PO source is NOT a recovery. It keeps the DEGRADED broadcast set
+      // (armed for the imminent genuine PO print → ONLINE) and, once per
+      // incident, broadcasts the precise reason: "DEGRADED · PO offline
+      // (proxy prices)". The old code flipped every successful probe to ONLINE
+      // regardless of source, telling the terminal a pair was live-fresh when
+      // its tape was a static ECB close.
       if (this.streamDegraded.get(symbol)) {
-        this.streamDegraded.set(symbol, false);
-        feedMetrics.countRecovery(symbol);
-        const recoveryLog = classifyFeedLog(0, true);
-        logger.info("[TickIngestion] Live market feed restored", {
-          symbol,
-          source: spot.source,
-          recoveryState: recoveryLog.isRecovery ? "recovered" : "online",
-        });
-        this.wsService.broadcastEngineStatus(
-          "ONLINE",
-          `Live tick stream restored for ${symbol}.`,
-        );
+        const restored = restoredFeedStatus(symbol, spot.source);
+        if (restored.status === "ONLINE") {
+          this.streamDegraded.set(symbol, false);
+          this.streamDegradedProxy.delete(symbol);
+          feedMetrics.countRecovery(symbol);
+          // PART 44 [497] — the state-change line (feed_error → online) is the
+          // single info line that closes the incident.
+          this.reportFeedState(
+            feedStateReporter.markOnline(
+              symbol,
+              `live feed restored via ${spot.source}`,
+              Date.now(),
+            ),
+            symbol,
+            { source: spot.source },
+          );
+          this.wsService.broadcastEngineStatus("ONLINE", restored.message);
+        } else if (!this.streamDegradedProxy.get(symbol)) {
+          // OTC proxy recovery: DEGRADED once per incident; `streamDegraded`
+          // stays SET so the imminent genuine PO print still broadcasts ONLINE.
+          // The reporter stays in po_offline (an expected state → INFO), never
+          // claiming ONLINE for a proxy feed.
+          this.streamDegradedProxy.set(symbol, true);
+          feedMetrics.countRecovery(symbol);
+          this.reportFeedState(
+            feedStateReporter.inspect(
+              symbol,
+              `PO offline (proxy prices) — feed restored via ${spot.source}`,
+              Date.now(),
+            ),
+            symbol,
+            { source: spot.source },
+          );
+          this.wsService.broadcastEngineStatus("DEGRADED", restored.message);
+        }
       }
 
       // ── PO-AUTHORITY GUARD ──
@@ -559,6 +600,23 @@ export class LiveTickIngestionService {
           error: bufErr instanceof Error ? bufErr.message : String(bufErr),
         });
       }
+
+      // PART 44 [497] — keep the state map truthful on the healthy path too: a
+      // transient hold leaves the reporter in holding_stale until a REAL live
+      // print proves the feed is back. Transition-gated → no spam. Skipped while
+      // a proxy-recovered OTC pair is still latched DEGRADED (state must stay
+      // po_offline until the genuine PO print arrives).
+      if (!this.streamDegraded.get(symbol)) {
+        this.reportFeedState(
+          feedStateReporter.markOnline(
+            symbol,
+            `live tick via ${spot.source}`,
+            Date.now(),
+          ),
+          symbol,
+          { source: spot.source },
+        );
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.handleFeedFailure(symbol, msg);
@@ -609,39 +667,27 @@ export class LiveTickIngestionService {
     feedMetrics.setBackoffMs(symbol, lingerMs);
     feedMetrics.setMaxConsecutiveErrors(symbol, errCount);
 
-    // ── LOG RATE LIMIT (mission [3]) ──
-    // One warn on the first failure of an incident, one error per every 10th
-    // consecutive failure, and silence in between — no more warn-per-retry
-    // flooding. Recovery (a zero count while a DEGRADED latch is set) logs
-    // info exactly once (see anySuccessReset / the ONLINE branch below).
-    const logClass = classifyFeedLog(errCount, this.streamDegraded.get(symbol) ?? false);
-    if (logClass.level === "warn") {
-      logger.warn("[TickIngestion] Live market feed error", {
-        symbol,
-        consecutiveErrors: errCount,
-        error: errorDetail,
-        lingerMs,
-        recoveryMode: forexDataService.isRecoveryMode(),
-      });
-    } else if (logClass.level === "error") {
-      logger.error(
-        "[TickIngestion] Live market feed still failing (every 10th failure)",
-        {
-          symbol,
-          consecutiveErrors: errCount,
-          error: errorDetail,
-          lingerMs,
-          recoveryMode: forexDataService.isRecoveryMode(),
-        },
-      );
-    }
+    // ── PERV-SYMBOL STATE-CHANGE LOGGING (PART 44 [497]) ──
+    // One line per per-symbol STATE TRANSITION, nothing on the 1s repeats.
+    // Expected, recoverable conditions (PO offline / holding last known good /
+    // market closed) log INFO — they are operational conditions, not faults.
+    // Real failure states (feed_error / lingering) log ERROR so an unexpected
+    // outage still rings loudly. The old warn-on-first/error-every-10th cadence
+    // is gone; a compact 60s summary line (emitted by the same reporter) keeps
+    // every symbol's current state visible during a long outage.
+    this.reportFeedState(
+      feedStateReporter.inspect(symbol, errorDetail, Date.now(), {
+        // PART 44 [497] — an OTC pair may treat PO-offline/sources-exhausted as
+        // an expected proxy state (INFO); a REAL pair may not — a real pair
+        // whose sources are exhausted while the market is open is a genuine
+        // outage and must stay at ERROR.
+        isOtc: symbolRegistry.getAssetSubType(symbol) === "otc",
+      }),
+      symbol,
+      { consecutiveErrors: errCount, lingerMs },
+    );
 
     if (errCount >= this.MAX_CONSECUTIVE_ERRORS) {
-      logger.error(
-        "[TickIngestion] Live market feed dropped — entering LINGER mode (stream stays alive)",
-        { symbol, totalFailures: errCount, lastError: errorDetail },
-      );
-
       // Notify WebSocket clients of DEGRADED feed status exactly once per
       // incident — subsequent duplicate failures while still degraded stay
       // silent (no event spam over the socket channel).
@@ -656,6 +702,39 @@ export class LiveTickIngestionService {
         // trades with no fabricated direction, no HOLD.
         liveTickSignalDispatcher.notifyFeedDegraded(symbol, errorDetail);
       }
+    }
+  }
+
+  /**
+   * PART 44 [497] — dispatch one per-symbol state line + the guarded 60s
+   * summary from a FeedStateReport. Expected states log INFO, real failure
+   * states log ERROR; the summary is rate-limited to once per 60s by the
+   * reporter itself.
+   */
+  private reportFeedState(
+    report: FeedStateReport,
+    symbol: string,
+    extra?: Record<string, unknown>,
+  ): void {
+    if (report.outcome) {
+      const meta = {
+        symbol,
+        state: report.outcome.to,
+        from: report.outcome.from,
+        detail: report.outcome.detail,
+        ...(extra ?? {}),
+      };
+      if (report.outcome.logLevel === "error") {
+        logger.error("[TickIngestion] Live market feed state", meta);
+      } else {
+        logger.info("[TickIngestion] Live market feed state", meta);
+      }
+    }
+    if (report.summary) {
+      logger.info("[TickIngestion] Live feed state summary (60s)", {
+        interval_ms: report.summary.intervalMs,
+        per_symbol: report.summary.per_symbol,
+      });
     }
   }
 
@@ -691,7 +770,9 @@ export class LiveTickIngestionService {
       });
     }
 
-    logger.warn("[TickIngestion] Holding last known good price (feed not recovered)", {
+    // PART 44 [497] — holding last known good is an EXPECTED operational state
+    // (the feed degrade machinery is engaged), so this is INFO, not a warn.
+    logger.info("[TickIngestion] Holding last known good price (feed not recovered)", {
       symbol,
       price,
       source: spot.source,

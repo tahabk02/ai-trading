@@ -317,6 +317,14 @@ class RealtimeTickBufferService {
     bid?: number;
     ask?: number;
     stale?: boolean;
+    /**
+     * PART 44 [494] — authoring feed of THIS entry (`pocket_option`,
+     * `frankfurter`, `held_stale_real`, …), or undefined for legacy callers
+     * that never stamped one. Carried all the way down so the history collector
+     * can persist real provenance and refuse to author an OTC bar from a
+     * non-PO (proxy/held) print.
+     */
+    source?: string;
   }> {
     const norm = (symbol || "").trim().toUpperCase();
     const ring = this.ticks.get(norm);
@@ -330,6 +338,7 @@ class RealtimeTickBufferService {
       bid: t.bid,
       ask: t.ask,
       ...(t.stale ? { stale: true } : {}),
+      ...(t.source ? { source: t.source } : {}),
     }));
   }
 
