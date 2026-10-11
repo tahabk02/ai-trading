@@ -7,6 +7,7 @@ import axios from "axios";
 import { forexDataService } from "../services/forexData.service";
 import { realtimeTickBuffer } from "../services/realtimeTickBuffer.service";
 import { pocketOptionBridgeService } from "../services/pocketOptionBridge.service";
+import { poAuthManager } from "../services/poAuthManager";
 import { orderbookHealth } from "../controllers/orderbook.controller";
 import { historyCollector } from "../services/historyCollector.service";
 import packageJson from "../../package.json";
@@ -185,6 +186,15 @@ export const rootHealthRouter: Router = (() => {
     const n = Math.min(Math.max(Number(req.query.n) || 30, 1), 200);
     res.json(buildTapeDebugSnapshot(symbol, n));
   });
+  // GET /health/po-auth — PO session/credential self-healing posture (PART on
+  // SSID automation). Observational: never mutates state.
+  r.get("/po-auth", (_req: Request, res: Response) => {
+    res.json(poAuthManager.buildSnapshot());
+  });
+  // POST /health/po-auth/refresh — trigger a background SSID refresh.
+  r.post("/po-auth/refresh", async (req: Request, res: Response) => {
+    res.json(await runPoAuthRefresh(req.query.reason));
+  });
   return r;
 })();
 
@@ -276,6 +286,28 @@ export function buildFeedHealthSnapshot(): {
     detail: feed,
     timestamp: new Date().toISOString(),
   };
+}
+
+/**
+ * Trigger a background Pocket Option SSID refresh (session tier, then the
+ * opt-in last-resort credential tier) and return the outcome plus a fresh
+ * auth snapshot. Best-effort: `poAuthManager.refresh` never throws, so this can
+ * never 5xx the health surface.
+ */
+async function runPoAuthRefresh(reasonRaw: unknown): Promise<{
+  ok: boolean;
+  method: string;
+  durationMs: number;
+  reason: string;
+  error?: string;
+  snapshot: ReturnType<typeof poAuthManager.buildSnapshot>;
+}> {
+  const reason =
+    typeof reasonRaw === "string" && reasonRaw.trim()
+      ? reasonRaw.trim()
+      : "manual";
+  const result = await poAuthManager.refresh(reason);
+  return { ...result, snapshot: poAuthManager.buildSnapshot() };
 }
 
 /**
@@ -371,6 +403,26 @@ router.get("/ticks", (req: Request, res: Response) => {
   }
   const n = Math.min(Math.max(Number(req.query.n) || 30, 1), 200);
   res.json(buildTapeDebugSnapshot(symbol, n));
+});
+
+/**
+ * GET /health/po-auth — Pocket Option SSID self-healing posture.
+ *
+ * Observational snapshot: whether the opt-in last-resort credential fallback is
+ * configured, whether a captured session file exists (and its age), and the
+ * outcome of the last refresh. Purely read-only — never mutates state.
+ */
+router.get("/po-auth", (_req: Request, res: Response) => {
+  res.json(poAuthManager.buildSnapshot());
+});
+
+/**
+ * POST /health/po-auth/refresh — trigger a background SSID refresh via
+ * session/refresh_ssid.py (session tier, then the opt-in credential tier).
+ * Returns the refresh outcome + a fresh snapshot. Never throws.
+ */
+router.post("/po-auth/refresh", async (req: Request, res: Response) => {
+  res.json(await runPoAuthRefresh(req.query.reason));
 });
 
 /**

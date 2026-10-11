@@ -39,10 +39,31 @@ The bridge runs `refresh_ssid.py`:
 - once immediately after an auth failure.
 
 On success the SSID is rotated into `po_session.json` (atomic) and
-`pocket-bridge/.env`, and the bridge hot-reloads it (`SESSION_RELOADED`).
-On failure the bridge logs **CRITICAL `SESSION_EXPIRED — re-run
+`pocket-bridge/.env`, and the bridge hot-reloads it (`SESSION_RELOADED`). A
+`REFRESH_METHOD=session|credential_login` line reports HOW the token was
+obtained. On failure the bridge logs **CRITICAL `SESSION_EXPIRED — re-run
 capture_session.py`** and **stops retrying** to avoid an account/IP ban;
 `/health` reports `"session_expired": true`.
+
+## Last-resort credential login (optional, opt-in)
+
+`refresh_ssid.py` has a TWO-TIER recovery. Tier 1 is the session reuse above —
+credential-free and always preferred. **Tier 2 (credential login) is ONLY used
+when tier 1 produced no auth frame**, i.e. the stored session is dead, AND
+`PO_EMAIL_LOGIN=1` AND both `PO_EMAIL` and `PO_PASSWORD` are present. In that
+state it drives the login form headlessly to mint a brand-new session, writes a
+fresh `po_session.json`, and rotates the SSID into `.env` exactly as tier 1.
+While a session works, the credential is never sent anywhere.
+
+- Opt-in and masked: `PO_EMAIL_LOGIN=1` is required; logs/health show only the
+  first 3 characters of the email, never the password.
+- Ban-safety: the bridge still stops retrying after the LAST-RESORT also fails,
+  and the Node backend's own `PO_AUTH_NODE_TRIGGER` is OFF by default so two
+  browser logins can never run concurrently.
+- Operate from the backend layer: `PO_EMAIL` / `PO_PASSWORD` set in
+  `core-backend/.env` are forwarded to the spawned bridge (see
+  `core-backend/src/services/poAuthManager.ts`), or set them in
+  `pocket-bridge/.env` directly.
 
 ## Runtime states (what the logs mean)
 
@@ -61,7 +82,9 @@ capture_session.py`** and **stops retrying** to avoid an account/IP ban;
   first 8 characters (masked).
 - Optional at-rest encryption: set `PO_SESSION_KEY` (Fernet) — the session
   file is then stored as `FERNET:<base64>` and only this service can read it.
-- The bridge never sends email/password anywhere; there is no auto-login.
+- The bridge never sends email/password anywhere while a session works; the
+  credential login is an opt-in last resort used only after the session tier
+  fails, and is masked in every log/health surface.
 
 ## Container notes
 

@@ -45,6 +45,7 @@ import { forexDataService } from "./forexData.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { websocketService } from "./websocket.service";
 import { symbolRegistry } from "./symbolRegistry.service";
+import { poAuthManager } from "./poAuthManager";
 
 // ─── Bridge Process Constants ───
 const BRIDGE_PYTHON_MODULE = "pocket_bridge.main";
@@ -467,6 +468,10 @@ export class PocketOptionBridgeService {
             // backend goes live immediately (not stuck in awaiting_ssid) when
             // the SSID is configured at the backend layer.
             POCKET_OPTION_SSID: secrets.POCKET_OPTION_SSID || "",
+            // Forward the OPT-IN last-resort credential fallback so the
+            // Python refresher inherits it from the backend layer. Empty when
+            // unset — the bridge stays session-only, exactly as before.
+            ...poAuthManager.bridgeCredentialEnv(),
           },
         },
       );
@@ -980,6 +985,17 @@ export class PocketOptionBridgeService {
     if (status === "session_expired") {
       this.lastStatus = "DEGRADED";
       this.broadcastFeedStatusIfChanged();
+      // OPT-IN node-side re-auth (PO_AUTH_NODE_TRIGGER). Off by default — the
+      // Python bridge already refreshes on auth failure, so default-off avoids
+      // a second concurrent browser login (ban safety). Fire-and-forget: a
+      // refresh failure must never touch the ingestion path.
+      void poAuthManager
+        .maybeAutoRefresh("relay_session_expired")
+        .catch((err) =>
+          logger.debug("[PO Bridge] poAuthManager auto-refresh failed", {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
       return;
     }
   }

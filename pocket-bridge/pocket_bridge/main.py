@@ -27,6 +27,7 @@ from typing import Dict
 from .bridge import PocketOptionBridge
 from .config import (
     BridgeSettings,
+    credential_login_status,
     load_settings,
     load_stored_session,
     mask_secret,
@@ -227,6 +228,8 @@ async def amain(settings: BridgeSettings) -> None:
                     "subscribed_symbols": len(bridge._subs),
                     "connected_at": bridge.connected_at,
                     "uptime_s": uptime_s,
+                    # Last-resort credential-login availability (opt-in, masked).
+                    **credential_login_status(),
                 }
             )
             self.send_response(200)

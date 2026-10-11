@@ -218,6 +218,25 @@ export const secrets = {
   // connects as a client. When no SSID is set, the bridge (and therefore the
   // backend) runs in a clean "awaiting_ssid" state with NO fabricated prices.
   POCKET_OPTION_SSID: process.env.POCKET_OPTION_SSID || "",
+  // ── Pocket Option session self-healing (session/capture_session.py +
+  // session/refresh_ssid.py) ──
+  // The bridge normally refreshes its SSID from a captured browser session
+  // (no credentials involved). PO_EMAIL/PO_PASSWORD are an OPT-IN LAST RESORT:
+  // only used by session/refresh_ssid.py when the stored session is dead AND
+  // PO_EMAIL_LOGIN is enabled AND both halves are present. Keep them in the
+  // gitignored .env — never commit live values.
+  PO_EMAIL: process.env.PO_EMAIL || "",
+  PO_PASSWORD: process.env.PO_PASSWORD || "",
+  PO_EMAIL_LOGIN: (process.env.PO_EMAIL_LOGIN || "false").trim().toLowerCase(),
+  // Pixel/UX budget (seconds) for the headless credential login form.
+  PO_LOGIN_TIMEOUT: Number(process.env.PO_LOGIN_TIMEOUT) || 45,
+  // When "true", core-backend ALSO triggers a background refresh the moment the
+  // relay reports a terminal auth failure. Default OFF: the Python bridge
+  // already refreshes on auth failure, and a second concurrent browser login
+  // would double the account's exposure (ban risk).
+  PO_AUTH_NODE_TRIGGER: (process.env.PO_AUTH_NODE_TRIGGER || "false")
+    .trim()
+    .toLowerCase(),
   POCKET_BRIDGE_HOST: process.env.POCKET_BRIDGE_HOST || "127.0.0.1",
   POCKET_BRIDGE_PORT: Number(process.env.POCKET_BRIDGE_PORT) || 8788,
   // How often (ms) the backend re-tries connecting to the relay once down.

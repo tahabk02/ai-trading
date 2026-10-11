@@ -112,6 +112,83 @@ def parse_ssid(value: str) -> dict:
 def auth_message(auth: dict) -> str:
     return "42" + json.dumps(["auth", auth], separators=(",", ":"))
 
+
+# ════════════════════════════════════════════════════════════════════
+# CREDENTIAL LOGIN (LAST-RESORT SSID RECOVERY)
+# ════════════════════════════════════════════════════════════════════
+# The bridge authenticates with a captured SESSION, never a raw credential,
+# and refreshes that session headlessly (see session/refresh_ssid.py). The
+# credential login below is a DELIBERATE LAST RESORT used only when the stored
+# session is dead and a fresh `42["auth",{...}]` frame cannot be captured — it
+# is never attempted while the session path works, so the normal steady state
+# never sends email/password anywhere.
+#
+# It is opt-in (PO_EMAIL_LOGIN=1) AND requires both PO_EMAIL and PO_PASSWORD.
+# Keep them in the gitignored `pocket-bridge/.env`; this repository's
+# `.env.example` only documents the names.
+CREDENTIAL_LOGIN_URL = "https://pocketoption.com/en/login"
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag ("1"/"true"/"yes"/"on" -> True)."""
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class CredentialLogin:
+    """Resolved last-resort credential-login configuration.
+
+    ``password`` is excluded from ``repr`` so a stray ``print(settings)`` or a
+    logged exception can never leak it.
+    """
+
+    email: str = ""
+    password: str = field(default="", repr=False)
+    enabled: bool = False
+    login_url: str = CREDENTIAL_LOGIN_URL
+    timeout_s: float = 45.0
+
+    @property
+    def configured(self) -> bool:
+        """True when BOTH halves of the credential are present."""
+        return bool(self.email.strip() and self.password)
+
+    @property
+    def usable(self) -> bool:
+        """Credential login is only usable when opted-in AND fully configured."""
+        return self.enabled and self.configured
+
+
+def load_credential_login() -> CredentialLogin:
+    """Read the last-resort credential-login settings from the environment."""
+    try:
+        timeout = float(os.getenv("PO_LOGIN_TIMEOUT", "45"))
+    except (TypeError, ValueError):
+        timeout = 45.0
+    return CredentialLogin(
+        email=(os.getenv("PO_EMAIL", "") or "").strip(),
+        password=os.getenv("PO_PASSWORD", "") or "",
+        enabled=_bool_env("PO_EMAIL_LOGIN", False),
+        login_url=(os.getenv("PO_LOGIN_URL", "") or CREDENTIAL_LOGIN_URL).strip()
+        or CREDENTIAL_LOGIN_URL,
+        timeout_s=max(5.0, timeout),
+    )
+
+
+def credential_login_status() -> Dict[str, Any]:
+    """Non-secret status for /health — never includes the credential itself."""
+    cfg = load_credential_login()
+    return {
+        "credential_login_enabled": cfg.enabled,
+        "credential_login_configured": cfg.configured,
+        "credential_login_available": cfg.usable,
+        "credential_login_email": mask_secret(cfg.email, 3),
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 # PERSISTED BROWSER SESSION (manual capture -> reuse)
 # ════════════════════════════════════════════════════════════════════

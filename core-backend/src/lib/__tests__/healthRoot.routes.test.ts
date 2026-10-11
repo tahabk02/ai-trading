@@ -229,4 +229,21 @@ describe("ROOT GET /health (MASTER MISSION 1.3 — autopilot probe)", () => {
     expect(tape.newestSourceIsPo).toBe(false);
     expect(Array.isArray(tape.ticks)).toBe(true);
   });
+
+  it("test_health_po_auth_returns_snapshot — root /health/po-auth returns the SSID self-healing posture", async () => {
+    const { calls } = await dispatch("/po-auth");
+    expect(calls.length).toBe(1);
+    const { code, body } = calls[0];
+    expect(code).toBe(200);
+    const snap = body as {
+      credentialFallback: { available: boolean; emailMasked: unknown };
+      session: { filePresent: boolean };
+      refreshScript: { present: boolean };
+      refresh: { inFlight: boolean };
+    };
+    expect(typeof snap.credentialFallback.available).toBe("boolean");
+    expect(typeof snap.session.filePresent).toBe("boolean");
+    expect(typeof snap.refreshScript.present).toBe("boolean");
+    expect(typeof snap.refresh.inFlight).toBe("boolean");
+  });
 });

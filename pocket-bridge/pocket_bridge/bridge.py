@@ -31,6 +31,7 @@ from .config import (
     canonical_active_asset,
     auth_message,
     canonical_symbol,
+    credential_login_status,
     load_stored_session,
     mask_secret,
     parse_ssid,
@@ -307,6 +308,10 @@ class PocketOptionBridge:
             "session_file_present": bool(self.session.exists),
             "is_optimized": bool(self.settings.auth.get("isOptimized")),
             "symbols": sorted(self._subs),
+            # Last-resort credential-login availability (opt-in, masked) so the
+            # operator can see whether an expired session can self-heal without
+            # a manual re-capture.
+            **credential_login_status(),
         }
 
     @property
