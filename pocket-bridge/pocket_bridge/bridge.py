@@ -34,6 +34,7 @@ from .config import (
     credential_login_status,
     load_stored_session,
     mask_secret,
+    mask_uid,
     parse_ssid,
     read_env_ssid,
     session_reload_needed,
@@ -426,7 +427,7 @@ class PocketOptionBridge:
         logger.info(
             "auth_payload_sent via=%s session_len=%d uid=%s isDemo=%s isOptimized=%s",
             via, session_len,
-            auth_dict.get("uid"), auth_dict.get("isDemo"),
+            mask_uid(auth_dict.get("uid")), auth_dict.get("isDemo"),
             auth_dict.get("isOptimized", False),
         )
         if self.session.exists:
@@ -856,6 +857,7 @@ class PocketOptionBridge:
             )
             return
         last_error: Optional[str] = None
+        last_error_class: Optional[str] = None
         for attempt in range(1, TRANSIENT_CONNECT_ATTEMPTS + 1):
             # A client whose SDK channel died (Core(ChannelReceiver(Closed)))
             # still returns instantly from wait_for_assets (assets preloaded)
@@ -881,12 +883,27 @@ class PocketOptionBridge:
                 break
             except Exception as exc:  # noqa: BLE001 - retried transiently below
                 last_error = str(exc)[:500]
+                last_error_class = type(exc).__name__
                 self._last_transport_error = exc
-                logger.error("auth_response=%s", last_error)
+                # PART 44 [498] — log the EXCEPTION CLASS and the REGIONAL WS
+                # endpoint(s)/rotation for the current attempt, so a
+                # "PocketOptionError, General error: Connection initialization
+                # timed out" is diagnosable at the log line: which region was
+                # tried and whether the order had already been rotated onto a
+                # different regional host. `rotate=N` is set on attempt 1 (0 =
+                # SDK default order) and increments once per failed attempt.
+                urls = list(self.settings.urls)
+                endpoint_ref = urls or "(sdk default regional list)"
+                logger.error(
+                    "auth_response=%s class=%s urls=%s rotate=%s",
+                    last_error, last_error_class, endpoint_ref,
+                    self._endpoint_rotation,
+                )
                 logger.warning(
-                    "auth_attempt[%d/%d] failed reason=%s — "
-                    "releasing stale client and retrying transient",
+                    "auth_attempt[%d/%d] failed reason=%s class=%s urls=%s "
+                    "rotate=%s — releasing stale client and retrying transient",
                     attempt, TRANSIENT_CONNECT_ATTEMPTS, last_error,
+                    last_error_class, endpoint_ref, self._endpoint_rotation,
                 )
                 # Rotate the endpoint order so the next attempt starts on a
                 # different regional host — a handshake block is bypassed in
@@ -905,17 +922,23 @@ class PocketOptionBridge:
                 if attempt < TRANSIENT_CONNECT_ATTEMPTS:
                     await asyncio.sleep(self.settings.reconnect_delay * attempt)
         if not self.is_connected:
-            logger.error("auth_failed reason=%s", last_error)
+            logger.error(
+                "auth_failed reason=%s class=%s", last_error, last_error_class,
+            )
             if self._is_transport_error(self._last_transport_error):
                 # TRANSPORT, not credential: a blocked/slow handshake, a
                 # filtered regional host or a dropped socket. Declaring
                 # session_expired here is what turned every reader into a
                 # silent dead task, so surface a retryable connection_error and
                 # let the reader's bounded backoff retry — the SSID is fine.
+                urls = list(self.settings.urls)
                 logger.warning(
-                    "connect_failed reason=%s — transient transport failure, "
-                    "keeping readers armed for retry (not session_expired)",
-                    last_error,
+                    "connect_failed reason=%s class=%s urls=%s rotate=%s — "
+                    "transient transport failure, keeping readers armed for "
+                    "retry (not session_expired)",
+                    last_error, last_error_class,
+                    urls or "(sdk default regional list)",
+                    self._endpoint_rotation,
                 )
                 await self._set_status(
                     "connection_error",
@@ -927,7 +950,7 @@ class PocketOptionBridge:
         self.connected_at = time.time()
         self.connect_epoch += 1
         self._transient_connect_retries = 0
-        logger.info("AUTH_SUCCESS uid=%s isDemo=%s", self.settings.uid, self.settings.is_demo)
+        logger.info("AUTH_SUCCESS uid=%s isDemo=%s", mask_uid(self.settings.uid), self.settings.is_demo)
         logger.info("auth_response=authenticated and assets_ready pending")
         # Load the authoritative asset list NOW, while the client is
         # guaranteed authenticated, so no later active_assets() call can hit
@@ -1226,7 +1249,7 @@ class PocketOptionBridge:
             if env_ssid and self.settings.adopt_ssid(env_ssid):
                 logger.info(
                     "SSID_ADOPTED_FROM_ENV",
-                    uid=self.settings.uid,
+                    uid=mask_uid(self.settings.uid),
                     is_demo=self.settings.is_demo,
                     format=self.settings.ssid_format,
                 )

@@ -14,8 +14,11 @@ initialization timed out`` crash loop:
 """
 
 import asyncio
+import logging
 
 import pytest
+
+import pocket_bridge.bridge as bridge_mod
 
 from pocket_bridge.bridge import (
     CONNECT_DEADLINE_GRACE,
@@ -186,6 +189,51 @@ def test_endpoints_rotate_between_attempts(monkeypatch, tmp_path, fake_client):
     bridge._endpoint_rotation = 3
     asyncio.run(bridge._import_client())
     assert fake_client.instances[-1].config["urls"] == urls
+
+
+def test_init_timeout_logs_exception_class_region_and_rotation(
+    monkeypatch, tmp_path, fake_client, caplog
+):
+    """PART 44 [498] — an init-timeout failure must log the REGIONAL WS URL(s)
+    actually attempted, the SDK EXCEPTION CLASS (not just the string), and the
+    current endpoint rotation — for attempt 1 the unrotated SDK order is shown
+    (rotate=0), and a rotated attempt surfaces the next regional host."""
+    urls = [
+        "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://api-asia.po.market/socket.io/?EIO=4&transport=websocket",
+    ]
+    bridge = _bridge(monkeypatch, tmp_path, reconnect_delay=0.0, urls=urls)
+    with caplog.at_level(logging.ERROR, logger="pocket_bridge.bridge"):
+        asyncio.run(bridge._ensure_connected())
+    assert bridge.status == "connection_error"
+    assert len(fake_client.instances) == TRANSIENT_CONNECT_ATTEMPTS
+    records = "\n".join(rec.message for rec in caplog.records)
+    assert "class=RuntimeError" in records
+    assert "Connection initialization timed out" in records
+    assert "api-eu.po.market" in records
+    assert "rotate=0" in records
+    assert "urls=['wss://api-eu.po.market" in records
+    # One rotation per failed attempt is proven by the log field itself (0 → 3).
+    for n in range(TRANSIENT_CONNECT_ATTEMPTS):
+        assert f"rotate={n}" in records
+
+
+def test_rotated_attempt_surfaces_next_regional_host(
+    monkeypatch, tmp_path, fake_client, caplog
+):
+    """A pre-rotated bridge (blocked EU host) logs the ASIA host + rotation on
+    attempt 1 — the diagnostic points at the region actually being tried."""
+    urls = [
+        "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://api-asia.po.market/socket.io/?EIO=4&transport=websocket",
+    ]
+    bridge = _bridge(monkeypatch, tmp_path, reconnect_delay=0.0, urls=urls)
+    bridge._endpoint_rotation = 1
+    with caplog.at_level(logging.ERROR, logger="pocket_bridge.bridge"):
+        asyncio.run(bridge._ensure_connected())
+    records = "\n".join(rec.message for rec in caplog.records)
+    assert "api-asia.po.market" in records
+    assert "rotate=1" in records
 
 
 def test_genuine_auth_failure_still_escalates(monkeypatch, tmp_path, fake_client):

@@ -31,6 +31,7 @@ from .config import (
     load_settings,
     load_stored_session,
     mask_secret,
+    mask_uid,
 )
 from .m20_engine import M20Engine
 from .relay import RelayServer
@@ -47,7 +48,7 @@ async def amain(settings: BridgeSettings) -> None:
         "SSID loaded: format=%s length=%d uid=%s isDemo=%s isOptimized=%s",
         settings.ssid_format,
         len(settings.ssid),
-        settings.uid,
+        mask_uid(settings.uid),
         settings.is_demo,
         settings.auth.get("isOptimized", False),
     )

@@ -193,7 +193,55 @@ but PO ticks frozen.
 
 ---
 
-## 6. Measuring session lifetime (operator timeline)
+## 6. Network checklist: `Connection initialization timed out` / region rotation
+
+**Symptom:** bridge logs `auth_response=PocketOptionError, General error:
+Connection initialization timed out (class=...) urls=[...] rotate=N` and the
+feed stays DEGRADED. Per PART 44 [498], every failure line logs the **exception
+class**, the **regional WS URLs** attempted and the current **endpoint rotation**
+(`rotate=0` on attempt 1 = SDK default order; it increments once per failed
+attempt, so a blocked EU host is bypassed onto `api-asia`/`api-us-south`).
+
+A handshake timeout is **transport, not credential** — the bridge keeps readers
+armed and retries (never `session_expired`). If it *never* heals, work this
+checklist from the host that runs `pocket-bridge`:
+
+1. **Reachability of the regional hosts** (the exact `wss://` hosts from the
+   log line):
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' --max-time 10 https://api-eu.po.market/
+   ```
+   Repeat for `api-asia.po.market`, `api-us-south.po.market`. Expect `200/4xx`
+   — a hard timeout = outbound WebSocket blocked.
+2. **Raw WebSocket handshake** (drives `PocketOptionError ... timed out`):
+   ```bash
+   npx -y wscat -c 'wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket' -x '{"cmd":"hello"}'
+   ```
+3. **DNS + egress path:** `nslookup api-eu.po.market` resolves; no corporate
+   proxy / firewall is selectively blocking `wss://` (check `HTTPS_PROXY`,
+   `NO_PROXY` on the host and in `docker-compose.prod.yml`).
+4. **Egress IP reputation:** if the box is a datacenter/VPS, the broker may
+   filter its IP block. Confirm by reaching PO from a residential/mobile link.
+5. **SDK budget vs. your rotation:** keep `PO_INIT_TIMEOUT` above the SDK
+   default of 60s (see `connection_initialization_timeout_secs` in the bridge's
+   `connecting urls=...` line) so the rotation has time to walk a dead host to
+   a live one instead of aborting.
+6. **Verify the rotation is actually moving** — the log line's `rotate` field
+   must increment across attempts (0 → 1 → 2): a constant `rotate=0` with the
+   env URL list set means the setting is not being read (check
+   `POCKET_OPTION_WS_URLS`).
+7. **Packet drop / idle reaping:** MTU/fragmentation and NAT timeouts on
+   `socket.io` long-poll + websocket — a silent mid-session drop shows up as
+   `channelreceiver(closed)` followed by a reconnect, not a timeout.
+
+Unit coverage: `pocket-bridge/tests/test_connect_handshake.py`
+(`test_init_timeout_logs_exception_class_region_and_rotation`,
+`test_rotated_attempt_surfaces_next_regional_host`,
+`test_endpoints_rotate_between_attempts`).
+
+---
+
+## 7. Measuring session lifetime (operator timeline)
 
 We cannot measure real broker expiry in CI — there is no live account there.
 Use the timestamps the bridge already writes to build the number for your own
@@ -227,7 +275,7 @@ short end.
 
 ---
 
-## 7. Verification commands
+## 8. Verification commands
 
 ```bash
 # Posture (no secret exposed)
@@ -247,7 +295,7 @@ Python → `pocket-bridge/tests/test_credential_login.py`.
 
 ---
 
-## 8. Rollback
+## 9. Rollback
 
 - **Disable the credential tier now:** set `PO_TOS_CONSENT=` and
   `PO_EMAIL_LOGIN=false`, restart. No credential is submitted; the session tier

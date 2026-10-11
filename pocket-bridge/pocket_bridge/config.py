@@ -246,6 +246,20 @@ def mask_secret(value: str, head: int = 8) -> str:
     return s[:head] + "..." if s else "(empty)"
 
 
+def mask_uid(value) -> str:
+    """PART 44 [499] — mask a Pocket Option account id in logs/diagnostics.
+
+    Shows at most the first three digits; the remainder (or every last digit
+    when the id is ≤3 chars) is replaced with ``*``. Accounts never appear in
+    full in any log line, and the result is deterministic for tests:
+    ``138336943 → "138******"``, ``123 → "123*"``.
+    """
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return "(empty)"
+    return s[:3] + "*" * max(1, len(s) - 3)
+
+
 def _fernet():
     """Optional Fernet ring (PO_SESSION_KEY) for encrypting the session file."""
     key = os.getenv("PO_SESSION_KEY", "").strip()
