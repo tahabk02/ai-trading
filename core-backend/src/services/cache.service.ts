@@ -44,6 +44,19 @@ class MemoryStore {
 // ── CacheService ─────────────────────────────────────────────────────────
 
 /**
+ * Keys a cache flush must NEVER delete, because they hold state that cannot be
+ * reconstructed from elsewhere:
+ *   • `trading_signals:stream` — the durable signal log, plus its consumer
+ *     group's PEL. Deleting it discards every signal that had not yet been
+ *     written to Postgres, which is the entire point of the durable transport.
+ *   • keys used by other services sharing this Redis instance.
+ */
+// `otc_forex_` is intentionally NOT protected: it is a price cache that
+// start-up explicitly busts on the line below (flushByPrefix), because stale
+// quotes there are worse than a slow first paint.
+const PROTECTED_KEY_PREFIXES = ["trading_signals:", "__"];
+
+/**
  * CacheService
  *
  * Tries Redis on `connect()`.  If Redis fails after 2 attempts, it silently
@@ -186,20 +199,53 @@ export class CacheService {
   // ----------------------------------------------------------
 
   /**
-   * Flush all cached entries.
-   * - Redis: executes FLUSHALL (async-safe)
-   * - MemoryStore: clears the internal map
-   * Logs the operation for auditability.
+   * Flush all *cache* entries, sparing durable/system keys.
+   *
+   * Redis: scans and deletes everything except PROTECTED_KEY_PREFIXES. This
+   * deliberately does NOT call FLUSHALL: Redis is a SHARED datastore here, and
+   * FLUSHALL also destroys
+   *   • `trading_signals:stream` — the durable signal log and its consumer
+   *     group PEL, i.e. every at-least-once guarantee this system relies on,
+   *     silently wiped on every boot, and
+   *   • the Pub/Sub plumbing plus any other service's keys.
+   * The original FLUSHALL here emptied the durable stream at start-up, which
+   * looked like a healthy boot while destroying un-persisted signals.
+   *
+   * MemoryStore: clears the internal map.
    */
   public async flushAll(): Promise<void> {
     if (this.redis) {
       try {
-        await this.redis.flushall();
-        logger.info(
-          "[CacheService] Redis FLUSHALL executed — all cached entries purged",
-        );
+        let cursor = "0";
+        let removed = 0;
+        do {
+          const result = await this.redis.scan(
+            cursor,
+            "MATCH",
+            "*",
+            "COUNT",
+            250,
+          );
+          cursor = result[0];
+          // Denylist, not allowlist: cache keys are passed in by many callers
+          // with ad-hoc names, so an allowlist would silently miss most of them
+          // and defeat the cache-bust. The durable/system keys below are few,
+          // stable, and must never be touched by a cache flush.
+          const keys: string[] = (result[1] as string[]).filter(
+            (k) =>
+              !PROTECTED_KEY_PREFIXES.some(
+                (p) => k === p || k.startsWith(p),
+              ),
+          );
+          if (keys.length) {
+            removed += await this.redis.del(...keys);
+          }
+        } while (cursor !== "0");
+        logger.info("[CacheService] Cache keys purged (durable data preserved)", {
+          removed,
+        });
       } catch (error) {
-        logger.warn("[CacheService] Redis FLUSHALL failed", {
+        logger.warn("[CacheService] Cache flush failed", {
           error: (error as Error).message,
         });
       }

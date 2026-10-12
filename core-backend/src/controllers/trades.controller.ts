@@ -3,6 +3,14 @@ import { logger } from "../utils/logger";
 import { symbolRegistry } from "../services/symbolRegistry.service";
 import { forexDataService } from "../services/forexData.service";
 import { riskStateService } from "../services/riskState.service";
+import {
+  buildExecutionResponse,
+  executionDryRunEnabled,
+  provenanceFromPriceSource,
+  EXECUTION_PROVENANCE,
+} from "../lib/executionEngine";
+import { recordExecutionAudit } from "../lib/auditLogger";
+import type { RiskRuleSnapshot } from "../lib/auditLogger";
 
 // ── In-memory trade store (replace with DB in production) ──
 interface TradeRecord {
@@ -22,13 +30,57 @@ const tradesStore: TradeRecord[] = [];
 let tradeCounter = 0;
 
 // ── POST /trades — Execute a trade (signal log, STRICT OTC ONLY) ──
+//
+// PART 44 [455] — answers with the UNIFIED execution envelope
+// (`status`/`executionId`/`provenance`/`latencyMs`/`error`, plus the persisted
+// trade under `result`). Every rejection/failure ALSO records an audit entry
+// ([456]) with the active risk rules at decision time.
 export const executeTrade = async (req: Request, res: Response) => {
+  const t0 = Date.now();
+  let cleanSymbol = "";
+  let direction: "CALL" | "PUT" | undefined;
   try {
-    const { symbol, direction, investment, expiration } = req.body as {
+    const body = (req.body ?? {}) as {
       symbol?: string;
       direction?: "CALL" | "PUT";
       investment?: number;
       expiration?: number;
+      /** Optional ops/backtest dry-run override (PART 44 [455]). */
+      dryRun?: boolean;
+    };
+    const { symbol, investment, expiration } = body;
+    direction = body.direction;
+    cleanSymbol = String(symbol ?? "").trim().toUpperCase();
+
+    /** Build + audit + send a REJECTED envelope (HTTP status is the caller's). */
+    const reject = (
+      httpStatus: number,
+      code: string,
+      reason: string,
+      riskRules: RiskRuleSnapshot,
+      extra: Record<string, unknown> = {},
+    ): Response => {
+      const exec = buildExecutionResponse({
+        status: "rejected",
+        provenance: EXECUTION_PROVENANCE.NONE,
+        latencyMs: Date.now() - t0,
+        error: reason,
+      });
+      recordExecutionAudit({
+        source: "trade",
+        symbol: cleanSymbol,
+        direction: direction ?? null,
+        decision: "rejected",
+        status: "rejected",
+        provenance: EXECUTION_PROVENANCE.NONE,
+        executionId: exec.executionId,
+        latencyMs: exec.latencyMs,
+        error: reason,
+        riskRules,
+      });
+      return res
+        .status(httpStatus)
+        .json({ ...exec, code, message: reason, ...extra });
     };
 
     if (
@@ -38,31 +90,35 @@ export const executeTrade = async (req: Request, res: Response) => {
       investment === null ||
       !expiration
     ) {
-      return res.status(400).json({
-        error: "Validation Error",
-        message: "symbol, direction, investment, and expiration are required.",
-      });
+      return reject(
+        400,
+        "validation_error",
+        "symbol, direction, investment, and expiration are required.",
+        { whitelistPassed: false },
+      );
     }
 
-    const cleanSymbol = symbol.trim().toUpperCase();
-
     // ════════════════════════════════════════════════════════════════
-    // STRICT OTC WHITELIST GATE — only the 10 OTC pairs can be traded.
+    // STRICT OTC WHITELIST GATE — only the OTC pairs can be traded.
     // Stocks/crypto/anything else are rejected at this boundary.
     // ════════════════════════════════════════════════════════════════
     if (!symbolRegistry.isValidSymbolSync(cleanSymbol)) {
-      return res.status(400).json({
-        error: "Symbol not allowed",
-        symbol: cleanSymbol,
-        message: `"${cleanSymbol}" is not in the strict OTC forex whitelist. Only the 34 OTC pairs are supported.`,
-      });
+      return reject(
+        400,
+        "symbol_not_allowed",
+        `"${cleanSymbol}" is not in the strict OTC forex whitelist. Only the 34 OTC pairs are supported.`,
+        { whitelistPassed: false },
+        { symbol: cleanSymbol },
+      );
     }
 
     if (direction !== "CALL" && direction !== "PUT") {
-      return res.status(400).json({
-        error: "Validation Error",
-        message: 'direction must be either "CALL" or "PUT".',
-      });
+      return reject(
+        400,
+        "validation_error",
+        'direction must be either "CALL" or "PUT".',
+        { whitelistPassed: true },
+      );
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -75,6 +131,14 @@ export const executeTrade = async (req: Request, res: Response) => {
     const operatorId =
       (req as Request & { user?: { id?: string } }).user?.id ?? "default";
     const riskSnapshot = await riskStateService.evaluateAndEnforce(operatorId);
+    const riskRules: RiskRuleSnapshot = {
+      whitelistPassed: true,
+      killSwitchLocked: riskSnapshot.killSwitchLocked,
+      drawdownPct: riskSnapshot.drawdownPct,
+      maxDailyDrawdownPct: riskSnapshot.maxDailyDrawdownPct,
+      tradesToday: riskSnapshot.tradesToday,
+      lossesToday: riskSnapshot.lossesToday,
+    };
     if (riskSnapshot.killSwitchLocked) {
       logger.error("[trades.controller] Trade BLOCKED by kill switch", {
         symbol: cleanSymbol,
@@ -82,22 +146,25 @@ export const executeTrade = async (req: Request, res: Response) => {
         drawdownPct: riskSnapshot.drawdownPct,
         limit: riskSnapshot.maxDailyDrawdownPct,
       });
-      return res.status(423).json({
-        error: "Kill Switch Engaged",
-        message:
-          riskSnapshot.lockedReason ??
+      return reject(
+        423,
+        "kill_switch_engaged",
+        riskSnapshot.lockedReason ??
           `Daily drawdown ${riskSnapshot.drawdownPct.toFixed(2)}% breached the ${riskSnapshot.maxDailyDrawdownPct}% limit. Trading is locked until reset.`,
-        riskState: {
-          drawdownPct: riskSnapshot.drawdownPct,
-          maxDailyDrawdownPct: riskSnapshot.maxDailyDrawdownPct,
-          equity: riskSnapshot.equity,
-          peakEquity: riskSnapshot.peakEquity,
-          realizedPnl: riskSnapshot.realizedPnl,
-          tradesToday: riskSnapshot.tradesToday,
-          lossesToday: riskSnapshot.lossesToday,
+        riskRules,
+        {
+          riskState: {
+            drawdownPct: riskSnapshot.drawdownPct,
+            maxDailyDrawdownPct: riskSnapshot.maxDailyDrawdownPct,
+            equity: riskSnapshot.equity,
+            peakEquity: riskSnapshot.peakEquity,
+            realizedPnl: riskSnapshot.realizedPnl,
+            tradesToday: riskSnapshot.tradesToday,
+            lossesToday: riskSnapshot.lossesToday,
+          },
+          timestamp: new Date().toISOString(),
         },
-        timestamp: new Date().toISOString(),
-      });
+      );
     }
 
     // ── Dynamic live payout from the symbol registry (ATR-derived) ──
@@ -107,11 +174,27 @@ export const executeTrade = async (req: Request, res: Response) => {
     const dynamicPayout = entry?.payout ?? 92;
 
     // ── Real-time entry price from live OTC spot (no zeros) ──
+    // A HELD print (last known good, served only while every live source is
+    // exhausted) is refused here: an entry price must be a genuinely current
+    // quote, never a carried-over one.
     let entryPrice = 0;
     const spot = await forexDataService.getLiveSpot(cleanSymbol);
-    if (spot.success && spot.price != null) {
+    if (spot.success && spot.price != null && spot.stale !== true) {
       entryPrice = spot.price;
+    } else if (spot.stale === true) {
+      logger.warn("[trades.controller] Refusing held price for trade entry", {
+        symbol: cleanSymbol,
+        priceAgeMs: spot.ageMs ?? null,
+      });
     }
+
+    // [455] Provenance — how the valuation price was sourced (SPEC field).
+    const provenance =
+      entryPrice > 0
+        ? provenanceFromPriceSource(spot.source)
+        : spot.stale === true
+          ? EXECUTION_PROVENANCE.HELD_PRICE
+          : EXECUTION_PROVENANCE.NONE;
 
     tradeCounter++;
     const now = new Date();
@@ -130,20 +213,64 @@ export const executeTrade = async (req: Request, res: Response) => {
       expires_at: expiresAt.toISOString(),
     };
 
-    tradesStore.unshift(trade);
+    const dryRun = executionDryRunEnabled() || body.dryRun === true;
+    if (!dryRun) tradesStore.unshift(trade);
 
-    logger.info("[trades.controller] OTC trade executed", {
-      id: trade.id,
+    const status = dryRun ? "dry_run" : "executed";
+    const exec = buildExecutionResponse({
+      status,
+      provenance,
+      latencyMs: Date.now() - t0,
+      error: null,
+      result: trade,
+    });
+    recordExecutionAudit({
+      source: "trade",
       symbol: cleanSymbol,
       direction,
-      payout: dynamicPayout,
-      entryPrice,
+      timeframe: null,
+      decision: dryRun ? "skipped" : "executed",
+      status,
+      provenance,
+      executionId: exec.executionId,
+      latencyMs: exec.latencyMs,
+      riskRules: { ...riskRules, dryRun },
     });
 
-    return res.status(201).json(trade);
+    logger.info(
+      `[trades.controller] OTC trade ${dryRun ? "dry-run" : "executed"}`,
+      {
+        id: trade.id,
+        executionId: exec.executionId,
+        symbol: cleanSymbol,
+        direction,
+        payout: dynamicPayout,
+        entryPrice,
+        provenance,
+        latencyMs: exec.latencyMs,
+      },
+    );
+
+    return res.status(dryRun ? 200 : 201).json(exec);
   } catch (error) {
     logger.error("[trades.controller] Execution error", { error });
-    return res.status(500).json({ error: "Internal Server Error" });
+    const exec = buildExecutionResponse({
+      status: "failed",
+      latencyMs: Date.now() - t0,
+      error: "Internal Server Error",
+    });
+    recordExecutionAudit({
+      source: "trade",
+      symbol: cleanSymbol,
+      direction: direction ?? null,
+      decision: "rejected",
+      status: "failed",
+      executionId: exec.executionId,
+      latencyMs: exec.latencyMs,
+      error: exec.error,
+      riskRules: {},
+    });
+    return res.status(500).json({ ...exec, error: exec.error });
   }
 };
 

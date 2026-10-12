@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "@/styles/globals.css";
 
-import Script from "next/script";
 import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 import { GlobalErrorBoundary } from "@/components/shared/GlobalErrorBoundary";
 import { HighConfidenceToast } from "@/components/shared/high-confidence-toast";
@@ -63,18 +62,33 @@ export default function RootLayout({
           ZERO-FLASH PRE-PAINT SCRIPTS (blocking, before first paint):
           1. THEME: reads localStorage → stamps class="dark|light" + color-scheme
              on <html>. Deep Charcoal obsidian (#0B0E14) is the default
-             (institutional dark terminal); light mode remains a legacy escape
-             hatch. No white/black flash on load.
+             (institutional dark terminal). No white/black flash on load.
           2. LANGUAGE: reads localStorage → stamps lang + dir on <html>.
              Arabic ("ar") forces full RTL instantly — no layout shift.
           Both scripts are self-contained IIFEs that never throw.
+
+          WHY A RAW <script> AND NOT <Script strategy="beforeInteractive">:
+          `next/script` with beforeInteractive EMITS the markup into the served
+          HTML but DELEGATES execution to Next's own client bootstrap. Nested in
+          a manually-authored <head> that bootstrap is the only thing that ever
+          runs the IIFE, so:
+
+            • with JS blocked (or slow, or a bfcache/extension quirk) the
+              stamp never happens, and
+            • the element is subsequently replaced, so
+              document.getElementById("theme-prepaint") returns null.
+
+          Verified: with `alpha5_theme = "light"` and every /_next/static chunk
+          aborted, <html> still arrived as class="dark" with an EMPTY
+          color-scheme — i.e. a light-mode user got a full dark first paint and
+          was flipped to light only once hydration ran. A raw inline <script>
+          is parsed and executed synchronously before the first paint and has no
+          dependency on the Next runtime, which is exactly the guarantee this
+          block exists to provide. suppressHydrationWarning on <html> is what
+          lets React adopt the class this script stamps.
         */}
-        <Script id="theme-prepaint" strategy="beforeInteractive">
-          {THEME_PREPAINT_SCRIPT}
-        </Script>
-        <Script id="lang-prepaint" strategy="beforeInteractive">
-          {LANG_PREPAINT_SCRIPT}
-        </Script>
+        <script dangerouslySetInnerHTML={{ __html: THEME_PREPAINT_SCRIPT }} />
+        <script dangerouslySetInnerHTML={{ __html: LANG_PREPAINT_SCRIPT }} />
       </head>
       <body className="bg-obsidian dark:bg-obsidian text-slate-100 selection:bg-emerald-500/30 antialiased">
         <ThemeProvider>

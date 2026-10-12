@@ -13,6 +13,8 @@
 
 import { symbolRegistry } from "./symbolRegistry.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { isForexMarketClosed } from "../lib/marketSchedule";
+import { resolveQuoteLiveness } from "../lib/quoteLiveness";
 import { logger } from "../utils/logger";
 
 export interface MarketQuote {
@@ -30,9 +32,40 @@ export interface MarketQuote {
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
+  /** Authoring feed of the newest print (`pocket_option`, `frankfurter`, …). */
+  source: string | null;
+  /** True when the newest entry is a held (continuity) print, not a live one. */
+  stale: boolean;
+  /** Age of the newest genuinely-fresh tick; null = no live print recently. */
+  freshAgeMs: number | null;
+  /** Terminal-facing "this price is NOT live" flag (>15s without a fresh tick). */
+  staleLive: boolean;
+  /**
+   * PART 43.5 [473] — true when this OTC instrument is currently priced by a
+   * non-Pocket-Option market proxy (Frankfurter / ER-API / GitHub / last-known),
+   * i.e. PO is offline for it. Real-forex fallbacks, crypto feeds, market-closed
+   * and genuine PO prints are all NOT this state. Lets every consumer withhold
+   * the OTC verdict/target/execution on the same server-derived truth.
+   */
+  poOffline: boolean;
+  /**
+   * PART 42.1 [421]/[422] — true when this REAL pair's weekly forex market is
+   * closed (Fri ~17:00 → Sun ~17:00 New York). The price is the LAST CLOSE,
+   * never live; the card renders "MARKET CLOSED · last close". OTC/crypto are
+   * 24/7 and always false.
+   */
+  marketClosed: boolean;
 }
 
-const MAX_QUOTES = 40;
+/**
+ * Cap on the enriched snapshot. Must comfortably exceed the union of the
+ * broker universe + the 44 canonical instruments (PART 27): the registry can
+ * carry 150+ entries and, when PO is fully live, every one of them has ticks.
+ * An alphabetical slice(0, 40) used to silently drop the ECB real pairs
+ * (EUR/SEK … USD/CZK sort last), which is exactly the "--" the user saw on
+ * 9 of 10 real cards. 200 keeps every ticking instrument in the payload.
+ */
+const MAX_QUOTES = 200;
 
 /**
  * Build the enriched all-pairs quotes snapshot. Never throws — a registry or
@@ -48,6 +81,24 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
     const out: MarketQuote[] = [];
     for (const q of quotes.slice(0, MAX_QUOTES)) {
       const meta = entries.find((e) => e.symbol === q.symbol);
+      // PART 42.1 — a REAL pair is market-closed on the weekly boundary. While
+      // closed the last close is NEVER live: force staleLive so no downstream
+      // live-freshness gate can treat the carried print as a current quote.
+      const marketClosed =
+        (meta?.assetSubType ?? "otc") === "forex" && isForexMarketClosed();
+      // PART 43.5 [473] — an OTC instrument is live ONLY on a PO-sourced print.
+      // A non-PO market proxy re-served every second must not read as live, and
+      // freshness is measured against the newest PO tick (poFreshAgeMs), not
+      // the any-source tape. A PO-offline OTC card is flagged for withholding.
+      const live = resolveQuoteLiveness({
+        assetSubType: meta?.assetSubType,
+        marketClosed,
+        source: q.source,
+        freshAgeMs: q.freshAgeMs,
+        staleLive: q.staleLive,
+        poFreshAgeMs: q.poFreshAgeMs,
+        poStaleLive: q.poStaleLive,
+      });
       out.push({
         symbol: q.symbol,
         name: meta?.name ?? q.symbol,
@@ -63,6 +114,12 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
         tickCount: q.tickCount,
         lastTickAt: q.lastTickAt,
         ageMs: q.ageMs,
+        source: q.source,
+        stale: q.stale,
+        freshAgeMs: live.freshAgeMs,
+        staleLive: live.staleLive,
+        poOffline: live.poOffline,
+        marketClosed,
       });
     }
     return out;

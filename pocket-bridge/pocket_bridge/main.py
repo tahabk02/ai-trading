@@ -27,9 +27,11 @@ from typing import Dict
 from .bridge import PocketOptionBridge
 from .config import (
     BridgeSettings,
+    credential_login_status,
     load_settings,
     load_stored_session,
     mask_secret,
+    mask_uid,
 )
 from .m20_engine import M20Engine
 from .relay import RelayServer
@@ -46,7 +48,7 @@ async def amain(settings: BridgeSettings) -> None:
         "SSID loaded: format=%s length=%d uid=%s isDemo=%s isOptimized=%s",
         settings.ssid_format,
         len(settings.ssid),
-        settings.uid,
+        mask_uid(settings.uid),
         settings.is_demo,
         settings.auth.get("isOptimized", False),
     )
@@ -211,13 +213,24 @@ async def amain(settings: BridgeSettings) -> None:
                     "symbols": sorted(bridge._subs),
                     "session_expired": bridge.session_expired,
                     "session_file": bool(stored_session.exists),
-                    "session_age_days": round(stored_session.age_days, 1),
+                    # `age_days` is `inf` when capturedAt is missing or
+                    # unparseable; `round(inf, 1)` stays `inf` and `json.dumps`
+                    # would then emit the non-standard `Infinity` literal,
+                    # making this health payload unparseable. Report None so the
+                    # "age unknown -> treat as expired" state is explicit.
+                    "session_age_days": (
+                        None
+                        if stored_session.age_days == float("inf")
+                        else round(stored_session.age_days, 1)
+                    ),
                     "cookies": len(stored_session.cookies),
                     "connect_epoch": bridge.connect_epoch,
                     "tick_seq": bridge._tick_seq,
                     "subscribed_symbols": len(bridge._subs),
                     "connected_at": bridge.connected_at,
                     "uptime_s": uptime_s,
+                    # Last-resort credential-login availability (opt-in, masked).
+                    **credential_login_status(),
                 }
             )
             self.send_response(200)

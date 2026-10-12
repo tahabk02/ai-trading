@@ -22,7 +22,17 @@
  * - Production / other remote deploys (via NEXT_PUBLIC_* env vars)
  */
 
-const isBrowser = typeof window !== "undefined";
+import { isStaleTunnelOverride, readPublicEnv } from "./getBaseUrl";
+
+function isBrowser(): boolean {
+  return typeof window !== "undefined";
+}
+
+/** A usable env override: non-empty and not a dead/stale tunnel host. */
+function usable(raw: string | undefined): string | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  return isStaleTunnelOverride(raw) ? undefined : raw.trim();
+}
 
 /**
  * Robust local-host detection. Any hostname that is NOT local is treated as a
@@ -61,9 +71,17 @@ function isDevTunnelHostname(hostname: string): boolean {
 
 const getBaseUrls = () => {
   // ── 1. Explicit env overrides (highest priority) ──
-  const envApi = process.env.NEXT_PUBLIC_API_URL;
-  const envWs = process.env.NEXT_PUBLIC_WS_URL;
-  const envAi = process.env.NEXT_PUBLIC_AI_ENGINE_URL;
+  // A dead/stale tunnel host is IGNORED (isStaleTunnelOverride): a reissued or
+  // expired Dev Tunnel must never win over the local ports, which is exactly
+  // how a dead `NEXT_PUBLIC_WS_URL` used to break every request with
+  // ERR_NAME_NOT_RESOLVED.
+  //
+  // Read via readPublicEnv(): these are module-load reads (`urls` is a module
+  // constant), so a raw `process.env.X` here would throw a ReferenceError in
+  // any runtime where `process` is not declared.
+  const envApi = usable(readPublicEnv("NEXT_PUBLIC_API_URL"));
+  const envWs = usable(readPublicEnv("NEXT_PUBLIC_WS_URL"));
+  const envAi = usable(readPublicEnv("NEXT_PUBLIC_AI_ENGINE_URL"));
 
   if (envApi || envWs || envAi) {
     return {
@@ -74,7 +92,7 @@ const getBaseUrls = () => {
     };
   }
 
-  if (isBrowser) {
+  if (isBrowser()) {
     // ── ABSOLUTE RELATIVE PATHS — ZERO CROSS-ORIGIN REQUESTS ──
     // The browser talks ONLY to the Next.js origin via relative paths:
     //   /api/v1  → Next.js rewrite → http://localhost:4000/api/v1
@@ -102,6 +120,6 @@ export const urls = getBaseUrls();
 
 /** True when the app is being accessed through a Dev Tunnel / remote origin. */
 export function isRemoteTunnel(): boolean {
-  if (!isBrowser) return false;
+  if (!isBrowser()) return false;
   return isRemoteHostname(window.location.hostname);
 }

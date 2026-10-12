@@ -26,6 +26,8 @@ ZERO SYNTHETIC FALLBACKS. ZERO FAKE DATA. ZERO DEMO MODE.
 - Target prices derived from real ATR with immediate expiry logic.
 """
 
+import os
+import hashlib
 import numpy as np
 import pandas as pd
 import structlog
@@ -35,8 +37,8 @@ import time
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple, Callable
+from datetime import UTC, datetime
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
@@ -61,6 +63,8 @@ from .signal_gatekeeper import (
     TIER_LABELS,
     resolve_tier,
     is_dispatchable_tier,
+    MIN_EXECUTABLE_TIER,
+    CONFLUENCE_DISPATCH_TIER,
 )
 
 logger = structlog.get_logger(__name__)
@@ -68,6 +72,31 @@ logger = structlog.get_logger(__name__)
 _CPU_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="ml_train",
+)
+
+# ── INFERENCE EXECUTOR ISOLATION (2026-09-30) ─────────────────────────────
+# Training and interactive inference previously shared the SAME two-worker pool
+# above. RF warmup trains WARMUP_CONCURRENCY symbols across those two workers,
+# so a single warmup burst saturated the pool and /predict's
+#   run_in_executor(_CPU_EXECUTOR, evaluate_quant_matrix | evaluate_live_tick_signal)
+# — which had NO timeout — queued behind it indefinitely. Measured /predict
+# latencies of 371s / 386s / 388s, growing monotonically with queue depth while
+# the event loop itself sat idle (the wait was in the executor queue, not the
+# loop). The 150ms INFERENCE_BUDGET_MS guard only covered the RF corroborator
+# step, never these two structural steps.
+#
+# Inference now owns its own pool so a training burst can never starve the
+# request path, and admission is bounded so a saturated pool degrades fast to
+# the fast structural verdict instead of hanging the HTTP response.
+_INFERENCE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=max(2, min(8, os.cpu_count() or 2)),
+    thread_name_prefix="ml_infer",
+)
+
+# Bounded admission: how long a request-path step may wait for a worker before
+# the caller degrades. 0 restores the legacy unbounded wait.
+INFERENCE_QUEUE_TIMEOUT_S = float(
+    os.getenv("AI_ENGINE_INFERENCE_QUEUE_TIMEOUT_S", "5")
 )
 
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "saved_models"
@@ -98,6 +127,142 @@ MIN_TRAINING_CANDLES = 85
 # back-to-back runs. A small fixed pool keeps warmup fast while leaving the
 # event loop breathing.
 _RF_N_JOBS = 2
+
+# ── INTERACTIVE INFERENCE BUDGET (non-blocking fallback, P1-2026-09-24) ──
+# The RandomForest corroborator is enhancement-only: a genuinely slow cold-cache
+# train must NEVER hold the /predict HTTP response hostage (the UI terminal's
+# "Exécution de l'inférence ML haute vitesse..." spinner previously froze while
+# the FastAPI handler waited inside `asyncio.wait_for(predict_with_rf(...),
+# 120s)`). Every heavy executor step (feature build on cache hit, feature+build+
+# train on cache miss) is bounded by INFERENCE_BUDGET_MS (default 150ms, env
+# AI_ENGINE_INFERENCE_BUDGET_MS). When the budget is exceeded, predict_with_rf
+# raises InferenceBudgetExceeded and the caller (signals.py) ships the fast
+# structural verdict (real confluence-derived data, NO fabricated signal) while
+# the background train finishes asynchronously and warms the model cache for the
+# next call. Set to 0 to disable the bound (exact legacy behavior).
+INFERENCE_BUDGET_MS = float(os.getenv("AI_ENGINE_INFERENCE_BUDGET_MS", "150"))
+
+
+class InferenceBudgetExceeded(Exception):
+    """Raised when RF corroboration cannot finish within the interactive
+    budget. Carries the elapsed/at-budget diagnostics for the caller to log +
+    surface as `inference_fallback: "ml_budget_exceeded"`. NOT an error in the
+    verdict — the authoritative confluence signal was already resolved."""
+
+    def __init__(
+        self,
+        symbol: str,
+        timeframe: str,
+        budget_ms: float,
+        elapsed_ms: float,
+    ) -> None:
+        super().__init__(
+            f"ML inference exceeded the {budget_ms:.0f}ms budget "
+            f"({elapsed_ms:.0f}ms elapsed) for {symbol}@{timeframe}"
+        )
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.budget_ms = budget_ms
+        self.elapsed_ms = elapsed_ms
+
+
+class InferenceAdmissionTimeout(InferenceBudgetExceeded):
+    """Raised when the INFERENCE executor cannot admit a request-path step
+    within INFERENCE_QUEUE_TIMEOUT_S.
+
+    A distinct type from the RF budget breach (which is about compute cost) so
+    the caller can label `inference_fallback` honestly: this is executor
+    saturation, not a slow model. Same non-fatal contract — the authoritative
+    confluence verdict is resolved by the structural step, which is exactly the
+    work that could not be admitted.
+    """
+
+    def __init__(self, symbol: str, timeframe: str, budget_s: float) -> None:
+        super().__init__(
+            symbol,
+            timeframe,
+            budget_ms=budget_s * 1000.0,
+            elapsed_ms=budget_s * 1000.0,
+        )
+        self.budget_s = budget_s
+
+
+async def run_inference(fn, *args, timeout_s: Optional[float] = None):
+    """Run a request-path CPU step on the INFERENCE pool with a bounded wait.
+
+    `evaluate_quant_matrix` / `evaluate_live_tick_signal` are the two structural
+    steps every /predict and /tick-signal request depends on. Submitting them to
+    the shared training pool is what produced the multi-minute stall; this
+    helper is the only sanctioned way to reach them, so the isolation cannot be
+    silently undone by a future call site.
+
+    Raises:
+        InferenceAdmissionTimeout: the pool could not admit the work within the
+            bound. Callers degrade to the fast structural verdict / 503 rather
+            than blocking the HTTP response.
+    """
+    loop = asyncio.get_event_loop()
+    fut = loop.run_in_executor(_INFERENCE_EXECUTOR, fn, *args)
+    bound = INFERENCE_QUEUE_TIMEOUT_S if timeout_s is None else timeout_s
+    if bound <= 0:
+        return await fut
+    try:
+        return await asyncio.wait_for(fut, timeout=bound)
+    except asyncio.TimeoutError as exc:
+        # The worker may still finish; cancelling is best-effort and only stops
+        # a result nobody will read.
+        fut.cancel()
+        raise InferenceAdmissionTimeout("", "", bound) from exc
+
+
+async def _run_with_budget(fut: Any, symbol: str, timeframe: str) -> Any:
+    """Await an executor future for at most INFERENCE_BUDGET_MS (0 = unbounded).
+
+    On timeout the underlying computation is SHIELDED — it keeps running in the
+    _CPU_EXECUTOR thread (never cancelled, never blocking the event loop) and
+    warms the cache via the done-callback attached by the caller.
+    """
+    if INFERENCE_BUDGET_MS <= 0:
+        return await fut
+    t0 = time.perf_counter()
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(fut), timeout=INFERENCE_BUDGET_MS
+        )
+    except asyncio.TimeoutError:
+        raise InferenceBudgetExceeded(
+            symbol=symbol,
+            timeframe=timeframe,
+            budget_ms=INFERENCE_BUDGET_MS,
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+        ) from None
+
+
+def _background_model_warm(
+    symbol: str, timeframe: str, fingerprint: str
+) -> Callable[[Any], None]:
+    """Done-callback for a budget-exceeded cold train: cache the finished model
+    once the executor thread completes, so the NEXT /predict for this exact
+    candle window ships the genuine RF numbers instead of another
+    budget-fallback. The fingerprint is carried through so the warm lands on
+    the key the caller is actually waiting on."""
+
+    def _on_done(fut: Any) -> None:
+        try:
+            model, scaler, accuracy, _df = fut.result()
+        except Exception as exc:  # noqa: BLE001 — background warm must never crash
+            logger.warning(
+                "Background ML train failed",
+                symbol=symbol, timeframe=timeframe, error=str(exc),
+            )
+            return
+        _model_cache.set(symbol, timeframe, model, scaler, accuracy, fingerprint)
+        logger.info(
+            "Background ML train COMPLETED and warmed the model cache",
+            symbol=symbol, timeframe=timeframe,
+        )
+
+    return _on_done
 
 
 def _price_precision(symbol: str) -> int:
@@ -215,15 +380,66 @@ def pad_candles_if_needed(candles: list, target_count: int = 85) -> list:
 # =====================================================================
 
 
+def _data_fingerprint(
+    closes: np.ndarray,
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    volumes: np.ndarray,
+) -> str:
+    """Stable digest of the actual training window.
+
+    The cache key must include WHICH candles a model was trained on. Keying on
+    ``{symbol}:{timeframe}`` alone let any earlier payload poison a later one:
+    two unrelated candle sets for EUR/USD 1h collided, the first one to train
+    won the key, and the second request was scored with the wrong model (a
+    perfect-confluence tape fell from 98.7 to 96.6 purely because an unrelated
+    request had run first). A verdict must reflect the candles in ITS request.
+
+    Hashing all five OHLCV series at full float precision is cheap next to the
+    feature build that follows it, and guarantees an exact window match. The
+    digest is taken over the raw bytes so it cannot collide on rounding.
+
+    ``opens`` must be included: the feature path feeds it to
+    ``volume_price_confirmation`` and ``candlestick_pattern_score``, both of
+    which move ``book_confirm`` and therefore the final score. A payload that
+    kept (C,H,L,V) but changed its opens is a DIFFERENT window.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for arr in (closes, opens, highs, lows, volumes):
+        # uint8 view of the float64 buffer; NaN/inf are rejected upstream so
+        # there is no canonicalisation to worry about here.
+        h.update(np.ascontiguousarray(arr, dtype=np.float64).view(np.uint8))
+    return h.hexdigest()
+
+
 class ModelCache:
     """
     Thread-safe LRU cache for trained ML models with TTL-based revalidation.
-    
-    - Key: ``{symbol}:{timeframe}`` (e.g. "AAPL:1d")
-    - Value: (model, scaler, accuracy, feature_columns_hash, trained_at_timestamp)
-    - Cache size: max 256 entries (LRU eviction)
+
+    TWO TIERS, because a fingerprint over the whole rolling window makes every
+    new candle a brand-new key:
+
+      tier 1 (exact)  ``{symbol}:{timeframe}:{fingerprint}``
+          The only entry allowed to serve a verdict for THIS window. Never
+          poisoned: a model is stored under the digest of the candles it was
+          trained on.
+
+      tier 2 (coarse) ``{symbol}:{timeframe}:coarse``
+          Most-recent model for the instrument, used ONLY to warm a cold exact
+          key (e.g. as an ML feature input) and never as the verdict source.
+          A coarse entry is NOT a correctness surface, so serving it as a
+          verdict is deliberately impossible: ``get`` never falls back to it.
+
+    The split matters because production polls advance the window on every new
+    bar, so a single tier would either serve a stale model (the original
+    cross-contamination bug) or retrain on every single request. Tier 1 alone
+    was correct but effectively a cache with a 0% hit rate.
+
+    - Value: (model, scaler, accuracy, fingerprint, trained_at_timestamp)
+    - Cache size: max 256 exact entries (LRU eviction)
     - TTL: 4 hours (re-trains on next request after expiry)
-    - Per-key lock: prevents concurrent retraining of the same symbol/timeframe
+    - Per-key lock: prevents concurrent retraining of the same window
     """
 
     MAX_SIZE = 256
@@ -232,7 +448,17 @@ class ModelCache:
     def __init__(self):
         self._lock = threading.Lock()
         self._key_locks: Dict[str, threading.Lock] = {}
-        self._cache: OrderedDict[str, Tuple[Any, Any, float, str, float]] = OrderedDict()
+        self._cache: "OrderedDict[str, Tuple[Any, Any, float, str, float]]" = OrderedDict()
+        # Tier 2: one most-recent entry per {symbol}:{timeframe}.
+        self._coarse: Dict[str, Tuple[Any, Any, float, str, float]] = {}
+
+    @staticmethod
+    def _key(symbol: str, timeframe: str, fingerprint: Optional[str]) -> str:
+        return f"{symbol}:{timeframe}:{fingerprint or 'nofp'}"
+
+    @staticmethod
+    def _coarse_key(symbol: str, timeframe: str) -> str:
+        return f"{symbol}:{timeframe}"
 
     def _get_key_lock(self, key: str) -> threading.Lock:
         """Get or create a per-key lock for thread-safe training."""
@@ -241,56 +467,101 @@ class ModelCache:
                 self._key_locks[key] = threading.Lock()
             return self._key_locks[key]
 
-    def get(self, symbol: str, timeframe: str) -> Optional[Tuple[Any, Any, float]]:
+    def get(
+        self, symbol: str, timeframe: str, fingerprint: Optional[str] = None
+    ) -> Optional[Tuple[Any, Any, float]]:
         """
-        Return cached (model, scaler, accuracy) if valid.
-        Returns None if missing or TTL expired.
+        Return cached (model, scaler, accuracy) for THIS window only.
+
+        Returns None if missing or TTL expired. There is deliberately NO coarse
+        fallback here: a verdict must never come from a model trained on
+        different candles. Use ``get_coarse`` for the explicit warm path.
         """
-        key = f"{symbol}:{timeframe}"
+        key = self._key(symbol, timeframe, fingerprint)
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
                 return None
-            model, scaler, accuracy, feats_hash, trained_at = entry
+            model, scaler, accuracy, _stored_fp, trained_at = entry
             if time.time() - trained_at > self.TTL_SECONDS:
-                # TTL expired — remove and return None
                 del self._cache[key]
                 logger.info("Model cache TTL expired", key=key, age_seconds=time.time() - trained_at)
                 return None
-            # Move to end (most recently used)
             self._cache.move_to_end(key)
             return model, scaler, accuracy
 
-    def set(self, symbol: str, timeframe: str, model: Any, scaler: Any, accuracy: float) -> None:
-        """Store trained model in cache."""
-        key = f"{symbol}:{timeframe}"
+    def get_coarse(
+        self, symbol: str, timeframe: str
+    ) -> Optional[Tuple[Any, Any, float]]:
+        """
+        Most-recent model for the instrument, regardless of window.
+
+        WARNING: this model was trained on DIFFERENT candles than the caller's.
+        It is only safe as a feature/warm input, never as the verdict source.
+        """
+        ckey = self._coarse_key(symbol, timeframe)
         with self._lock:
-            # Evict oldest if at capacity
+            entry = self._coarse.get(ckey)
+            if entry is None:
+                return None
+            model, scaler, accuracy, _stored_fp, trained_at = entry
+            if time.time() - trained_at > self.TTL_SECONDS:
+                del self._coarse[ckey]
+                logger.info("Coarse model cache TTL expired", key=ckey)
+                return None
+            return model, scaler, accuracy
+
+    def set(
+        self,
+        symbol: str,
+        timeframe: str,
+        model: Any,
+        scaler: Any,
+        accuracy: float,
+        fingerprint: Optional[str] = None,
+    ) -> None:
+        """Store trained model under its exact training window, and mirror it
+        into the coarse tier as the instrument's most-recent model."""
+        key = self._key(symbol, timeframe, fingerprint)
+        stamp = time.time()
+        stored_fp = fingerprint or ""
+        with self._lock:
             while len(self._cache) >= self.MAX_SIZE:
                 self._cache.popitem(last=False)
-            self._cache[key] = (model, scaler, accuracy, "", time.time())
+            self._cache[key] = (model, scaler, accuracy, stored_fp, stamp)
+            self._coarse[self._coarse_key(symbol, timeframe)] = (
+                model, scaler, accuracy, stored_fp, stamp,
+            )
 
-    def acquire_train_lock(self, symbol: str, timeframe: str) -> threading.Lock:
+    def acquire_train_lock(
+        self, symbol: str, timeframe: str, fingerprint: Optional[str] = None
+    ) -> threading.Lock:
         """
-        Acquire a per-key lock so only one thread trains for this symbol/timeframe.
+        Acquire a per-key lock so only one thread trains for this window.
         Usage::
-            lock = cache.acquire_train_lock(symbol, timeframe)
+            lock = cache.acquire_train_lock(symbol, timeframe, fingerprint)
             with lock:
                 # double-check cache inside the lock
                 ...
         """
-        return self._get_key_lock(f"{symbol}:{timeframe}")
+        return self._get_key_lock(self._key(symbol, timeframe, fingerprint))
 
     def clear(self) -> None:
-        """Clear entire cache (used on startup / cache-bust)."""
+        """Clear both tiers (used on startup / cache-bust)."""
         with self._lock:
             self._cache.clear()
+            self._coarse.clear()
             logger.info("ModelCache cleared")
 
     @property
     def size(self) -> int:
         with self._lock:
             return len(self._cache)
+
+    @property
+    def coarse_size(self) -> int:
+        with self._lock:
+            return len(self._coarse)
 
 
 # Global singleton
@@ -868,6 +1139,10 @@ async def predict_with_rf(
         return await _predict_with_rf_impl(
             symbol, timeframe, candles, force_retrain, live_price, bid, ask, t0
         )
+    except InferenceBudgetExceeded:
+        # NOT an error — the caller must serve the fast structural verdict and
+        # keep the HTTP response interactive. Never wrapped/re-tagged.
+        raise
     except ValueError as ve:
         # Shape mismatches, NaN / inf features, insufficient bars, empty DF
         elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -925,9 +1200,24 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
 
     cp = float(live_price)
 
-    # ── Model cache lookup ──
+    # ── Model cache lookup (budget-bounded, non-blocking) ──
+    # A healthy cache hit + feature build normally lands ~10-50ms; a cold-cache
+    # train can exceed the interactive budget. BOTH heavy executor steps are
+    # wrapped in INFERENCE_BUDGET_MS so a cold /predict NEVER holds the HTTP
+    # response hostage: the caller (signals.py) serves the fast structural
+    # (confluence-derived) verdict without RF enrichment, and a budget-exceeded
+    # train keeps running in the background to warm the cache for the next call.
+    # The cache key must carry the training window, not just symbol+timeframe:
+    # two unrelated candle sets for one symbol/timeframe must never share a
+    # model, or an earlier request silently scores a later one.
+    fingerprint = _data_fingerprint(closes, opens, highs, lows, volumes)
+
     loop = asyncio.get_event_loop()
-    cached = _model_cache.get(symbol, timeframe) if not force_retrain else None
+    cached = (
+        _model_cache.get(symbol, timeframe, fingerprint)
+        if not force_retrain
+        else None
+    )
 
     if cached is not None:
         model, scaler, accuracy = cached
@@ -936,33 +1226,55 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
         # Features are still engineered fresh from the forwarded candles — the
         # heavy pandas/numpy step runs in the executor so the event loop stays
         # free to read/answer incoming requests.
-        df = await loop.run_in_executor(
-            _CPU_EXECUTOR,
-            _engineer_features_only,
-            closes, highs, lows, volumes, timeframe,
+        df = await _run_with_budget(
+            loop.run_in_executor(
+                _CPU_EXECUTOR,
+                _engineer_features_only,
+                closes, highs, lows, volumes, timeframe,
+            ),
+            symbol,
+            timeframe,
         )
     else:
         cache_hit = False
         logger.info("Model cache MISS — training", symbol=symbol, timeframe=timeframe, force_retrain=force_retrain)
-        cached2 = _model_cache.get(symbol, timeframe) if not force_retrain else None
+        cached2 = (
+            _model_cache.get(symbol, timeframe, fingerprint)
+            if not force_retrain
+            else None
+        )
         if cached2 is not None:
             model, scaler, accuracy = cached2
             cache_hit = True
-            df = await loop.run_in_executor(
-                _CPU_EXECUTOR,
-                _engineer_features_only,
-                closes, highs, lows, volumes, timeframe,
+            df = await _run_with_budget(
+                loop.run_in_executor(
+                    _CPU_EXECUTOR,
+                    _engineer_features_only,
+                    closes, highs, lows, volumes, timeframe,
+                ),
+                symbol,
+                timeframe,
             )
         else:
-            # Feature engineering AND training both run off the event loop (a
-            # single executor submission) — warm-up and live train never block
-            # request servicing.
-            model, scaler, accuracy, df = await loop.run_in_executor(
+            # Feature engineering AND training run off the event loop (a single
+            # executor submission). The train future is SHIELDED: if it exceeds
+            # the 150ms interactive budget we raise InferenceBudgetExceeded and
+            # the done-callback below warms the model cache when the thread
+            # finishes — the next call ships the genuine RF numbers.
+            train_fut = loop.run_in_executor(
                 _CPU_EXECUTOR,
                 _feature_and_train,
                 symbol, closes, highs, lows, volumes, timeframe,
             )
-            _model_cache.set(symbol, timeframe, model, scaler, accuracy)
+            train_fut.add_done_callback(
+                _background_model_warm(symbol, timeframe, fingerprint)
+            )
+            model, scaler, accuracy, df = await _run_with_budget(
+                train_fut, symbol, timeframe
+            )
+            _model_cache.set(
+                symbol, timeframe, model, scaler, accuracy, fingerprint
+            )
             cache_hit = False
 
     # ── Inference on latest feature vector ──
@@ -1292,7 +1604,8 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
     # the real multiplicative confluence strength. No secondary pathway /
     # override.
     confidence_gated = bool(sig in ("BUY", "SELL") and (
-        conf < dynamic_floor or not is_dispatchable_tier(confluence_gate)
+        conf < dynamic_floor
+        or not is_dispatchable_tier(confluence_gate, CONFLUENCE_DISPATCH_TIER)
     ))
     gated_direction: Optional[str] = sig if confidence_gated else None
     if confidence_gated:
@@ -1306,11 +1619,27 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
     if confidence_gated:
         market_waiting = True
         waiting_reason = "CONFLUENCE_BELOW_THERMAL"
-        waiting_detail = (
-            f"Direction {gated_direction} kept below thermal: 10-book multiplicative "
-            f"confluence {conf:.2f}% < {dynamic_floor:.1f}% thermal gate "
-            f"(market_stress={market_stress:.2f}; gate={confluence_gate})"
-        )
+        # Two distinct causes share this flag; the old single message asserted
+        # the sub-thermal one even when the tier demotion was the real reason
+        # (conf cleared the floor but pillars capped the dispatch tier).
+        _blockers = [str(b) for b in (book.confluence.get("blockers") or [])]
+        _blocker_txt = ", ".join(_blockers) if _blockers else "none"
+        _books = f"{book.aligned_count}/{book.active_count} active books aligned"
+        if conf < dynamic_floor:
+            waiting_detail = (
+                f"Direction {gated_direction} kept below thermal: multiplicative "
+                f"confluence {conf:.2f}% < {dynamic_floor:.1f}% thermal gate "
+                f"({_books}; market_stress={market_stress:.2f}; "
+                f"gate={confluence_gate}; blockers: {_blocker_txt})"
+            )
+        else:
+            waiting_detail = (
+                f"Direction {gated_direction} cleared the {dynamic_floor:.1f}% "
+                f"thermal gate at {conf:.2f}% ({_books}) but incomplete evidence "
+                f"pillars cap the dispatch tier at {confluence_gate}, below the "
+                f"{MIN_EXECUTABLE_TIER} bar (market_stress={market_stress:.2f}; "
+                f"blockers: {_blocker_txt})"
+            )
     else:
         market_waiting = False
         waiting_reason = None
@@ -1400,7 +1729,7 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
             "buy": bool(mom_confirmation["buy"]),
             "sell": bool(mom_confirmation["sell"]),
         },
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     if cp > 0:

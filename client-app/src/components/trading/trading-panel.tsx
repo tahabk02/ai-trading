@@ -7,6 +7,7 @@ import {
   stopRiskPolling,
   realtimeAggregator,
 } from "@/store/useTradingStore";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 import { useLangContext } from "@/hooks/useLangContext";
 import { useSocket } from "@/hooks/useSocket";
 import {
@@ -31,6 +32,9 @@ import {
   buildSignalView,
   SIGNAL_CONFIDENCE_THRESHOLD,
 } from "@/lib/realtimeCandleAggregator";
+import { expirySelectorState } from "@/lib/expirySelection";
+import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
+import { isPoOfflineOtc } from "@/lib/quoteProvenance";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
 // Mirrors the backend PO expiration whitelist exactly (seconds). The chart
@@ -74,14 +78,30 @@ function lastPriceUpdateShort(iso: string | null | undefined): string {
   }).format(parsed);
 }
 
-export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
-  stalePrice = false,
+/**
+ * `stalePrice` is REQUIRED, not optional-with-a-default.
+ *
+ * `streamLive` below is derived as `socketConnected && currentPrice > 0 && !stalePrice`.
+ * With an optional prop defaulting to `false`, omitting it makes `!stalePrice`
+ * permanently true and the panel goes blind to a quiet tape — the execution
+ * buttons would light up on a dead feed. Making it required turns that from a
+ * silent runtime hazard into a compile error, so the Pro page cannot forget it.
+ * There is no safe default here: "assume the feed is fresh" is the one default
+ * that fails toward firing a live order on stale data.
+ */
+export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
+  stalePrice,
 }) => {
   const [isMounted, setIsMounted] = useState(false);
   const { t, rtl } = useLangContext();
   const { connected: socketConnected } = useSocket();
   const activeSymbol = useTradingStore((s) => s.activeSymbol);
   const currentPrice = useTradingStore((s) => s.currentPrice);
+  // PART 43.4 [469] — for an OTC pair priced by a NON-PO feed the market proxy
+  // is not a tradeable execution price: the panel shows "---" and names the
+  // state. The source comes from the same per-symbol quote map the card uses.
+  const activeQuote = useMarketTerminalStore((s) => s.quotes[activeSymbol]);
+  const poOffline = isPoOfflineOtc(activeSymbol, activeQuote ?? null);
   const feedStatus = useTradingStore((s) => s.feedStatus);
   const lastPriceUpdate = useTradingStore((s) => s.lastPriceUpdate);
   const predictionData = useTradingStore((s) => s.predictionData);
@@ -205,7 +225,29 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
   // exactly like a disconnected stream — every trade button locks and the
   // signal badge switches to "Waiting for Real-time Tick".
   const streamLive =
-    socketConnected && currentPrice > 0 && !stalePrice;
+    socketConnected && currentPrice > 0 && !stalePrice && !poOffline;
+
+  // PART 24 [161]/[162] — SELECTION IS NEVER GATED. The grid reports the
+  // engine's regime/tier + bucket-timing state; it never enforces it. A
+  // sub-executable tier or a too_late landing used to disable EVERY option,
+  // which deadlocked the operator: they could not switch to a horizon that
+  // would clear the bar. The only remaining lock is `isTradeActive` — a
+  // transaction lock on an in-flight dispatch, categorically different from a
+  // market-state gate.
+  const expirySel = expirySelectorState(
+    (predictionData as { tier?: string | null } | null)?.tier ?? null,
+    (predictionData as { suppressed_reason?: string | null } | null)
+      ?.suppressed_reason ?? null,
+    chartWindowSeconds,
+    Date.now(),
+    TIMER_OPTIONS,
+    MIN_EXECUTABLE_TIER,
+  );
+  const expiryBySeconds = new Map(
+    expirySel.options.map((o) => [o.seconds, o]),
+  );
+  // Per-horizon status for the SELECTED expiry only.
+  const selectedExpiryState = expiryBySeconds.get(expirationSeconds) ?? null;
 
   const handleCall = useCallback(() => executeTrade("CALL"), [executeTrade]);
   const handlePut = useCallback(() => executeTrade("PUT"), [executeTrade]);
@@ -217,8 +259,33 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
   }
 
   return (
+    /*
+     * THE PANEL ROOT IS **NOT** A SCROLLPORT.
+     *
+     * Sticky resolves against the NEAREST SCROLL CONTAINER, so this root's
+     * overflow used to decide where CALL/PUT pinned themselves. Two measured
+     * bugs came from that:
+     *
+     *   1. `overflow-hidden` — a scroll CONTAINER with zero scroll range. The
+     *      footer's `sticky bottom-0` pinned to a box that could never scroll,
+     *      not to the rail. Measured: the footer sat 93px BELOW the rail's
+     *      visible bottom edge and `elementFromPoint` at PUT's centre hit the
+     *      status row behind it — CALL/PUT were visible but NOT clickable.
+     *   2. `overflow-y-auto` — fixed (1) but created the nested-scrollbar
+     *      failure: the rail scrolled 208px while containing a panel that
+     *      independently scrolled 136px. A scrollbar inside a scrollbar is a
+     *      real pointer/wheel hazard.
+     *
+     * So the root is a plain box: no vertical overflow at all, and
+     * `overflow-clip` (NOT `overflow-hidden`) purely for the rounded-corner
+     * clip. `overflow: clip` is the one overflow value that clips without
+     * BECOMING a scroll container, so it leaves the footer's sticky resolving
+     * against the operator rail — the single outer scrollport — instead of
+     * capturing it locally. Do not "fix" the radius by switching this to
+     * `hidden`.
+     */
     <div
-      className="bg-obsidian border border-slate-800/80 rounded-2xl overflow-hidden shadow-2xl shadow-black/40 flex flex-col transition-colors duration-200 max-w-full"
+      className="bg-obsidian border border-slate-800/80 rounded-2xl overflow-clip shadow-2xl shadow-black/40 flex flex-col transition-colors duration-200 max-w-full"
       dir={rtl ? "rtl" : "ltr"}
     >
       {/* Header */}
@@ -239,10 +306,20 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
           <span className="text-[9px] sm:text-[10px] text-slate-500 uppercase font-bold tracking-wider">
             {t("price")}
           </span>
-          <span className="text-xs sm:text-sm text-white font-bold font-mono tabular-nums">
-            {currentPrice > 0
-              ? `$${formatPairPrice(currentPrice, activeSymbol)}`
-              : "---"}
+          <span className="flex items-center gap-1.5 min-w-0">
+            {poOffline && (
+              <span
+                data-testid="panel-po-offline-marker"
+                className="text-[9px] sm:text-[10px] text-amber-400 font-bold uppercase tracking-wider whitespace-nowrap"
+              >
+                PO OFFLINE
+              </span>
+            )}
+            <span className="text-xs sm:text-sm text-white font-bold font-mono tabular-nums">
+              {currentPrice > 0 && !poOffline
+                ? `$${formatPairPrice(currentPrice, activeSymbol)}`
+                : "---"}
+            </span>
           </span>
         </div>
       </div>
@@ -252,16 +329,28 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
         <div
           className={cn(
             "flex items-center justify-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl font-bold text-xs sm:text-sm uppercase tracking-wider transition-all duration-300",
-            stalePrice
+            poOffline
               ? "bg-amber-500/10 text-amber-400 border border-amber-500/40"
-              : isCall
-                ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(34,197,94,0.2)]"
-                : isPut
-                  ? "bg-rose-500/15 text-rose-400 border border-rose-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(239,68,68,0.2)]"
-                  : "bg-slate-800 text-slate-300 border border-slate-700",
+              : stalePrice
+                ? "bg-amber-500/10 text-amber-400 border border-amber-500/40"
+                : isCall
+                  ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(34,197,94,0.2)]"
+                  : isPut
+                    ? "bg-rose-500/15 text-rose-400 border border-rose-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(239,68,68,0.2)]"
+                    : "bg-slate-800 text-slate-300 border border-slate-700",
           )}
         >
-          {stalePrice ? (
+          {poOffline ? (
+            <>
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              <span
+                data-testid="panel-po-offline-signal"
+                className="truncate"
+              >
+                PO OFFLINE — PROXY TICKS
+              </span>
+            </>
+          ) : stalePrice ? (
             <>
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
               <span className="truncate">Connecting / Waiting</span>
@@ -297,28 +386,71 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
               : "--:--"}
           </span>
         </div>
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 max-h-[120px] sm:max-h-[104px] overflow-y-auto custom-scrollbar pr-0.5">
-          {TIMER_OPTIONS.map((opt) => (
-            <button
-              key={opt.seconds}
-              onClick={() => {
-                setExpirationSeconds(opt.seconds);
-                setSelectedExpirationSeconds(opt.seconds);
-              }}
-              disabled={isTradeActive}
-              title={`Projection horizon: ${opt.label}`}
-              className={cn(
-                "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-all duration-200 active:scale-95 min-h-[36px] sm:min-h-[32px]",
-                expirationSeconds === opt.seconds
-                  ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
-                  : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40",
-                isTradeActive && "opacity-50 cursor-not-allowed",
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div
+          role="group"
+          aria-label="Trade expiration"
+          data-testid="expiry-options"
+          className="grid grid-cols-3 sm:grid-cols-6 gap-1 max-h-[120px] sm:max-h-[104px] overflow-y-auto custom-scrollbar pr-0.5"
+        >
+          {TIMER_OPTIONS.map((opt) => {
+            const st = expiryBySeconds.get(opt.seconds);
+            const tooLate = st?.tooLate ?? false;
+            return (
+              <button
+                key={opt.seconds}
+                data-testid={`expiry-opt-${opt.label}`}
+                data-too-late={tooLate ? "true" : "false"}
+                aria-pressed={expirationSeconds === opt.seconds}
+                onClick={() => {
+                  setExpirationSeconds(opt.seconds);
+                  setSelectedExpirationSeconds(opt.seconds);
+                }}
+                // `isTradeActive` is a TRANSACTION lock (a dispatch is in
+                // flight) — the only legitimate reason to block a click. No
+                // market-state gate may ever reach this attribute.
+                disabled={isTradeActive}
+                title={
+                  tooLate
+                    ? `${opt.label} — bucket-aligned landing too close to act on; still selectable`
+                    : `Trade expiration: ${opt.label}`
+                }
+                className={cn(
+                  "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-[transform,background-color,color] duration-75 active:scale-95 min-h-[36px] sm:min-h-[32px]",
+                  expirationSeconds === opt.seconds
+                    ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                    : tooLate
+                      ? "bg-obsidian-950/80 text-slate-300 border border-amber-500/40 border-b-2 hover:bg-slate-800 hover:text-white"
+                      : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40",
+                  isTradeActive && "opacity-50 cursor-not-allowed",
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
         </div>
+        {/* PER-EXPIRY STATUS — describes the SELECTED expiry only. */}
+        {selectedExpiryState && !selectedExpiryState.actionReady ? (
+          <p
+            data-testid="expiry-status"
+            data-reason={selectedExpiryState.reason ?? "unknown"}
+            className="mt-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-300/90 flex items-center gap-1.5"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+            {selectedExpiryState.reason === "too_late"
+              ? `TOO LATE TO ACT ON ${selectedExpiryState.label} — NEXT BUCKET IN ${Math.max(
+                  1,
+                  Math.ceil(selectedExpiryState.retryInMs / 1000),
+                )}s`
+              : selectedExpiryState.reason === "regime_scored_only"
+                ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable on this symbol"
+                : selectedExpiryState.reason === "regime_pending_high_precision"
+                  ? "BELOW THE STRICT 96.5% BAR: no expiry is actionable yet"
+                  : selectedExpiryState.reason === "no_tier"
+                    ? "Evaluating — awaiting the first verdict for this expiry"
+                    : "Below the executable tier for any expiry on this symbol"}
+          </p>
+        ) : null}
       </div>
 
       {/* Live Candle-Close Countdown Bar */}
@@ -389,10 +521,35 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
         )
       )}
 
+      {/* PART 43.5 [474] — PO-OFFLINE OTC BANNER. This OTC pair is priced by a
+          non-PO market proxy while Pocket Option is offline: the proxy tick is
+          NOT a tradeable execution price, so BUY/SELL are locked and the
+          verdict is withheld. Distinct from a feed outage and from a stale
+          tick — the proxy tape may be flowing perfectly; it is simply not PO. */}
+      {poOffline &&
+      feedStatus !== "awaiting_ssid" &&
+      feedStatus !== "auth_failed" ? (
+        <div
+          data-testid="panel-po-offline-banner"
+          className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-xl"
+        >
+          <p className="text-[9px] sm:text-[10px] text-amber-400 font-black uppercase tracking-wider flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+            PO Offline — Proxy Ticks
+          </p>
+          <p className="text-[9px] sm:text-[10px] text-amber-400/90 font-mono mt-1">
+            No Pocket Option price for this OTC pair — the market is closed or
+            PO is unavailable. The proxy feed is not a tradeable execution
+            price; signals and execution resume when PO quotes return.
+          </p>
+        </div>
+      ) : null}
+
       {/* Stale Price — Waiting for Real-time Tick (2-second rule) */}
-      {(feedStatus === "stalled" ||
-        feedStatus === "degraded" ||
-        (socketConnected && currentPrice > 0 && stalePrice)) && (
+      {!poOffline &&
+        (feedStatus === "stalled" ||
+          feedStatus === "degraded" ||
+          (socketConnected && currentPrice > 0 && stalePrice)) && (
         <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-xl">
           <p className="text-[9px] sm:text-[10px] text-amber-400 font-black uppercase tracking-wider flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
@@ -480,16 +637,31 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
         )}
       </div>
 
-      {/* Action Buttons — enabled ONLY when the 96.5% signal gate has passed */}
-      <div className="px-3 sm:px-4 pt-3 sm:pt-4 pb-2 sm:pb-3 flex flex-col gap-2 sm:gap-2.5">
+      {/*
+        ACTION FOOTER — pinned to the bottom of the panel's own scrollport.
+
+        The panel's natural height (~647px) can exceed the operator rail on a
+        short window (measured 647px inside a 602px rail at 1280x800). The rail
+        therefore gives the panel a bounded region with internal scroll, and
+        without this the CALL/PUT block would sit at the very bottom of that
+        scroll range — reachable only by scrolling, i.e. effectively hidden
+        behind a live order book.
+
+        `sticky bottom-0` keeps the two execution buttons on screen at all times
+        while the selector rows above them scroll. The opaque background +
+        top border are load-bearing: the scrolling expiry grid would otherwise
+        show through the controls. `z-10` lifts them above that grid.
+      */}
+      <div className="sticky bottom-0 z-10 mt-auto px-3 sm:px-4 pt-3 sm:pt-4 pb-2 sm:pb-3 flex flex-col gap-2 sm:gap-2.5 bg-[var(--tp-surface)] border-t border-[var(--tp-border)] backdrop-blur-sm">
         {/* HIGHER / BUY */}
         <button
+          data-testid="action-call"
           onClick={handleCall}
           disabled={signalLocked || isTradeActive || !streamLive || isKillSwitchLocked}
           className={cn(
             "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-xl font-black text-sm sm:text-base uppercase tracking-wider",
             "flex items-center justify-center gap-2 sm:gap-3",
-            "transition-all duration-200 active:scale-[0.98]",
+            "transition-[transform,background-color,color] duration-75 active:scale-[0.98]",
             "shadow-xl shadow-emerald-500/25",
             "min-h-[48px] sm:min-h-[52px]",
             signalLocked || isTradeActive || !streamLive || isKillSwitchLocked
@@ -511,12 +683,13 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
 
         {/* LOWER / SELL */}
         <button
+          data-testid="action-put"
           onClick={handlePut}
           disabled={signalLocked || isTradeActive || !streamLive || isKillSwitchLocked}
           className={cn(
             "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-xl font-black text-sm sm:text-base uppercase tracking-wider",
             "flex items-center justify-center gap-2 sm:gap-3",
-            "transition-all duration-200 active:scale-[0.98]",
+            "transition-[transform,background-color,color] duration-75 active:scale-[0.98]",
             "shadow-xl shadow-rose-500/25",
             "min-h-[48px] sm:min-h-[52px]",
             signalLocked || isTradeActive || !streamLive || isKillSwitchLocked
@@ -561,7 +734,7 @@ export const TradingPanel: React.FC<{ stalePrice?: boolean }> = ({
           </span>
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-[10px] sm:text-xs font-mono text-white font-bold tabular-nums">
-              {currentPrice > 0
+              {currentPrice > 0 && !poOffline
                 ? `$${formatPairPrice(currentPrice, activeSymbol)}`
                 : "---"}
             </span>

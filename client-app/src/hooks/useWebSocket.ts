@@ -3,11 +3,16 @@ import {
   useTradingStore,
   getAggregatorParityDebug,
   resolveHorizonMinutes,
+  markPriceReceive,
+  type TradingState,
 } from "@/store/useTradingStore";
 import { useSocket } from "./useSocket";
 import { normalizeSymbol } from "@/services/api";
 import { normalizeTimeframe } from "@/lib/realtimeCandleAggregator";
 import { tickLatencyProbe } from "@/lib/tickLatencyProbe";
+import { clampTierSelection } from "@/lib/tierFilter";
+import type { SignalTier } from "@/lib/signalTiers";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 
 // ── CANONICAL SUBSCRIPTION SYMBOL ──
 // Every subscribe payload pushed to the backend MUST use the canonical
@@ -30,17 +35,42 @@ const canonicalSymbol = (raw: string): string =>
 // HORIZON (mirrored through the store's selectedHorizonMinutes) IS carried so
 // the /predict tick path evaluates on the same convergence window the UI
 // shows, keeping the authoritative and stabilized contracts phase-aligned.
-const subscribePayload = (): {
+export function buildSubscriptionPayload(
+  store: Pick<
+    TradingState,
+    "activeSymbol" | "selectedTimeframe" | "selectedHorizonMinutes"
+  >,
+  // The Tier Selector's choice. Passed EXPLICITLY rather than read off
+  // `useTradingStore` because it lives in `useMarketTerminalStore` — one store
+  // owns it, so there is a single source of truth for "which bands trade".
+  minTier: unknown,
+): {
   symbol: string;
   timeframe: string;
   horizon_minutes: number;
-} | null => {
-  const store = useTradingStore.getState();
+  min_tier: SignalTier;
+} | null {
   const symbol = canonicalSymbol(store.activeSymbol);
   if (!symbol) return null;
   const timeframe = normalizeTimeframe(store.selectedTimeframe) ?? "M1";
-  return { symbol, timeframe, horizon_minutes: 5 };
-};
+  return {
+    symbol,
+    timeframe,
+    horizon_minutes: resolveHorizonMinutes(store.selectedHorizonMinutes),
+    // The Tier Selector rides the subscribe payload so the 1Hz /tick-signal
+    // path scores against the band the operator actually trades. Without this
+    // the live verdict would always use the engine's strict T1 default.
+    min_tier: clampTierSelection(minTier),
+  };
+}
+
+// Read the live tier at EMIT time (not from a closure) so a subscribe triggered
+// by a symbol/horizon change also carries the operator's current selection.
+const subscribePayload = () =>
+  buildSubscriptionPayload(
+    useTradingStore.getState(),
+    useMarketTerminalStore.getState().minTier,
+  );
 
 // ── STALL / STALE THRESHOLDS (module scope — stable, never recreated per
 //    render so they cannot churn effect dependency identities or trip the
@@ -109,6 +139,8 @@ export const useWebSocket = (_url?: string) => {
   const subscribedSymbolRef = useRef<string>("");
   /** Tracks the timeframe of the last subscribed candle resolution. */
   const lastSubscribedTfRef = useRef<string | null>(null);
+  const lastSubscribedHorizonRef = useRef<number | null>(null);
+const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
 
   // ── LIVE-STREAM STALL DETECTION ──
   // `streamStalled` is true when the Socket.io transport is connected but NO
@@ -194,6 +226,10 @@ export const useWebSocket = (_url?: string) => {
   const seedServerCandles = useTradingStore((state) => state.seedServerCandles);
   const setFeedStatus = useTradingStore((state) => state.setFeedStatus);
   const selectedTimeframe = useTradingStore((state) => state.selectedTimeframe);
+  const selectedHorizonMinutes = useTradingStore(
+    (state) => state.selectedHorizonMinutes,
+  );
+  const minTier = useMarketTerminalStore((state) => state.minTier);
 
   // ── SUBSCRIBE (canonical symbol + ACTIVE CHART TIMEFRAME) ──
   // Re-emits the { symbol, timeframe } payload on the socket. Serving as the
@@ -215,6 +251,8 @@ export const useWebSocket = (_url?: string) => {
     socket.emit("subscribe", payload);
     subscribedSymbolRef.current = payload.symbol;
     lastSubscribedTfRef.current = payload.timeframe;
+    lastSubscribedHorizonRef.current = payload.horizon_minutes;
+    lastSubscribedMinTierRef.current = payload.min_tier;
   }, [socket]);
   const markTickReceived = useCallback(() => {
     lastTickAtRef.current = Date.now();
@@ -227,7 +265,14 @@ export const useWebSocket = (_url?: string) => {
   const markPriceReceived = useCallback(() => {
     // Freshness is measured against the local wall-clock at packet arrival.
     // A real price packet just arrived, so the tape is fresh RIGHT NOW.
-    lastPriceTsRef.current = Date.now();
+    const now = Date.now();
+    lastPriceTsRef.current = now;
+    // Publish the SAME clock to the feed-health sampler, so the badge and the
+    // `stale` boolean below are driven by one value and cannot disagree. The
+    // badge previously read the store's `lastPriceUpdate` ISO string, a
+    // different clock (history/replay/priming), which is what left a healthy
+    // feed showing "NO TICK".
+    markPriceReceive(now);
     if (stalePriceRef.current) {
       stalePriceRef.current = false;
       setStalePrice(false);
@@ -682,6 +727,35 @@ export const useWebSocket = (_url?: string) => {
       emitSubscribe();
     }
   }, [socket, socketConnected, selectedTimeframe, emitSubscribe]);
+
+  useEffect(() => {
+    if (!socket || !socketConnected) return;
+    const horizon = resolveHorizonMinutes(selectedHorizonMinutes);
+    if (lastSubscribedHorizonRef.current === null) {
+      lastSubscribedHorizonRef.current = horizon;
+      return;
+    }
+    if (lastSubscribedHorizonRef.current !== horizon) {
+      emitSubscribe();
+    }
+  }, [socket, socketConnected, selectedHorizonMinutes, emitSubscribe]);
+
+  // ── TIER SELECTOR → RESUBSCRIBE ──
+  // The backend learns the operator's minimum tier from the subscribe payload
+  // and scores the 1Hz /tick-signal path against it. Re-emitting on change is
+  // what makes the selection take effect on the LIVE surface; without it the
+  // selection would only ever reach the batch /predict path.
+  useEffect(() => {
+    if (!socket || !socketConnected) return;
+    const tier = clampTierSelection(minTier);
+    if (lastSubscribedMinTierRef.current === null) {
+      lastSubscribedMinTierRef.current = tier;
+      return;
+    }
+    if (lastSubscribedMinTierRef.current !== tier) {
+      emitSubscribe();
+    }
+  }, [socket, socketConnected, minTier, emitSubscribe]);
 
   // ── HARD FEED RESET (dataEpoch) ──
   // A `hardResetLiveData` call wipes every cache, aggregator symbol state and

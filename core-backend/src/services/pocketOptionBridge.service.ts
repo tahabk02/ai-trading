@@ -45,6 +45,7 @@ import { forexDataService } from "./forexData.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { websocketService } from "./websocket.service";
 import { symbolRegistry } from "./symbolRegistry.service";
+import { poAuthManager } from "./poAuthManager";
 
 // ─── Bridge Process Constants ───
 const BRIDGE_PYTHON_MODULE = "pocket_bridge.main";
@@ -205,6 +206,13 @@ export class PocketOptionBridgeService {
 
   public getStatus(): "ONLINE" | "DEGRADED" | "awaiting_ssid" | "idle" {
     return this.lastStatus;
+  }
+
+  /** Raw relay status string ("connected" | "stalled" | "awaiting_ssid" |
+   *  "connection_error" | "session_expired" ...) — the precise signal the
+   *  PART 43.6 [483] session monitor uses to detect a dead session. */
+  public getLastRelayStatus(): string {
+    return this.lastRelayStatus;
   }
 
   /**
@@ -455,7 +463,11 @@ export class PocketOptionBridgeService {
           cwd: bridgeDir,
           stdio: ["ignore", "pipe", "pipe"],
           env: {
-            ...process.env,
+            // PART 43.6 [480]: the bridge gets the parent env with every PO
+            // credential var STRIPPED. Only refresh_ssid.py receives the
+            // credential — a process that plays no part in login must never be
+            // able to read an email/password from its environment.
+            ...poAuthManager.withoutPoCredentials(),
             PYTHONUNBUFFERED: "1",
             // Force the spawned bridge to bind the EXACT relay socket the WS
             // client connects to — otherwise a user override of
@@ -980,6 +992,17 @@ export class PocketOptionBridgeService {
     if (status === "session_expired") {
       this.lastStatus = "DEGRADED";
       this.broadcastFeedStatusIfChanged();
+      // OPT-IN node-side re-auth (PO_AUTH_NODE_TRIGGER). Off by default — the
+      // Python bridge already refreshes on auth failure, so default-off avoids
+      // a second concurrent browser login (ban safety). Fire-and-forget: a
+      // refresh failure must never touch the ingestion path.
+      void poAuthManager
+        .maybeAutoRefresh("relay_session_expired")
+        .catch((err) =>
+          logger.debug("[PO Bridge] poAuthManager auto-refresh failed", {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
       return;
     }
   }
@@ -1092,7 +1115,7 @@ export class PocketOptionBridgeService {
       // the freshness gate and the client's "WAITING FOR REAL-TIME TICK" lock
       // clear INSTANTLY on the handshake (no waiting on a quiet tape).
       forexDataService.setPocketOptionPrice(norm, heldPrice);
-      realtimeTickBuffer.append(norm, heldPrice);
+      realtimeTickBuffer.append(norm, heldPrice, { source: "pocket_option_held" });
       liveTickSignalDispatcher.enqueue(norm);
       try {
         forexDataService.appendTick(norm, heldPrice);
@@ -1169,7 +1192,7 @@ export class PocketOptionBridgeService {
       forexDataService.setPocketOptionPrice(norm, heldPrice);
       // Seed the real-tick ring so a cold backend / re-joined client gets an
       // instant fresh quote (genuine held PO print — never fabricated).
-      realtimeTickBuffer.append(norm, heldPrice);
+      realtimeTickBuffer.append(norm, heldPrice, { source: "pocket_option_held" });
       // Fold into candle buffer (tick-accumulation for the ML path).
       try {
         forexDataService.appendTick(norm, heldPrice);

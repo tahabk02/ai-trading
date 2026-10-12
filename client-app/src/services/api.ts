@@ -6,6 +6,9 @@ import axios, {
 import { getApiBaseUrl } from "@/utils/getBaseUrl";
 import { OTC_WHITELIST } from "@/constants/symbols";
 import { logDebounced503 } from "@/lib/logDebouncer";
+import { isRecoverablePredictFailure } from "@/lib/predictFailure";
+import { installPredictBudget, PREDICT_ABORT_MS } from "@/lib/predictBudget";
+import { isTier, type TierSelection } from "@/lib/signalTiers";
 
 /**
  * SYMBOL PAYLOAD NORMALIZER — guarantees the POST body sent to
@@ -56,6 +59,19 @@ export interface PredictionRequest {
   candles?: any[];
   live_price?: number;
   dataSource?: string;
+  /**
+   * Confidence Filter — user-set minimum executable confidence (50..99%).
+   * Below it the engine demotes the pair to SCORED-ONLY (executable:false);
+   * absent = engine default 96.5% strict bar.
+   */
+  min_confidence?: number;
+  /**
+   * Flexible-tier floor — the weakest signal band the caller wants to trade
+   * (T1..T5). The engine ALWAYS emits every computed tier with its true
+   * confidence; this only decides which of them are marked `executable`.
+   * Absent = engine default T1 (96.5%). T5 is accepted but floors to T4.
+   */
+  min_tier?: TierSelection;
 }
 
 export interface CandleDataPoint {
@@ -71,11 +87,48 @@ export interface CandleDataPoint {
 export interface PredictionResponse {
   symbol: string;
   signal: "BUY" | "SELL";
+  /**
+   * PART 19.2 — the 0-100 number is STRATEGY BOOK AGREEMENT (a 10-book
+   * confluence score), NOT a calibrated probability. This numeric pipeline
+   * identifier is kept for compatibility; see `book_agreement` /
+   * `book_agreement_detail` for the HONESTLY LABELED surface the UI renders.
+   */
   confidence: number;
+  book_agreement?: number;
+  /** PART 19.2 [118] — raw confluence internals + "n/n books aligned" label. */
+  book_agreement_detail?: {
+    convergence_index?: number;
+    alignment?: number;
+    magnitude?: number;
+    aligned_count?: number;
+    active_count?: number;
+    label?: string;
+  };
   target_price: number;
   current_price: number;
-  ml_probability: number;
-  model_accuracy: number;
+  /**
+   * PART 22.1 [150] — RF corroboration split schema. `rf_probability` /
+   * `rf_holdout_accuracy` are the RandomForest's real numbers ONLY, null when
+   * the corroborator did not run for this tape; `corroborator_unavailable`
+   * flags exactly that state. Legacy ml_probability / model_accuracy stay as
+   * EXACT aliases of those RF numbers — null on the fallback path, never
+   * confluence-derived values.
+   */
+  rf_probability: number | null;
+  rf_holdout_accuracy: number | null;
+  corroborator_unavailable: boolean;
+  ml_probability: number | null;
+  model_accuracy: number | null;
+  /**
+   * P1-2026-09-24 — non-blocking inference surface. `inference_fallback` is
+   * null when the RF corroborator ran inside budget; "ml_budget_exceeded" when
+   * a cold-cache train could not finish in the interactive budget and this
+   * verdict is the fast structural payload (RF numbers null this round, the
+   * model warming in the background). `inference_budget_ms` echoes the engine's
+   * budget (null = unbounded).
+   */
+  inference_fallback?: string | null;
+  inference_budget_ms?: number | null;
   timeframe: string;
   proxyLatencyMs: number | null;
   indicators?: {
@@ -122,6 +175,30 @@ export interface PredictionResponse {
   tier?: string;
   /** Human label for the tier (PREMIUM / HIGH / MEDIUM / LOW / WEAK). */
   tier_label?: string;
+  /**
+   * PART 41 [403] — the engine's strict execution surface. True ONLY when the
+   * regime gate passed AND the verdict cleared every concurrency/thermal floor.
+   * A high-confidence score with `executable:false` is a SCORED-ONLY verdict
+   * and must never sound an alert.
+   */
+  executable?: boolean;
+  /**
+   * PART 9 — time-gated emission. True when the engine suppressed this very
+   * verdict because there was not enough real time left in the bucket to act
+   * on it. Never fabricated client-side.
+   */
+  suppressed?: boolean;
+  /**
+   * PART 9 — suppression reason ("too_late") when the emission was time-gated;
+   * null otherwise. The client renders this honestly instead of a stale signal.
+   */
+  suppressed_reason?: string | null;
+  /**
+   * PART 14 — regime gate from financial_analysis.py ("scored_only" |
+   * "tradable"). "scored_only" = random_walk classification: the emission is
+   * never tradable regardless of confidence.
+   */
+  regime_gate?: string | null;
   diagnostics?: {
     confidence_gated?: boolean;
     gated_direction?: string;
@@ -148,6 +225,22 @@ export interface PredictionResponse {
     aligned_count?: number;
     factors?: Record<string, number>;
     detail?: Record<string, unknown>;
+    /**
+     * PART 35.3 [359][360] — the authoritative depth flag from
+     * `compute_multiplicative_confluence`. `order_book_verified` is TRUE only
+     * when a genuine one-sided book actually contributed to this score;
+     * `verified_lift` is how much it moved it (0 when depth was not used).
+     *
+     * This is already present in the API payload — PART 35.3 only surfaces it.
+     * When depth is NOT verified the order-book factor is excluded from BOTH
+     * the numerator and the denominator, so the score is pure strategy-book
+     * confluence and must not be read as order-book evidence.
+     */
+    confluence?: {
+      order_book_verified?: boolean;
+      verified_lift?: number;
+      score?: number;
+    };
   };
   /**
    * Market-waiting flag — true when the combined confluence did NOT meet the
@@ -287,6 +380,22 @@ export interface MarketQuote {
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
+  /** Authoring feed of the newest print (`pocket_option`, `frankfurter`,
+   *  `open_er_api`, `github_data_provider`, `last_known_real`, …). Optional:
+   *  payloads from an older backend simply omit it (rendered "unknown"). */
+  source?: string | null;
+  /** True when the newest entry is a held (continuity) print, not a live one. */
+  stale?: boolean;
+  /** Age of the newest genuinely-fresh tick; null = no live print recently. */
+  freshAgeMs?: number | null;
+  /** Backend "no live price for >15s" flag — the terminal must say so. */
+  staleLive?: boolean;
+  /** PART 42.1 — this REAL pair's weekly forex market is closed. `price` is the
+   *  last close, never live. OTC/crypto are 24/7 and never set this. */
+  marketClosed?: boolean;
+  /** PART 43.5 [473] — OTC pair whose fresh ticks are NOT Pocket Option prints
+   *  (PO offline / market closed); the price is a non-tradeable market proxy. */
+  poOffline?: boolean;
 }
 
 export interface QuotesResponse {
@@ -336,6 +445,21 @@ export interface TradeHistoryResponse {
   trades: TradeResponse[];
   count: number;
 }
+
+// ── PART 44 [455] unified execution response envelope ──
+// Every signal-evaluation / trade-execution endpoint returns this frame; the
+// endpoint-specific record is nested under `result`.
+export interface ExecutionResponse<T = unknown> {
+  status: "executed" | "rejected" | "dry_run" | "failed";
+  executionId: string;
+  provenance: string;
+  latencyMs: number;
+  error: string | null;
+  timestamp: string;
+  result?: T;
+}
+
+export interface TradeExecutionResponse extends ExecutionResponse<TradeResponse> {}
 
 // ── ADVANCED RISK MANAGEMENT & KILL SWITCH ──
 export interface RiskStateSnapshot {
@@ -541,9 +665,11 @@ api.interceptors.response.use(
     // temporary conditions. The retry is exponential-backoff so the UI
     // auto-recovers the moment the backend / quote stream is back.
     //   • 429 retries ANY method (the request was never accepted).
-    //   • 502/503/504 + timeouts retry only idempotent probes (GETs + the
-    //     /predict read) — the server MAY have started the request, and a
-    //     blind retry of a mutating POST (trade execution) could double-submit.
+    //   • 502/503/504 + timeouts retry only idempotent GETs — the server MAY
+    //     have started the request, and a blind retry of a mutating POST (trade
+    //     execution) could double-submit. /predict is deliberately EXCLUDED:
+    //     the store owns its own per-symbol backoff (5s→30s), so retrying the
+    //     POST here too would double the request rate into a storm.
     const reqStatus = error.response?.status;
     const timedOut = error.code === "ECONNABORTED";
     const retryableState =
@@ -552,10 +678,8 @@ api.interceptors.response.use(
     const lowerMethod = (config?.method ?? "get").toLowerCase();
     // 429 means the request was NOT accepted by the rate limiter, so a retry
     // is safe for ANY method. 502/503/504 + live-quote timeouts mean the
-    // server MAY have started the request → retry only idempotent probes
-    // (GETs + the /predict read).
-    const isIdempotent =
-      lowerMethod === "get" || String(config?.url ?? "").startsWith("/predict");
+    // server MAY have started the request → retry only idempotent GETs.
+    const isIdempotent = lowerMethod === "get";
     if (
       retryableState &&
       (reqStatus === 429 || isIdempotent) &&
@@ -616,11 +740,13 @@ export interface OrderBookResponse {
 /**
  * Enhanced prediction error carrying a classifier so the STORE can decide how
  * to surface it:
- *   - `recoverable === true` → 5xx / 429 / network failure / live-quote
- *     timeout. NOT a hard application error: the store keeps the last good
- *     prediction, flips a calm "waiting for live asset stream" banner and
- *     schedules an exponential-backoff re-poll.
- *   - otherwise → a real 4xx / payload validation failure the UI should show.
+ *   - `recoverable === true` → the engine's transient "awaiting live data" 503
+ *     (no fresh tick / not enough real bars yet), 429, a live-quote timeout or
+ *     a transport/network failure. NOT a hard application error: the store
+ *     keeps the last good prediction, flips a calm "waiting for live asset
+ *     stream" banner and schedules an exponential-backoff re-poll.
+ *   - otherwise → a REAL 5xx (500/502/504), a 503 without the awaiting marker,
+ *     or a 4xx payload validation failure the UI should show.
  */
 export interface PredictionError extends Error {
   status?: number;
@@ -667,6 +793,8 @@ const apiClient = {
     timeframe: string = "1d",
     signal?: AbortSignal,
     horizonMinutes?: number,
+    minConfidence?: number,
+    minTier?: TierSelection,
   ): Promise<PredictionResponse> {
     const _cb = Date.now();
     // ── NORMALIZE BEFORE SEND — never transmit a non-whitelist format.
@@ -678,6 +806,30 @@ const apiClient = {
     const hz = Number.isFinite(horizonMinutes) && (horizonMinutes as number) >= 1
       ? Math.min(10, Math.round(horizonMinutes as number))
       : undefined;
+    const mc = Number.isFinite(minConfidence) && (minConfidence as number) >= 50
+      ? Math.min(99, Math.round((minConfidence as number) * 100) / 100)
+      : undefined;
+    // Flexible-tier floor. Only a KNOWN band is forwarded; anything else is
+    // omitted so the engine applies its documented T1 default rather than the
+    // client inventing a preference.
+    const mt = isTier(minTier) ? (minTier as TierSelection) : undefined;
+
+    // ── P1-2026-09-24 — NON-BLOCKING PREDICT BUDGET ──
+    // The engine ships a fast structural verdict within its 150ms inference
+    // budget; this combined signal (internal 2s abort budget + any forwarded
+    // caller signal) guarantees the /predict await can NEVER lock the terminal
+    // spinner. A budget-abort is classified below as a recoverable timeout;
+    // a caller abort (symbol/timeframe switch) stays a silent cancel the store
+    // already handles.
+    const budget = installPredictBudget(PREDICT_ABORT_MS);
+    const budgetController = new AbortController();
+    const forwardBudgetAbort = () => budgetController.abort();
+    const forwardExternalAbort = () => budgetController.abort();
+    if (signal) {
+      if (signal.aborted) budgetController.abort();
+      else signal.addEventListener("abort", forwardExternalAbort, { once: true });
+    }
+    budget.signal.addEventListener("abort", forwardBudgetAbort, { once: true });
 
     try {
       const { data } = await api.post<PredictionResponse>(
@@ -687,16 +839,35 @@ const apiClient = {
           timeframe: cleanTimeframe,
           dataSource: "otc_forex",
           ...(hz != null ? { horizon_minutes: hz } : {}),
+          ...(mc != null ? { min_confidence: mc } : {}),
+          ...(mt != null ? { min_tier: mt } : {}),
           _cb,
         },
-        { signal },
+        { signal: budgetController.signal },
       );
       return data;
     } catch (proxyError) {
       // ── RECOVERABLE vs HARD FAILURE CLASSIFIER ──
-      // 503 Service Unavailable + axios ECONNABORTED (>15s live-quote timeout)
-      // are TRANSIENT (the quote stream is stalling, not gone). They carry
-      // `recoverable = true` so the store re-polls instead of alarming.
+      // Budget/timeout, the awaiting-live-data 503, 429 and transport failures
+      // are TRANSIENT (carry `recoverable = true` so the store re-polls instead
+      // of alarming). A real 5xx stays a hard error.
+      //
+      // ══ PREDICT BUDGET ABORT (FIRST branch — must precede all AxiosError
+      // classification: aborts surface as ERR_CANCELED) ══
+      if (axios.isCancel(proxyError) && budget.isBudgetAbort()) {
+        const timeoutErr = new Error(
+          "Prediction budget exceeded — recycling.",
+        ) as PredictionError;
+        timeoutErr.name = "PredictionTimeoutError";
+        timeoutErr.recoverable = true;
+        throw timeoutErr;
+      }
+      // Caller abort (symbol/timeframe switch, unmount) — rethrow untouched;
+      // the axial interceptor skips retries on aborted signals and the store
+      // clears isLoading on the bare cancel.
+      if (axios.isCancel(proxyError)) {
+        throw proxyError;
+      }
       if (axios.isAxiosError(proxyError)) {
         // Live-quote / proxy timeout — the candle could not be priced in time.
         if (proxyError.code === "ECONNABORTED") {
@@ -731,14 +902,26 @@ const apiClient = {
               `Prediction service returned ${status}. Please verify the symbol and try again.`,
           ) as PredictionError;
           err.status = status;
-          // 5xx (including 503 Service Unavailable) and 429 are transient by
-          // nature; 4xx validation errors are NOT retryable.
-          err.recoverable =
-            typeof status === "number" && (status >= 500 || status === 429);
+          // PART 43.4 [470] — ONLY the engine's transient "awaiting live data"
+          // 503 (no fresh tick / not enough real bars yet) and 429 are
+          // recoverable. A real 5xx (500/502/504), a 503 WITHOUT the awaiting
+          // marker (cache/db unavailable) and every 4xx are HARD errors the
+          // store surfaces — never silently swallowed into the waiting banner.
+          err.recoverable = isRecoverablePredictFailure(
+            status,
+            proxyError.response.data,
+          );
           throw err;
         }
       }
       throw proxyError;
+    } finally {
+      // Release the predict-budget timer + abort listeners: the request is
+      // settled (resolved, errored or canceled) — nothing can abort it now.
+      if (signal) {
+        signal.removeEventListener("abort", forwardExternalAbort);
+      }
+      budget.dispose();
     }
   },
 
@@ -793,15 +976,23 @@ const apiClient = {
   async multiPredict(
     symbols: string[],
     timeframe: string = "1m",
+    minConfidence?: number,
+    minTier?: TierSelection,
   ): Promise<MultiPredictResponse> {
     const cleanSymbols = symbols
       .map((s) => normalizeSymbol(s) ?? s.trim().toUpperCase())
       .filter(Boolean);
+    const mc = Number.isFinite(minConfidence) && (minConfidence as number) >= 50
+      ? Math.min(99, Math.round((minConfidence as number) * 100) / 100)
+      : undefined;
+    const mt = isTier(minTier) ? (minTier as TierSelection) : undefined;
     const { data } = await api.post<MultiPredictResponse>(
       "/multi-predict",
       {
         symbols: cleanSymbols,
         timeframe: timeframe.trim().toLowerCase(),
+        ...(mc != null ? { min_confidence: mc } : {}),
+        ...(mt != null ? { min_tier: mt } : {}),
         _cb: Date.now(),
       },
       { timeout: 60_000 },
@@ -829,8 +1020,8 @@ const apiClient = {
     return data;
   },
 
-  async executeTrade(trade: TradeRequest): Promise<TradeResponse> {
-    const { data } = await api.post<TradeResponse>("/trades", trade);
+  async executeTrade(trade: TradeRequest): Promise<TradeExecutionResponse> {
+    const { data } = await api.post<TradeExecutionResponse>("/trades", trade);
     return data;
   },
 

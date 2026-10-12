@@ -25,6 +25,7 @@ from pocket_bridge.config import (
     auth_message,
     load_stored_session,
     mask_secret,
+    mask_uid,
     parse_ssid,
 )
 
@@ -47,7 +48,7 @@ async def _probe_via_library(auth: dict) -> bool:
         client = PocketOptionAsync(auth_message(auth))
         await asyncio.wait_for(client.wait_for_assets(timeout=60), timeout=60)
         print(f"AUTH_OK session_len={len(auth.get('session', ''))} "
-              f"uid={auth.get('uid')} isDemo={auth.get('isDemo')}")
+              f"uid={mask_uid(auth.get('uid'))} isDemo={auth.get('isDemo')}")
     except Exception as exc:  # noqa: BLE001
         print(f"AUTH_FAILED reason={str(exc)[:200]}")
         return False
@@ -152,7 +153,7 @@ def main() -> int:
         print(f"ssid_present={bool(auth.get('session'))}")
         print(f"ssid_format={'full' if normalized.startswith('42[') else 'raw'}")
         print(f"ssid_length={len(auth.get('session', ''))}")
-        print(f"uid={auth.get('uid')}")
+        print(f"uid={mask_uid(auth.get('uid'))}")
         print(f"is_demo={auth.get('isDemo')}")
         return 0 if asyncio.run(verify(auth)) else 1
 

@@ -1,6 +1,34 @@
+# Build context hygiene for the client-app image.
+#
+# The build context is ./client-app (see docker-compose.prod.yml), so the ROOT
+# .dockerignore does NOT apply here. Without this file a local `npm run dev`
+# leaves a .next/ (hundreds of MB, from a DIFFERENT machine) inside the context:
+# it inflates the build, and `COPY . .` copies it into the builder stage where
+# `next build` may reuse stale chunks instead of emitting a clean build.
 node_modules
 .next
-.env*
-.git
 out
-build
+dist
+coverage
+
+# Never ship secrets or local env overrides into an image layer.
+.env
+.env.*
+!.env.example
+!.env*.example
+
+# TypeScript incremental cache — regenerated inside the container.
+*.tsbuildinfo
+
+# Tests and tooling are not needed to serve the built app.
+src/**/__tests__
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+vitest.config.ts
+
+__pycache__
+.git
+.gitignore
+*.md
+*.log

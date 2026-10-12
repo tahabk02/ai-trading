@@ -1,10 +1,12 @@
 /**
- * symbolRegistry.service.ts — STRICT OTC FOREX + CRYPTO WHITELIST (34 REAL ASSETS)
+ * symbolRegistry.service.ts — STRICT OTC FOREX + CRYPTO WHITELIST (44 REAL ASSETS)
  *
  * PRODUCTION ENFORCEMENT:
- * The symbol registry is a HARD-CODED strict whitelist of exactly 34 real
+ * The symbol registry is a HARD-CODED strict whitelist of exactly 44 real
  * instruments matching Pocket Option / professional broker standards:
- * 32 OTC forex pairs (EUR/USD OTC etc.) + BTC/USD + ETH/USD (crypto).
+ * 32 OTC forex pairs (EUR/USD OTC etc.) + BTC/USD + ETH/USD (crypto) +
+ * 10 standard wholesale NON-OTC forex pairs (EUR/SEK, USD/NOK …), all backed
+ * by REAL ECB reference rates (Frankfurter / open.er-api).
  * The previous live Alpaca asset universe fetch is REMOVED.
  *
  * All validation functions (`getAll`, `search`, `findBySymbol`, `isValidSymbol`)
@@ -33,8 +35,8 @@ export interface SymbolEntry {
   symbol: string;
   /** Human-readable name */
   name: string;
-  /** Legacy broker instrument type (back-compat): "otc" or "crypto" */
-  type: "otc" | "crypto" | "commodity";
+  /** Legacy broker instrument type (back-compat): "otc", "crypto" or "forex" */
+  type: "otc" | "crypto" | "commodity" | "forex";
   /**
    * STRICT ASSET CLASSIFICATION — "forex" (standard wholesale forex),
    * "otc" (Pocket Option OTC instrument, distinct venue/pricing model),
@@ -55,8 +57,10 @@ export interface SymbolEntry {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// THE 34 STRICT ASSETS — HARD-CODED, NO EXTERNAL FETCH
-// 32 OTC forex pairs (assetSubType "otc") + BTC/USD + ETH/USD (crypto).
+// THE 44 STRICT ASSETS — HARD-CODED, NO EXTERNAL FETCH
+// 32 OTC forex pairs (assetSubType "otc") + 10 REAL NON-OTC wholesale
+// forex pairs (assetSubType "forex", ECB-sourced) + BTC/USD + ETH/USD
+// (crypto).
 // ════════════════════════════════════════════════════════════════════
 const OTC_WHITELIST: SymbolEntry[] = [
   // ── Forex Majors (7) ────────────────────────────────────────────────
@@ -447,6 +451,121 @@ const OTC_WHITELIST: SymbolEntry[] = [
     digits: 5,
     label: "KES/USD OTC",
   },
+
+  // ── Real Non-OTC Forex (10) — standard wholesale forex, assetSubType
+  // ── "forex" (NOT "otc"). Backed by REAL ECB reference rates via the
+  // ── Frankfurter + open.er-api feed — the same integrated source already
+  // ── used for the OTC book. Never mixed into OTC pricing/venue. ────────
+  {
+    symbol: "EUR/SEK",
+    name: "Euro / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "SEK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/SEK",
+  },
+  {
+    symbol: "EUR/NOK",
+    name: "Euro / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "NOK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/NOK",
+  },
+  {
+    symbol: "EUR/DKK",
+    name: "Euro / Danish Krone",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "DKK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/DKK",
+  },
+  {
+    symbol: "EUR/PLN",
+    name: "Euro / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "PLN",
+    payout: 92,
+    digits: 5,
+    label: "EUR/PLN",
+  },
+  {
+    symbol: "EUR/CZK",
+    name: "Euro / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "CZK",
+    payout: 92,
+    digits: 5,
+    label: "EUR/CZK",
+  },
+  {
+    symbol: "EUR/HUF",
+    name: "Euro / Hungarian Forint",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "HUF",
+    payout: 92,
+    digits: 5,
+    label: "EUR/HUF",
+  },
+  {
+    symbol: "USD/SEK",
+    name: "US Dollar / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "SEK",
+    payout: 92,
+    digits: 5,
+    label: "USD/SEK",
+  },
+  {
+    symbol: "USD/NOK",
+    name: "US Dollar / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "NOK",
+    payout: 92,
+    digits: 5,
+    label: "USD/NOK",
+  },
+  {
+    symbol: "USD/PLN",
+    name: "US Dollar / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "PLN",
+    payout: 92,
+    digits: 5,
+    label: "USD/PLN",
+  },
+  {
+    symbol: "USD/CZK",
+    name: "US Dollar / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    exchange: "ECB_LIVE_FOREX",
+    currency: "CZK",
+    payout: 92,
+    digits: 5,
+    label: "USD/CZK",
+  },
 ];
 
 /** Set for O(1) strict membership checks */
@@ -457,16 +576,45 @@ const OTC_SET = new Set(OTC_WHITELIST.map((e) => e.symbol));
 export class SymbolRegistryService {
   private entries: SymbolEntry[] = [...OTC_WHITELIST];
 
-  /** Replace the fallback registry with the broker's active asset universe. */
+  /**
+   * Merge the broker's active asset universe into the registry WITHOUT ever
+   * dropping the canonical 44.
+   *
+   * PART 27 regression guard: PO's asset list is a SUPERSET of what this app
+   * trades, but it does NOT contain the 10 standard ECB-sourced real pairs
+   * (EUR/SEK … USD/CZK) that are the strict-44 baseline — nor does it always
+   * classify symbols like Pocket Option does. Replacing `entries` outright
+   * silently purged those pairs from every registry-driven path (boot stream
+   * seed, GET /symbols, quotes snapshot), which is exactly why their daily
+   * rates stopped latching and the terminal showed "--".
+   *
+   * Contract:
+   *   • PO assets override the canonical entry for a symbol PO also lists
+   *     (PO is the live pricing venue for those instruments)…
+   *   • …but the strict whitelist entries are ALWAYS retained when PO does not
+   *     cover the symbol (the 10 real pairs + BTC/USD + ETH/USD never vanish).
+   */
   replaceFromBridgeAssets(assets: unknown[]): void {
-    const next: SymbolEntry[] = [];
+    const next = new Map<string, SymbolEntry>();
+
     for (const raw of assets) {
       if (!raw || typeof raw !== "object") continue;
       const item = raw as Record<string, unknown>;
       const symbol = String(item.symbol || "")
         .trim()
         .toUpperCase();
-      if (!symbol || next.some((entry) => entry.symbol === symbol)) continue;
+      if (!symbol || next.has(symbol)) continue;
+      // PART 28.3 — STRICT SHAPE GUARD: only genuine base/quote pairs (or the
+      // compact BTCUSD/ETHUSD crypto names) may enter this forex registry.
+      // Pocket Option's live asset dump also carries non-forex junk (AAPL,
+      // TSLA, #FB, indices, penny pairs) which previously polluted /symbols
+      // and the boot-stream seed — a registry that claims "strict 44 real
+      // assets" must never expose them.
+      const compact = symbol.replace(/\//g, "");
+      const looksLikeTradablePair =
+        /^[A-Z0-9]{2,5}\/[A-Z]{2,5}$/.test(symbol) ||
+        ["BTCUSD", "BTCUSDT", "ETHUSD", "ETHUSDT"].includes(compact);
+      if (!looksLikeTradablePair) continue;
       const subtype = String(
         item.assetSubType || item.type || "forex",
       ) as AssetSubType;
@@ -478,7 +626,7 @@ export class SymbolRegistryService {
       ].includes(subtype)
         ? subtype
         : "forex";
-      next.push({
+      next.set(symbol, {
         symbol,
         name: String(item.name || symbol),
         label: String(item.label || symbol),
@@ -487,7 +635,9 @@ export class SymbolRegistryService {
             ? "crypto"
             : assetSubType === "commodity"
               ? "commodity"
-              : "otc",
+              : assetSubType === "forex"
+                ? "forex"
+                : "otc",
         assetSubType,
         exchange: String(item.exchange || "POCKET_OPTION"),
         currency: String(item.currency || symbol.split("/").at(-1) || "USD"),
@@ -495,20 +645,32 @@ export class SymbolRegistryService {
         digits: Number.isFinite(Number(item.digits)) ? Number(item.digits) : 5,
       });
     }
-    if (next.length > 0)
-      this.entries = next.sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+    // Retention pass — canonical whitelist entries that PO does NOT cover stay
+    // in the registry (real ECB pairs, crypto majors already present above).
+    for (const canonical of OTC_WHITELIST) {
+      if (!next.has(canonical.symbol)) {
+        next.set(canonical.symbol, canonical);
+      }
+    }
+
+    if (next.size > 0)
+      this.entries = [...next.values()].sort((a, b) =>
+        a.symbol.localeCompare(b.symbol),
+      );
   }
 
   /**
    * Get ALL whitelisted symbols.
    * The `type` filter is accepted for API compatibility; "otc" returns the
-   * 32 OTC forex pairs, "crypto" returns BTC/ETH. Any other type → [].
+   * 32 OTC forex pairs, "forex" returns the 10 real non-OTC pairs, "crypto"
+   * returns BTC/ETH. Any other type → [].
    */
   async getAll(
-    type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
+    type?: "stock" | "crypto" | "etf" | "otc" | "commodity" | "forex",
   ): Promise<SymbolEntry[]> {
     if (!type) return [...this.entries];
-    if (type === "otc" || type === "crypto" || type === "commodity") {
+    if (type === "otc" || type === "crypto" || type === "commodity" || type === "forex") {
       return this.entries.filter((e) => e.type === type);
     }
     return [];
@@ -549,7 +711,7 @@ export class SymbolRegistryService {
    */
   async search(
     query: string,
-    _type?: "stock" | "crypto" | "etf" | "otc" | "commodity",
+    _type?: "stock" | "crypto" | "etf" | "otc" | "commodity" | "forex",
     limit: number = 40,
   ): Promise<SymbolEntry[]> {
     const q = (query || "").trim().toUpperCase();
@@ -671,6 +833,23 @@ export class SymbolRegistryService {
    */
   async refreshCache(): Promise<SymbolEntry[]> {
     return [...this.entries];
+  }
+
+  /**
+   * BOOT TICK-STREAM SEED (PART 15.1 [61] — closes the [52] boot-seed gap).
+   *
+   * Returns exactly the entries whose live-tick streams must be auto-started
+   * at boot so the market terminal grid has live prices for every card the
+   * moment it connects — WITHOUT a client having to subscribe per-symbol.
+   *
+   * The two asset-type calls are kept EXPLICIT (getAll("otc") +
+   * getAll("forex")); a bare getAll() would accidentally sweep crypto (BTC/ETH)
+   * into the seed, whose boot behavior must stay unchanged.
+   */
+  async getBootStreamSeed(): Promise<SymbolEntry[]> {
+    const otc = await this.getAll("otc");
+    const forex = await this.getAll("forex");
+    return [...otc, ...forex];
   }
 }
 

@@ -9,6 +9,7 @@ import {
   HORIZON_MINUTES,
   type HorizonMinutes,
 } from "@/store/useMarketTerminalStore";
+import { isTier, type TierSelection } from "@/lib/signalTiers";
 
 // ── DEBOUNCE ──
 // A fast horizon click (1m → 2m → 3m) must never fire three 34-symbol batch
@@ -39,6 +40,16 @@ export function useMarketTerminal() {
     useMarketTerminalStore.getState().globalHorizon,
   );
   const latestSymbolsRef = useRef<string[]>(ALL_MARKET_SYMBOLS);
+
+  // ── HYDRATION SAFETY (Confidence Filter — P1-2026-09-24) ──
+  // The store initializes DETERMINISTICALLY to the engine default (T1 / 96.5%)
+  // on server AND client so React can always hydrate a matching DOM tree. The
+  // persisted localStorage TIER (e.g. "T4") is layered on ONLY here — after
+  // first paint — and the confidence bar is re-derived from it, so SSR/client
+  // HTML can never disagree.
+  useEffect(() => {
+    useMarketTerminalStore.getState().hydrateClientPreferences();
+  }, []);
 
   // ── REST BOOTSTRAP (first paint before the 1Hz WS beat) ──
   useEffect(() => {
@@ -85,6 +96,15 @@ export function useMarketTerminal() {
         waiting_detail: payload.waiting_detail ?? null,
         book_confluence:
           payload.book_confluence != null ? payload.book_confluence : null,
+        // Preserve the engine's honest band so every tier (T1..T5) survives
+        // the socket hop. The engine emits scored-only verdicts too, and the
+        // card must be able to show "T3 MEDIUM — scored only" rather than
+        // losing the tier entirely.
+        tier: isTier(payload.tier) ? payload.tier.toUpperCase() : null,
+        tier_label: payload.tier_label ?? null,
+        dispatchable: payload.dispatchable,
+        scored_only: payload.scored_only,
+        executable: payload.executable,
         timestamp: payload.timestamp ?? new Date().toISOString(),
       });
     };
@@ -133,21 +153,18 @@ export function useMarketTerminal() {
       const symbols = latestSymbolsRef.current;
       const horizon = latestHorizonRef.current;
       if (symbols.length === 0) return;
+      // Confidence Filter rides every refresh (debounced → newest bar wins).
+      const minConfidence = useMarketTerminalStore.getState().minConfidencePct;
+      // So does the tier selector: the engine marks bands below the operator's
+      // choice scored-only AT THE SOURCE, so the grid renders honest
+      // executable state without any client-side guesswork.
+      const minTier = useMarketTerminalStore.getState().minTier;
       // Mark the batch symbols as "pending" so cards show a refreshing state.
-      const s = useMarketTerminalStore.getState();
-      for (const sym of symbols) {
-        s.setPrediction(sym, {
-          status: "pending",
-          direction: null,
-          confidence: null,
-          market_waiting: false,
-          waiting_reason: null,
-          waiting_detail: null,
-          data: null,
-        });
-      }
+      // ONE store write for the whole batch (was 44 setPrediction calls,
+      // each spreading the full predictions record and notifying every card).
+      useMarketTerminalStore.getState().markPredictionsPending(symbols);
       apiClient
-        .multiPredict(symbols, `${horizon}m`)
+        .multiPredict(symbols, `${horizon}m`, minConfidence, minTier)
         .then((resp) => {
           if (refreshSeqRef.current !== seq) return; // stale — a newer refresh won
           if (resp?.results) {
@@ -204,6 +221,26 @@ export function useMarketTerminal() {
     [scheduleRefresh],
   );
 
+  // ── TIER SELECTOR (the Confidence Filter's only input) ──
+  // PART 31 [309]/[311]: choosing a band resolves its executable floor and
+  // writes `minConfidencePct` in the same atomic store update, so there is no
+  // separate confidence setter to drift out of sync — that is why `setMinTier`
+  // is the only callback here. The debounced /multi-predict re-dispatch makes
+  // the ENGINE re-evaluate against the new `min_tier`/`min_confidence`; every
+  // tier is still emitted either way, this only changes which are executable.
+  const setMinTier = useCallback(
+    (value: TierSelection) => {
+      useMarketTerminalStore.getState().setMinTier(value);
+      latestSymbolsRef.current = ALL_MARKET_SYMBOLS;
+      scheduleRefresh();
+    },
+    [scheduleRefresh],
+  );
+
+  const toggleHideBelowThreshold = useCallback((value: boolean) => {
+    useMarketTerminalStore.getState().setHideBelowThreshold(value);
+  }, []);
+
   // ── CLEANUP on unmount ──
   useEffect(
     () => () => {
@@ -217,6 +254,8 @@ export function useMarketTerminal() {
     setGlobalHorizon,
     setCardHorizon,
     refreshNow,
+    setMinTier,
+    toggleHideBelowThreshold,
   };
 }
 

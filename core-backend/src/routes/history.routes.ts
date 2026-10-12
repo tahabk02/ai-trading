@@ -38,6 +38,9 @@ export function historyBarsToJson(
     close: b.close,
     volume: b.volume,
     tick_count: b.tick_count,
+    // PART 44 [494] — authoring feed of the bar, surfaced so a reader can
+    // see at a glance whether this OTC history is genuine PO tape or proxy.
+    source: b.source ?? null,
   }));
 }
 
@@ -150,6 +153,7 @@ router.post("/history/ingest", async (req: Request, res: Response) => {
     close: number;
     volume?: number | null;
     tickCount?: number;
+    source?: string | null;
   }> = [];
   for (const raw of bars) {
     const b = (raw ?? {}) as Record<string, unknown>;
@@ -176,6 +180,7 @@ router.post("/history/ingest", async (req: Request, res: Response) => {
       close,
       volume: b.volume == null ? null : Number(b.volume),
       tickCount: b.tickCount == null ? undefined : Number(b.tickCount),
+      source: b.source == null ? null : String(b.source).trim(),
     });
   }
 

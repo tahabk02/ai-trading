@@ -104,7 +104,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "AI Analysis",
     awaitingPrediction: "Awaiting prediction data for analysis...",
-    signalConfidence: "Signal Confidence",
+    signalConfidence: "Strategy Book Agreement",
     technicalReasoning: "Technical Reasoning",
     trendDuration: "Trend Duration",
     volatility: "Volatility",
@@ -139,11 +139,14 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Projected downside: -{pct}% to target {price}",
     volatilityLevel: "Volatility: {level} (ATR: {atr})",
     highConfidenceNote:
-      "High-confidence prediction — strong signal alignment",
+      "Strong strategy book agreement — all strategy books aligned",
     moderateConfidenceNote:
-      "Moderate confidence — partial signal confirmation",
+      "Partial strategy book agreement — most strategy books aligned",
     lowConfidenceNote:
-      "Low confidence — divergent indicators, trade with caution",
+      "Weak strategy book agreement — divergent indicators, trade with caution",
+    // High-confidence toast (PART 19.2 — the number is STRATEGY BOOK AGREEMENT now)
+    highConfidenceTitle: "STRATEGY BOOK AGREEMENT SIGNAL",
+    highConfidenceBody: "strong confluence — actionable setup",
     buySignal: "BUY",
     sellSignal: "SELL",
     holdSignal: "HOLD",
@@ -163,7 +166,11 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Execution Price",
-    aiConfidence: "AI Confidence",
+    aiConfidence: "Strategy Book Agreement",
+    bookAgreementBooks: "{aligned}/{active} books aligned",
+    // PART 35.3 [359][360] — depth provenance of the displayed score.
+    bookDepthUnverifiedNote: "L1 quote only — no order-book depth in this score",
+    bookDepthVerifiedChip: "+ order-book confirmed",
     highFrequencyAnalysis: "High Frequency Analysis",
     viewChart: "View Chart",
 
@@ -185,6 +192,14 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Updated",
     enterSymbolPrompt: "Enter a symbol above to trigger real-time ML inference.",
     runningInference: "Running high-speed ML inference...",
+    recomputingSignal: "Recomputing…",
+    // PART 22.1 — RF corroboration split labels (distinct from signal precision)
+    rfProbability: "RF Prob",
+    rfHoldoutAccuracy: "RF Holdout Acc",
+    rfHoldoutAccuracyTitle: "RF Holdout Accuracy (last 20% of candles, this symbol)",
+    rfCorroboratorUnavailable: "RF corroborator unavailable for this tape",
+    rfCorroboratorUnavailableTitle:
+      "The RandomForest did not run on this tape (fast path or sub-thermal); RF numbers are null, never confluence-derived.",
 
 // Timeframes (PO canonical)
     tfS5: "S5",
@@ -229,7 +244,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     noHistoryYet: "No history yet",
     historyEmptyHint: "Trading signals will appear here once generated.",
     noTradesMatch: "No trades match the current filters.",
-    confidence: "Confidence",
+    confidence: "Strategy Book Agreement",
 
     // Risk rules page
     riskRules: "Risk Rules",
@@ -420,7 +435,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "Analyse IA",
     awaitingPrediction: "En attente des données de prédiction...",
-    signalConfidence: "Confiance du signal",
+    signalConfidence: "Accord des livres de stratégie",
     technicalReasoning: "Raisonnement technique",
     trendDuration: "Durée de la tendance",
     volatility: "Volatilité",
@@ -455,11 +470,11 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Baisse projetée : -{pct}% vers l'objectif {price}",
     volatilityLevel: "Volatilité : {level} (ATR : {atr})",
     highConfidenceNote:
-      "Prédiction à haute confiance — forte convergence du signal",
+      "Fort accord des livres de stratégie — tous les livres alignés",
     moderateConfidenceNote:
-      "Confiance modérée — confirmation partielle du signal",
+      "Accord partiel des livres de stratégie",
     lowConfidenceNote:
-      "Confiance faible — indicateurs divergents, négociez avec prudence",
+      "Faible accord des livres de stratégie — indicateurs divergents, négociez avec prudence",
     buySignal: "ACHAT",
     sellSignal: "VENTE",
     holdSignal: "CONSERVER",
@@ -479,7 +494,7 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Prix d'exécution",
-    aiConfidence: "Confiance IA",
+    aiConfidence: "Accord des livres de stratégie",
     highFrequencyAnalysis: "Analyse haute fréquence",
     viewChart: "Voir le graphique",
 
@@ -501,6 +516,14 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Mis à jour",
     enterSymbolPrompt: "Entrez un symbole ci-dessus pour déclencher l'inférence ML.",
     runningInference: "Exécution de l'inférence ML haute vitesse...",
+    recomputingSignal: "Recalcul en cours…",
+    // PART 22.1 — libellés de corroboration RF séparés (distincts de la précision du signal)
+    rfProbability: "Prob RF",
+    rfHoldoutAccuracy: "Préc RF (holdout)",
+    rfHoldoutAccuracyTitle: "Précision RF sur holdout (20% dernières bougies, ce symbole)",
+    rfCorroboratorUnavailable: "Corroborateur RF indisponible pour cet actif",
+    rfCorroboratorUnavailableTitle:
+      "Le RandomForest n'a pas tourné sur cet actif (chemin rapide ou sous-seuil) : les valeurs RF sont nulles, jamais dérivées de la confluence.",
 
     // Timeframes (PO canonical)
     tfS5: "S5",
@@ -519,7 +542,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "SIGNAL HAUTE CONFIANCE",
+    highConfidenceTitle: "SIGNAL — ACCORD DES LIVRES DE STRATÉGIE",
     highConfidenceBody: "confluence détectée — configuration exploitable",
     dismiss: "Fermer",
 
@@ -551,7 +574,12 @@ export const translations: Record<Lang, Record<string, string>> = {
     historyEmptyHint:
       "Les signaux de trading apparaîtront ici une fois générés.",
     noTradesMatch: "Aucune transaction ne correspond aux filtres actuels.",
-    confidence: "Confiance",
+    confidence: "Accord des livres de stratégie",
+    bookAgreementBooks: "{aligned}/{active} signaux alignés",
+    // PART 35.3 [359][360] — profondeur du carnet d'ordres dans le score affiché.
+    bookDepthUnverifiedNote:
+      "Cours L1 seul — aucune profondeur de carnet d'ordres dans ce score",
+    bookDepthVerifiedChip: "+ carnet d'ordres confirmé",
 
     // Risk rules page
     riskRules: "Règles de risque",
@@ -745,7 +773,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "تحليل الذكاء الاصطناعي",
     awaitingPrediction: "بانتظار بيانات التنبؤ للتحليل...",
-    signalConfidence: "ثقة الإشارة",
+    signalConfidence: "اتفاق كتب الاستراتيجية",
     technicalReasoning: "التحليل الفني",
     trendDuration: "مدة الاتجاه",
     volatility: "التقلب",
@@ -777,9 +805,9 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedUpside: "الارتفاع المتوقع: +{pct}% نحو الهدف {price}",
     projectedDownside: "الانخفاض المتوقع: -{pct}% نحو الهدف {price}",
     volatilityLevel: "التقلب: {level} (ATR: {atr})",
-    highConfidenceNote: "تنبؤ عالي الثقة — توافق قوي للإشارة",
-    moderateConfidenceNote: "ثقة متوسطة — تأكيد جزئي للإشارة",
-    lowConfidenceNote: "ثقة منخفضة — مؤشرات متباينة، تداول بحذر",
+    highConfidenceNote: "اتفاق قوي بين كتب الاستراتيجية — جميع الكتب متوافقة",
+    moderateConfidenceNote: "اتفاق جزئي بين كتب الاستراتيجية",
+    lowConfidenceNote: "اتفاق ضعيف بين كتب الاستراتيجية — مؤشرات متباينة، تداول بحذر",
     buySignal: "شراء",
     sellSignal: "بيع",
     holdSignal: "انتظار",
@@ -799,7 +827,7 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "سعر التنفيذ",
-    aiConfidence: "ثقة الذكاء الاصطناعي",
+    aiConfidence: "اتفاق كتب الاستراتيجية",
     highFrequencyAnalysis: "تحليل عالي التردد",
     viewChart: "عرض الرسم",
 
@@ -821,6 +849,14 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "تم التحديث",
     enterSymbolPrompt: "أدخل رمزاً أعلاه لتشغيل استدلال تعلم الآلة المباشر.",
     runningInference: "جارٍ تشغيل استدلال تعلم الآلة فائق السرعة...",
+    recomputingSignal: "جاري إعادة الحساب…",
+    // PART 22.1 — تسميات توثيق RF منفصلة (مختلفة عن دقة الإشارة)
+    rfProbability: "احتمال RF",
+    rfHoldoutAccuracy: "دقة RF (holdout)",
+    rfHoldoutAccuracyTitle: "دقة RF على مجموعة الإمساك (آخر 20% من الشموع، هذا الرمز)",
+    rfCorroboratorUnavailable: "المدقق RF غير متاح لهذا الرمز",
+    rfCorroboratorUnavailableTitle:
+      "لم يعمل RandomForest على هذا الرمز (مسار سريع أو دون العتبة) : قيم RF فارغة، لا مشتقة من التقارب.",
 
     // Timeframes (PO canonical)
     tfS5: "S5",
@@ -839,7 +875,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "إشارة عالية الثقة",
+    highConfidenceTitle: "إشارة — اتفاق كتب الاستراتيجية",
     highConfidenceBody: "تم رصد تقارب — فرصة قابلة للتنفيذ",
     dismiss: "إغلاق",
 
@@ -870,7 +906,12 @@ export const translations: Record<Lang, Record<string, string>> = {
     noHistoryYet: "لا يوجد سجل بعد",
     historyEmptyHint: "ستظهر إشارات التداول هنا بمجرد إنشائها.",
     noTradesMatch: "لا توجد صفقات تطابق عوامل التصفية الحالية.",
-    confidence: "الثقة",
+    confidence: "اتفاق كتب الاستراتيجية",
+    bookAgreementBooks: "{aligned}/{active} إشارات متوافقة",
+    // PART 35.3 [359][360] — عمق دفتر الأوامر في النتيجة المعروضة.
+    bookDepthUnverifiedNote:
+      "سعر L1 فقط — لا يوجد عمق دفتر أوامر في هذه النتيجة",
+    bookDepthVerifiedChip: "+ تم تأكيد دفتر الأوامر",
 
     // Risk rules page
     riskRules: "قواعد المخاطر",
@@ -1059,7 +1100,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     // AI Analysis & Explanation
     aiAnalysis: "Análisis IA",
     awaitingPrediction: "Esperando datos de predicción para el análisis...",
-    signalConfidence: "Confianza de la señal",
+    signalConfidence: "Acuerdo de libros de estrategia",
     technicalReasoning: "Razonamiento técnico",
     trendDuration: "Duración de la tendencia",
     volatility: "Volatilidad",
@@ -1094,11 +1135,11 @@ export const translations: Record<Lang, Record<string, string>> = {
     projectedDownside: "Baja proyectada: -{pct}% hacia el objetivo {price}",
     volatilityLevel: "Volatilidad: {level} (ATR: {atr})",
     highConfidenceNote:
-      "Predicción de alta confianza — fuerte alineación de señales",
+      "Fuerte acuerdo de libros de estrategia — todos los libros alineados",
     moderateConfidenceNote:
-      "Confianza moderada — confirmación parcial de señales",
+      "Acuerdo parcial de libros de estrategia",
     lowConfidenceNote:
-      "Confianza baja — indicadores divergentes, opere con precaución",
+      "Acuerdo débil de libros de estrategia — indicadores divergentes, opere con precaución",
     buySignal: "COMPRA",
     sellSignal: "VENTA",
     holdSignal: "MANTENER",
@@ -1118,7 +1159,7 @@ export const translations: Record<Lang, Record<string, string>> = {
 
     // Signal Widget
     executionPrice: "Precio de ejecución",
-    aiConfidence: "Confianza IA",
+    aiConfidence: "Acuerdo de libros de estrategia",
     highFrequencyAnalysis: "Análisis de alta frecuencia",
     viewChart: "Ver gráfico",
 
@@ -1140,6 +1181,14 @@ export const translations: Record<Lang, Record<string, string>> = {
     updated: "Actualizado",
     enterSymbolPrompt: "Introduce un símbolo arriba para ejecutar inferencia ML.",
     runningInference: "Ejecutando inferencia ML de alta velocidad...",
+    recomputingSignal: "Recalculando…",
+    // PART 22.1 — etiquetas de corroboración RF separadas (distintas de la precisión de la señal)
+    rfProbability: "Prob. RF",
+    rfHoldoutAccuracy: "Prec RF (holdout)",
+    rfHoldoutAccuracyTitle: "Precisión RF en holdout (último 20% de velas, este símbolo)",
+    rfCorroboratorUnavailable: "Corroborador RF no disponible para este símbolo",
+    rfCorroboratorUnavailableTitle:
+      "El RandomForest no corrió en este símbolo (ruta rápida o sub-umbral); los valores RF son nulos, nunca derivados de la confluencia.",
 
     // Timeframes (PO canonical)
     tfS5: "S5",
@@ -1158,7 +1207,7 @@ export const translations: Record<Lang, Record<string, string>> = {
     tfD1: "D1",
 
     // High-confidence toast
-    highConfidenceTitle: "SEÑAL DE ALTA CONFIANZA",
+    highConfidenceTitle: "SEÑAL — ACUERDO DE LIBROS DE ESTRATEGIA",
     highConfidenceBody: "confluencia detectada — configuración accionable",
     dismiss: "Cerrar",
 
@@ -1190,7 +1239,12 @@ export const translations: Record<Lang, Record<string, string>> = {
     historyEmptyHint:
       "Las señales de trading aparecerán aquí una vez generadas.",
     noTradesMatch: "Ninguna operación coincide con los filtros actuales.",
-    confidence: "Confianza",
+    confidence: "Acuerdo de libros de estrategia",
+    bookAgreementBooks: "{aligned}/{active} señales alineadas",
+    // PART 35.3 [359][360] — profundidad del libro de órdenes en la puntuación.
+    bookDepthUnverifiedNote:
+      "Solo cotización L1 — sin profundidad de libro de órdenes en esta puntuación",
+    bookDepthVerifiedChip: "+ libro de órdenes confirmado",
 
     // Risk rules page
     riskRules: "Reglas de riesgo",

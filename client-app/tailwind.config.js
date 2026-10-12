@@ -35,9 +35,12 @@ module.exports = {
         ],
         mono: [
           "ui-monospace",
+          "Cascadia Mono",
+          "SF Mono",
           "SFMono-Regular",
-          "Menlo",
+          "Segoe UI Mono",
           "Consolas",
+          "Liberation Mono",
           "monospace",
         ],
       },
@@ -90,11 +93,49 @@ module.exports = {
         // are deliberately IDENTICAL in both themes (teal / coral).
         "bull-green": "#22ab94",
         "bear-red": "#f23645",
+        // ── PART 16 TERMINAL BLOTTER PALETTE (dark-only, channel triplets) ──
+        // Flat-obsidian matrix system: one canvas tone, one cell tone, one
+        // hairline; every saturated pixel is functional. Resolution via rgb()
+        // keeps `/opacity` modifiers working (bg-term-panel/10 …).
+        term: {
+          canvas: "rgb(var(--term-canvas) / <alpha-value>)",
+          panel: "rgb(var(--term-panel) / <alpha-value>)",
+          line: "rgb(var(--term-line) / <alpha-value>)",
+          ink: "rgb(var(--term-ink) / <alpha-value>)",
+          "ink-dim": "rgb(var(--term-ink-dim) / <alpha-value>)",
+          "ink-faint": "rgb(var(--term-ink-faint) / <alpha-value>)",
+        },
+        // PART 16 SEMANTIC HUES — the two non-directional classification
+        // channels: gold = real-market / institutional-hold, cyan = crypto.
+        // (Keep the values distinct from bull/bear so direction is un-missable.)
+        gold: "rgb(var(--term-gold) / <alpha-value>)",
+        crypto: "rgb(var(--term-crypto) / <alpha-value>)",
+        // Direction channels — SAME values as the candle colours (bull/bear)
+        // via channel triplets so `/alpha` modifiers keep working, while the
+        // plain `bull-green`/`bear-red` hex tokens above stay untouched.
+        bull: "rgb(var(--bull) / <alpha-value>)",
+        bear: "rgb(var(--bear) / <alpha-value>)",
+        // ── STATUS HUES ── theme-driven, for the same reason the slate scale
+        //    is. Stock Tailwind accents (`emerald-400`, `rose-400`, `amber-400`,
+        //    `orange-400`, `blue-400`, `teal-300`) are literal hex in the
+        //    compiled CSS and do NOT follow the html.dark/.light class — they
+        //    render at 1.48-2.57:1 on a white panel. Prefer `text-st-*` /
+        //    `bg-st-*` / `border-st-*`; the `/opacity` modifiers still work.
+        st: {
+          pos: "rgb(var(--st-pos) / <alpha-value>)",
+          neg: "rgb(var(--st-neg) / <alpha-value>)",
+          warn: "rgb(var(--st-warn) / <alpha-value>)",
+          caution: "rgb(var(--st-caution) / <alpha-value>)",
+          info: "rgb(var(--st-info) / <alpha-value>)",
+          teal: "rgb(var(--st-teal) / <alpha-value>)",
+        },
       },
       borderRadius: {
         card: "8px",
         control: "6px",
         chip: "4px",
+        // PART 16: instrument cells use a near-square terminal radius.
+        cell: "4px",
       },
       boxShadow: {
         card: "0 1px 2px rgba(0,0,0,0.05)",

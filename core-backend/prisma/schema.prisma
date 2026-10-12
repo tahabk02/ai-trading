@@ -17,6 +17,12 @@ model Signal {
   confidence Float
   status     String   @default("ACTIVE") // ACTIVE, EXECUTED, CANCELLED
   indicators String   // JSON stored as string for SQLite compatibility
+  // Durable-transport idempotency key. The Redis Streams entry id (e.g.
+  // "1721234567890-0") is stable and unique per appended signal, so a replay
+  // after a crash between "persisted" and "XACK" collides here instead of
+  // writing a duplicate row. NULL for signals that arrived over Pub/Sub only,
+  // which keeps the unique index from collapsing unrelated rows.
+  sourceEventId String?  @unique
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -161,11 +167,19 @@ model AssetHistory {
   close         Float
   volume        Int?     // nullable: only real feed volume, else NULL (honest)
   tickCount     Int      @default(0) // REAL observed tick count inside the bucket
+  // PART 44 [494] — AUTHORING FEED / PROVENANCE of this bar: the source of the
+  // newest tick that formed it (`pocket_option`, `frankfurter`, `held_stale_real`,
+  // `github_data_provider`, `ai_engine`, …). NULL for legacy rows written before
+  // the column existed. An OTC bar is ONLY ever written from PO-sourced ticks, so
+  // a non-PO (proxy/held) provenance on an OTC symbol is a data-integrity fault
+  // the [495] audit quarantines — never silently trusted.
+  source        String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@unique([symbol, timeframe, bucketStartMs])
   @@index([symbol, timeframe, bucketStartMs])
+  @@index([source])
   @@index([createdAt])
 }
 

@@ -22,9 +22,42 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# ── Environment file isolation ───────────────────────────────────────────────
+# `<repo>/pocket-bridge`, resolved from THIS file so it is cwd-independent.
+# Only files inside pocket-bridge/ are read; the repository-root .env is a
+# different service's configuration and is never consulted.
+POCKET_BRIDGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _pocket_bridge_env_files() -> list[Path]:
+    """pocket-bridge-local env files, HIGHEST precedence first.
+
+    `load_dotenv` never overwrites an already-set variable, so loading
+    high-to-low yields the intended precedence: a real environment variable
+    (container / operator injected) beats every file, then `.env.local`, then
+    `.env.<environment>`, then `.env`.
+    """
+    environment = os.environ.get("ENVIRONMENT") or os.environ.get("NODE_ENV") or "development"
+    candidates = [
+        POCKET_BRIDGE_ROOT / ".env.local",
+        POCKET_BRIDGE_ROOT / f".env.{environment}",
+        POCKET_BRIDGE_ROOT / ".env",
+    ]
+    return [p for p in candidates if p.is_file()]
+
+
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    for _env_file in _pocket_bridge_env_files():
+        load_dotenv(_env_file, override=False)
+    _PARENT_DOTENV = POCKET_BRIDGE_ROOT.parent / ".env"
+    if _PARENT_DOTENV.is_file() and os.environ.get("POCKET_BRIDGE_ALLOW_PARENT_DOTENV") != "true":
+        logging.getLogger("pocket_bridge.config").warning(
+            "pocket-bridge: ignoring parent %s — it is another service's configuration. "
+            "Set values in %s or the real environment.",
+            _PARENT_DOTENV,
+            POCKET_BRIDGE_ROOT / ".env",
+        )
 except Exception:  # pragma: no cover - dotenv is optional at runtime
     pass
 
@@ -79,6 +112,122 @@ def parse_ssid(value: str) -> dict:
 def auth_message(auth: dict) -> str:
     return "42" + json.dumps(["auth", auth], separators=(",", ":"))
 
+
+# ════════════════════════════════════════════════════════════════════
+# CREDENTIAL LOGIN (LAST-RESORT SSID RECOVERY)
+# ════════════════════════════════════════════════════════════════════
+# The bridge authenticates with a captured SESSION, never a raw credential,
+# and refreshes that session headlessly (see session/refresh_ssid.py). The
+# credential login below is a DELIBERATE LAST RESORT used only when the stored
+# session is dead and a fresh `42["auth",{...}]` frame cannot be captured — it
+# is never attempted while the session path works, so the normal steady state
+# never sends email/password anywhere.
+#
+# It is opt-in (PO_EMAIL_LOGIN=1) AND requires both PO_EMAIL and PO_PASSWORD
+# AND a recorded written answer from Pocket Option on automated login
+# (PO_TOS_CONSENT, PART 43.6 [482] — see docs/legal/po-automated-login-tos-consent.md).
+# Keep them in the gitignored `pocket-bridge/.env` or—in a container—in mounted
+# secret FILES (PO_EMAIL_FILE / PO_PASSWORD_FILE, PART 43.6 [481]); this
+# repository's `.env.example` only documents the names.
+CREDENTIAL_LOGIN_URL = "https://pocketoption.com/en/login"
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag ("1"/"true"/"yes"/"on" -> True)."""
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def read_secret_file(path: Optional[str], fallback: str = "") -> str:
+    """Read a mounted SECRET FILE (Docker secret / read-only volume).
+
+    PART 43.6 [481]: the value travels as a *file's contents*, a path in the
+    environment — never the secret itself in the env. The contents are returned
+    trimmed and are NEVER logged. A missing/unreadable file falls back to
+    ``fallback`` (used by the dev/local env form).
+    """
+    p = (path or "").strip()
+    if not p:
+        return fallback
+    try:
+        text = Path(p).read_text(encoding="utf-8")
+        return text.strip()
+    except OSError:
+        return fallback
+
+
+def resolve_secret(env_file: str, env_value: str) -> str:
+    """File-mounted secret first, then the plain env value (dev fallback)."""
+    file_val = read_secret_file(os.getenv(env_file, ""))
+    if file_val:
+        return file_val
+    return (os.getenv(env_value, "") or "").strip()
+
+
+@dataclass(frozen=True)
+class CredentialLogin:
+    """Resolved last-resort credential-login configuration.
+
+    ``password`` is excluded from ``repr`` so a stray ``print(settings)`` or a
+    logged exception can never leak it.
+    """
+
+    email: str = ""
+    password: str = field(default="", repr=False)
+    enabled: bool = False
+    tos_consent: bool = False
+    login_url: str = CREDENTIAL_LOGIN_URL
+    timeout_s: float = 45.0
+
+    @property
+    def configured(self) -> bool:
+        """True when BOTH halves of the credential are present."""
+        return bool(self.email.strip() and self.password)
+
+    @property
+    def usable(self) -> bool:
+        """Trimmed-down usable: opted-in AND fully configured AND the broker's
+        written answer on automated login is recorded (PO_TOS_CONSENT, PART
+        43.6 [482]). Without consent the tier is inert no matter the credentials."""
+        return self.enabled and self.configured and self.tos_consent
+
+
+def load_credential_login() -> CredentialLogin:
+    """Read the last-resort credential-login settings from the environment.
+
+    PART 43.6 [481]: in a container, ``PO_EMAIL``/``PO_PASSWORD`` come from
+    mounted secret files (``PO_EMAIL_FILE``/``PO_PASSWORD_FILE`` — Docker
+    secrets), never from the env or an image layer.
+    """
+    try:
+        timeout = float(os.getenv("PO_LOGIN_TIMEOUT", "45"))
+    except (TypeError, ValueError):
+        timeout = 45.0
+    return CredentialLogin(
+        email=resolve_secret("PO_EMAIL_FILE", "PO_EMAIL"),
+        password=resolve_secret("PO_PASSWORD_FILE", "PO_PASSWORD"),
+        enabled=_bool_env("PO_EMAIL_LOGIN", False),
+        tos_consent=_bool_env("PO_TOS_CONSENT", False),
+        login_url=(os.getenv("PO_LOGIN_URL", "") or CREDENTIAL_LOGIN_URL).strip()
+        or CREDENTIAL_LOGIN_URL,
+        timeout_s=max(5.0, timeout),
+    )
+
+
+def credential_login_status() -> Dict[str, Any]:
+    """Non-secret status for /health — never includes the credential itself."""
+    cfg = load_credential_login()
+    return {
+        "credential_login_enabled": cfg.enabled,
+        "credential_login_configured": cfg.configured,
+        "credential_login_tos_consent": cfg.tos_consent,
+        "credential_login_available": cfg.usable,
+        "credential_login_email": mask_secret(cfg.email, 3),
+    }
+
+
 # ════════════════════════════════════════════════════════════════════
 # PERSISTED BROWSER SESSION (manual capture -> reuse)
 # ════════════════════════════════════════════════════════════════════
@@ -95,6 +244,20 @@ def mask_secret(value: str, head: int = 8) -> str:
     """Mask a secret to its first ``head`` characters — never a full value."""
     s = str(value or "")
     return s[:head] + "..." if s else "(empty)"
+
+
+def mask_uid(value) -> str:
+    """PART 44 [499] — mask a Pocket Option account id in logs/diagnostics.
+
+    Shows at most the first three digits; the remainder (or every last digit
+    when the id is ≤3 chars) is replaced with ``*``. Accounts never appear in
+    full in any log line, and the result is deterministic for tests:
+    ``138336943 → "138******"``, ``123 → "123*"``.
+    """
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return "(empty)"
+    return s[:3] + "*" * max(1, len(s) - 3)
 
 
 def _fernet():
@@ -239,19 +402,33 @@ class StoredSession:
 
     @property
     def age_days(self) -> float:
-        """Freshness in days since ``capturedAt`` (0 when unknown)."""
+        """Freshness in days since ``capturedAt``.
+
+        FAILS CLOSED. A missing or unparseable ``capturedAt`` used to report
+        ``0.0`` - indistinguishable from "captured just now" - so the
+        ``PO_SESSION_MAX_AGE_DAYS`` guard silently accepted a session whose age
+        it could not determine, i.e. exactly the case where the token is most
+        likely to be expired. Unknown age is treated as infinitely old, so the
+        caller refuses it and demands a fresh capture.
+        """
         if not self.captured_at:
-            return 0.0
+            return float("inf")
         try:
             captured = datetime.fromisoformat(
                 self.captured_at.replace("Z", "+00:00")
             )
-            return max(
-                0.0,
-                (datetime.now(timezone.utc) - captured).total_seconds() / 86_400.0,
-            )
         except (ValueError, TypeError):
-            return 0.0
+            logger.warning(
+                "session_captured_at_unparseable age_reported=inf captured_at=%s",
+                str(self.captured_at)[:64],
+            )
+            return float("inf")
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (datetime.now(timezone.utc) - captured).total_seconds() / 86_400.0,
+        )
 
     def mask(self, value: str, head: int = 8) -> str:
         return mask_secret(value, head)
@@ -413,6 +590,16 @@ OTC_FOREX_SYMBOLS: frozenset = frozenset({
 
 CRYPTO_SYMBOLS: frozenset = frozenset({"BTC/USD", "ETH/USD"})
 
+# ── REAL NON-OTC FOREX (PART 14) ──────────────────────────────────────
+# Standard wholesale forex pairs resolved via the already-integrated ECB feed
+# (Frankfurter + open.er-api), assetSubType "forex" — NOT the Pocket Option
+# OTC venue. Classification is explicit so OTC vs standard-forex pricing never
+# mixes on the relay.
+REAL_FOREX_SYMBOLS: frozenset = frozenset({
+    "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK",
+    "EUR/HUF", "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
+})
+
 
 def canonical_symbol(raw: str) -> str:
     """Map any backend/UI symbol variant onto the canonical ``BASE/QUOTE`` form.
@@ -449,14 +636,17 @@ def asset_type_for_symbol(symbol: str) -> str:
 
     Every symbol that resolves to a Pocket Option OTC instrument is tagged
     ``otc`` (its OTC attribute is preserved explicitly). Standard wholesale
-    forex pairs (non-OTC venue/pricing) are tagged ``forex``. Crypto majors
-    are tagged ``crypto``. Nothing is mixed across these classes.
+    forex pairs (non-OTC venue/pricing, including the 10 REAL_FOREX_SYMBOLS)
+    are tagged ``forex``. Crypto majors are tagged ``crypto``. Nothing is
+    mixed across these classes.
     """
     normalized = symbol.replace("/", "").upper()
     if normalized in {"BTCUSD", "ETHUSD", "BTCUSDT", "ETHUSDT"}:
         return "crypto"
     if symbol.replace(" ", "").replace("/", "/").upper() in OTC_FOREX_SYMBOLS:
         return "otc"
+    if symbol.upper() in REAL_FOREX_SYMBOLS:
+        return "forex"
     # Any other pair with a `/`-separated base/quote is standard forex.
     if "/" in (symbol or ""):
         return "forex"
@@ -511,11 +701,32 @@ class BridgeSettings:
     auth: dict = field(init=False, repr=False)
 
     #: Comma-separated backend symbols the bridge must subscribe to.
+    #:
+    #: PART 38.2 — expanded from the original 20 majors/crosses to every
+    #: whitelist symbol Pocket Option's live ``active_assets()`` dump actually
+    #: lists (verified against ``GET /api/v1/symbols`` → 50 PO assets). Eight
+    #: whitelist pairs PO does NOT list (USD/TRY, USD/ZAR, USD/MXN, USD/SGD,
+    #: USD/SEK, USD/NOK, USD/PLN, USD/CZK) were deliberately NOT added — a
+    #: reader armed against an asset the broker has never heard of can only
+    #: produce ``no_ssot_cache`` noise; those pairs must be served (and
+    #: LABELLED) by the REST fallback tier instead. The five legacy majors in
+    #: the original set that PO is not currently listing (USD/JPY, USD/CHF,
+    #: USD/CAD, NZD/USD, NZD/JPY) are kept: asset availability rotates per
+    #: session, so the arm stays valid for whenever they return.
     symbols: List[str] = field(default_factory=lambda: [
+        # PO OTC majors / crosses (original static set)
         "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
         "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "EUR/CHF",
         "EUR/AUD", "EUR/CAD", "EUR/NZD", "GBP/JPY", "GBP/CHF",
         "AUD/JPY", "AUD/CAD", "AUD/CHF", "NZD/JPY", "NZD/CAD",
+        # PART 38.2 — PO-listed whitelist symbols that were never subscribed
+        "EUR/TRY", "GBP/AUD", "GBP/CAD", "CAD/JPY", "CHF/JPY",
+        "AUD/NZD", "CAD/CHF", "EUR/RUB", "MAD/USD", "KES/USD",
+        # PART 38.2 — PO-listed standard-forex (non-OTC venue) pairs
+        "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK",
+        "EUR/HUF",
+        # PART 38.2 — PO-listed crypto majors (whitelist cards had no tape)
+        "BTC/USD", "ETH/USD",
     ])
 
     #: Reconnect / subscription tuning (seconds).
@@ -530,10 +741,31 @@ class BridgeSettings:
     #: Maximum number of M20 candles retained per symbol in the relay.
     max_m20_history: int = 500
 
-    #: Candidate Pocket Option WebSocket server URLs (falls back to default).
+    #: Candidate Pocket Option WebSocket server URLs (falls back to the SDK's
+    #: own compiled regional list when empty).
     urls: List[str] = field(default_factory=lambda: [
         u for u in os.getenv("POCKET_OPTION_WS_URLS", "").split(",") if u.strip()
     ])
+
+    #: Native SDK handshake budget (seconds). The Rust core raises
+    #: "General error: Connection initialization timed out" when the whole
+    #: endpoint rotation has not authenticated inside this window; its default
+    #: is only 60s, which a blocked/geo-sharded handshake can exhaust. MUST stay
+    #: above the bridge's own wait so Python never cancels a live handshake.
+    po_init_timeout: float = field(
+        default_factory=lambda: float(os.getenv("POCKET_OPTION_INIT_TIMEOUT", "120"))
+    )
+
+    #: Per-socket request timeout handed to the SDK (seconds).
+    po_request_timeout: float = field(
+        default_factory=lambda: float(os.getenv("POCKET_OPTION_TIMEOUT_SECS", "30"))
+    )
+
+    #: Seconds the SDK waits before rotating to the next endpoint after a failed
+    #: handshake. Kept short so a blocked host is bypassed quickly.
+    po_reconnect_time: float = field(
+        default_factory=lambda: float(os.getenv("POCKET_OPTION_RECONNECT_TIME", "3"))
+    )
 
     #: Candle aggregation interval. Accepts a timeframe token
     #: ("20ms" | "100ms" | "1s" | "20s" | "1m" | "2m" | "3m" | "5m") or a raw
@@ -580,7 +812,46 @@ class BridgeSettings:
 
     @property
     def ssid_format(self) -> str:
-        return "full" if self.ssid.startswith("42[") else "raw"
+        # Report the format actually SENT on the wire, not merely the shape of
+        # the env string. ``_auth_payload`` falls back to a full
+        # ``42["auth",{...}]`` frame built from the session cookie, so a
+        # settings-level ``ssid`` of "" does NOT mean the bridge sends a raw
+        # token - it means it sends a full frame sourced elsewhere. Reporting
+        # "raw" there made /health and the boot log understate the payload and
+        # actively misled anyone debugging an auth failure.
+        if self.ssid.strip():
+            return "full" if self.ssid.strip().startswith("42[") else "raw"
+        return "full" if self.auth else "none"
+
+    def adopt_ssid(self, raw: str) -> bool:
+        """Adopt a freshly captured/refreshed SSID at runtime.
+
+        ``BridgeSettings`` is a frozen dataclass built once from ``os.environ``
+        at import time, and ``_auth_payload`` prefers ``self.settings.ssid`` over
+        the reloaded session file. So a token rotated by ``capture_session.py`` /
+        ``refresh_ssid.py`` wrote the new value to .env, but the running process
+        kept authenticating with the token it booted with — the refresh silently
+        had no effect for the rest of the process lifetime, which is precisely
+        when a refresh matters most (the old token has expired).
+
+        Both ``ssid`` and the derived ``auth`` are replaced together so the
+        uid/isDemo/platform/isFastHistory properties stay consistent with the
+        token actually in use. Returns False when the new value is unusable, in
+        which case the caller keeps the previous credentials rather than
+        downgrading to an unauthenticated frame.
+        """
+        value = (raw or "").strip().strip("'\"").strip()
+        if not value:
+            return False
+        try:
+            parsed = parse_ssid(value)
+        except ValueError:
+            return False
+        if not parsed.get("session"):
+            return False
+        object.__setattr__(self, "ssid", value)
+        object.__setattr__(self, "auth", parsed)
+        return True
 
     @property
     def uid(self) -> int:

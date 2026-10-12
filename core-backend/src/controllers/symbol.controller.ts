@@ -38,10 +38,12 @@ export const getSymbols = async (req: Request, res: Response) => {
       ? (typeParam as (typeof validTypes)[number])
       : undefined;
 
-    // Validate limit
+    // Validate limit — max 1000: the registry outgrew 100 once PO's live
+    // asset superset merges in (partial-100 responses silently truncated
+    // alphabetically-later pairs such as the USD-cross real forex set).
     const limit = Math.min(
       Math.max(parseInt(limitParam || "50", 10) || 50, 1),
-      100,
+      1000,
     );
 
     let symbols: SymbolEntry[];

@@ -12,16 +12,25 @@
 import { PrismaClient } from "@prisma/client";
 import { logger } from "../utils/logger";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { symbolRegistry } from "./symbolRegistry.service";
+import { isPocketOptionSource } from "../lib/pocketOptionSource";
 
 export const HISTORY_WINDOW_MINUTES = 30;
 export const HISTORY_BUCKET_MS = 60_000;
 export const HISTORY_TICKS_WINDOW = 2000;
 export const HISTORY_COLLECTOR_INTERVAL_MS = 60_000;
+/** Newest-N persisted 1m bars read once per symbol at boot (PART 32.3 [248]). */
+export const HISTORY_BACKFILL_BAR_LIMIT = 1_500;
 
 export interface HistoryTickInput {
   price: number;
   tsMs: number;
   volume?: number | null;
+  /**
+   * PART 44 [494] — authoring feed of the tick (`pocket_option`, `frankfurter`,
+   * `held_stale_real`, …), or null/undefined when the writer never stamped one.
+   */
+  source?: string | null;
 }
 
 export interface HistoryBar {
@@ -32,6 +41,13 @@ export interface HistoryBar {
   close: number;
   volume: number | null;
   tick_count: number;
+  /**
+   * PART 44 [494] — PROVENANCE of the bar: the source of the newest tick that
+   * formed it (a tick that carried one), or null when no contributing tick was
+   * ever stamped (legacy tape). Persisted so an OTC bar fed by a non-PO proxy
+   * is detectable by the [495] audit instead of masquerading as a PO print.
+   */
+  source: string | null;
 }
 
 /** Epoch ms of the 1-minute bucket a tick falls into. */
@@ -43,6 +59,12 @@ export function minuteBucket(tsMs: number): number {
  * Pure OHLCV rollup: group real ticks by minute bucket, oldest bucket first.
  * Only finite positive prices participate; volume accumulates ONLY real feed
  * volume (stays null when the tape carries none).
+ *
+ * PART 44 [494]: each bar also records its provenance — the source of the
+ * NEWEST contributing tick that carried one. A legacy source-less print never
+ * erases a known provenance (that would let an unstamped tick whitewash a
+ * PO-authored bar), so a bar formed by PO ticks then a proxy tick stays
+ * stamped `pocket_option` for the [495] audit.
  */
 export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
   const buckets = new Map<
@@ -54,6 +76,7 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
       close: number;
       volume: number | null;
       tickCount: number;
+      source: string | null;
     }
   >();
   for (const tick of ticks) {
@@ -68,6 +91,7 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
         close: tick.price,
         volume: null,
         tickCount: 0,
+        source: null,
       };
       buckets.set(b, bar);
     }
@@ -75,6 +99,9 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
     bar.low = Math.min(bar.low, tick.price);
     bar.close = tick.price;
     bar.tickCount += 1;
+    if (tick.source != null && String(tick.source).trim() !== "") {
+      bar.source = String(tick.source).trim();
+    }
     if (tick.volume != null) {
       const real = Number(tick.volume);
       bar.volume = (bar.volume ?? 0) + Math.max(0, real);
@@ -90,10 +117,70 @@ export function buildMinuteBars(ticks: HistoryTickInput[]): HistoryBar[] {
       close: bar.close,
       volume: bar.volume,
       tick_count: bar.tickCount,
+      source: bar.source,
     }));
 }
 
 const prisma = new PrismaClient();
+
+/**
+ * ── DATABASE RESILIENCE ────────────────────────────────────────────────────
+ *
+ * This collector is a BACKGROUND layer. It persists real ticks and feeds the
+ * boot backfill. Neither is allowed to take the API server down when Postgres
+ * is briefly unreachable (container restart, network blip, laptop resume).
+ *
+ * Two concrete failure modes existed before this block:
+ *
+ *  1. `getAssetHistoryBars` / `getRecentBars` / `getHistoryHealth` had NO
+ *     try/catch. They are called straight from HTTP routes
+ *     (routes/history.routes.ts, routes/health.routes.ts), so a DB outage
+ *     turned every history request into an unhandled rejection → HTTP 500.
+ *  2. `run()` DOES catch per symbol, but with ~44 symbols that is 44 identical
+ *     "Can't reach database server" traces every 60 seconds. The real problem
+ *     (the database is down) is buried under the symptom (one symbol failed).
+ *
+ * `db()` therefore classifies the failure instead of swallowing it blindly:
+ * a CONNECTIVITY failure is logged once per outage and answered with an honest
+ * empty result, while anything else is rethrown so a genuine query or schema
+ * bug still surfaces loudly instead of masquerading as "no history".
+ *
+ * HONESTY NOTE: the fallback is EMPTY history, never fabricated history. A
+ * chart with no bars is visibly empty; a chart with invented bars is a lie.
+ */
+
+/**
+ * Prisma error codes that mean "the database is momentarily unreachable" — the
+ * transient class that must degrade to empty history instead of failing.
+ *
+ * P1000 (authentication failed) and P1003 (database does not exist) are
+ * deliberately NOT in this set, even though they used to be. They are not
+ * transient: they mean the configured credentials do not match the database,
+ * and no amount of retrying will fix them. Absorbing them here was actively
+ * harmful — it served silently EMPTY charts while Postgres filled its log with
+ * `FATAL: password authentication failed`, which looks exactly like "no market
+ * data yet" to every downstream reader. A misconfiguration must be loud, not
+ * quiet. They fall through and surface as a real error.
+ *
+ * P1017 (server closed the connection) and P2024 (pool fetch timeout) are
+ * included because both genuinely recover on their own once the database
+ * returns or the pool drains.
+ */
+const DB_UNREACHABLE_CODES = new Set([
+  "P1001", // can't reach database server
+  "P1002", // database server timed out
+  "P1008", // operation timed out
+  "P1017", // server closed the connection
+  "P2024", // timed out fetching a connection from the pool
+]);
+
+/** Repeat connectivity failures are logged at most this often. */
+const DB_LOG_BACKOFF_MS = 60_000;
+
+function isDbUnreachable(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" && DB_UNREACHABLE_CODES.has(code);
+}
 
 /** Health summary for ONE symbol over the 30-minute window. */
 export interface AssetHistoryHealth {
@@ -111,6 +198,67 @@ class HistoryCollectorService {
   private lastRunAt: string | null = null;
   private lastStats: Map<string, { bars: number; ticks: number }> = new Map();
 
+  /** Consecutive connectivity failures, reset on the first success. */
+  private dbFailures = 0;
+  /** Epoch ms the current outage began, for the recovery log line. */
+  private dbDownSince: number | null = null;
+  /** Epoch ms of the last outage log, enforcing DB_LOG_BACKOFF_MS. */
+  private lastDbLogAt = 0;
+
+  /**
+   * Run one DB operation, degrading gracefully ONLY on connectivity failure.
+   *
+   * @param label    operation name for the log (e.g. "assetHistory.upsert")
+   * @param op       the Prisma call
+   * @param fallback returned to the caller when the database is unreachable
+   *
+   * Connectivity failures return `fallback`; every other error is rethrown so a
+   * real query/schema bug is never hidden behind a silently empty result.
+   */
+  private async db<T>(label: string, op: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      const result = await op();
+      if (this.dbFailures > 0) {
+        logger.info("History collector: database reachable again", {
+          after_consecutive_failures: this.dbFailures,
+          down_for_ms: this.dbDownSince ? Date.now() - this.dbDownSince : 0,
+        });
+        this.dbFailures = 0;
+        this.dbDownSince = null;
+      }
+      return result;
+    } catch (err) {
+      if (!isDbUnreachable(err)) throw err;
+
+      this.dbFailures += 1;
+      const now = Date.now();
+      if (this.dbDownSince === null) this.dbDownSince = now;
+      if (now - this.lastDbLogAt >= DB_LOG_BACKOFF_MS) {
+        this.lastDbLogAt = now;
+        logger.error("History collector: database unavailable — degrading to empty history", {
+          operation: label,
+          consecutive_failures: this.dbFailures,
+          error: err instanceof Error ? err.message : String(err),
+          hint:
+            "Postgres unreachable. A NATIVELY-run core-backend needs host port 5433 " +
+            "(localhost:5433); a containerised one needs postgres:5432. " +
+            "If this persists after the database is up, restart the backend so it " +
+            "re-reads DATABASE_URL.",
+        });
+      }
+      return fallback;
+    }
+  }
+
+  /** Live connectivity state, surfaced for /health. */
+  public dbStatus(): { reachable: boolean; consecutiveFailures: number; downSince: string | null } {
+    return {
+      reachable: this.dbFailures === 0,
+      consecutiveFailures: this.dbFailures,
+      downSince: this.dbDownSince ? new Date(this.dbDownSince).toISOString() : null,
+    };
+  }
+
   /**
    * One collection pass for a single symbol, from real ticks → DB rows.
    * Returns the count of bars upserted and unique ticks persisted.
@@ -122,6 +270,15 @@ class HistoryCollectorService {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm) return { bars: 0, ticksInserted: 0, barsFound: 0, ticksInWindow: 0 };
 
+    // PART 44 [494] — DATA PROVENANCE GATE. An OTC instrument is bullish ONLY
+    // on the Pocket Option tape: a proxy (Frankfurter/ER-API), a helpfully
+    // re-served GitHub print, or a held re-pended continuity print is NOT a PO
+    // print and must never author an OTC bar — a bar of proxy prices persisted
+    // as if it were PO history is indistinguishable from a real PO dataset to
+    // every downstream reader. Source-less (legacy) ticks are KEPT for
+    // back-compat so the pre-provenance tape still persists; what they become
+    // is exactly what the [495] audit exists to surface.
+    const isOtc = symbolRegistry.getAssetSubType(norm) === "otc";
     const windowTicks = realtimeTickBuffer
       .getRecentWindow(norm, HISTORY_TICKS_WINDOW)
       .filter(
@@ -129,10 +286,14 @@ class HistoryCollectorService {
           Number.isFinite(t.price) &&
           t.price > 0 &&
           Number.isFinite(t.tsMs) &&
-          t.tsMs >= nowMs - HISTORY_WINDOW_MINUTES * HISTORY_BUCKET_MS,
+          t.tsMs >= nowMs - HISTORY_WINDOW_MINUTES * HISTORY_BUCKET_MS &&
+          (!isOtc ||
+            (t.stale !== true && (t.source == null || isPocketOptionSource(t.source)))),
       );
 
-    const bars = buildMinuteBars(windowTicks.map((t) => ({ price: t.price, tsMs: t.tsMs })));
+    const bars = buildMinuteBars(
+      windowTicks.map((t) => ({ price: t.price, tsMs: t.tsMs, source: t.source ?? null })),
+    );
 
     if (bars.length === 0 && windowTicks.length === 0) {
       return { bars: 0, ticksInserted: 0, barsFound: 0, ticksInWindow: 0 };
@@ -148,24 +309,33 @@ class HistoryCollectorService {
         close: bar.close,
         volume: bar.volume,
         tickCount: bar.tick_count,
+        source: bar.source,
       };
-      await prisma.assetHistory.upsert({
-        where: {
-          symbol_timeframe_bucketStartMs: {
-            symbol: norm,
-            timeframe: "1m",
-            bucketStartMs: bucket,
-          },
-        },
-        update: record,
-        create: {
-          symbol: norm,
-          timeframe: "1m",
-          bucketStartMs: bucket,
-          ...record,
-        },
-      });
-      barsUpserted += 1;
+      const persisted = await this.db(
+        "assetHistory.upsert",
+        () =>
+          prisma.assetHistory.upsert({
+            where: {
+              symbol_timeframe_bucketStartMs: {
+                symbol: norm,
+                timeframe: "1m",
+                bucketStartMs: bucket,
+              },
+            },
+            update: record,
+            create: {
+              symbol: norm,
+              timeframe: "1m",
+              bucketStartMs: bucket,
+              ...record,
+            },
+          }),
+        null,
+      );
+      // Only count a bar we actually wrote. `db()` returns null on a
+      // connectivity failure, so incrementing unconditionally would report
+      // bars in the health summary that were never persisted.
+      if (persisted) barsUpserted += 1;
     }
 
     let ticksInserted = 0;
@@ -174,10 +344,27 @@ class HistoryCollectorService {
       // reading what's already persisted for the window, then insert only the
       // genuinely new prints. Step-merges make passes idempotent.
       const cutoff = BigInt(nowMs - HISTORY_WINDOW_MINUTES * HISTORY_BUCKET_MS);
-      const existing = await prisma.tickHistory.findMany({
-        where: { symbol: norm, tsMs: { gte: cutoff } },
-        select: { tsMs: true },
-      });
+      const existing = await this.db(
+        "tickHistory.findMany",
+        () =>
+          prisma.tickHistory.findMany({
+            where: { symbol: norm, tsMs: { gte: cutoff } },
+            select: { tsMs: true },
+          }),
+        null,
+      );
+      // Unreachable DB → we cannot know what is already persisted, so inserting
+      // blind risks duplicate (symbol, tsMs) rows. Skip the tick insert for this
+      // pass; the next successful pass re-reads and converges.
+      if (existing === null) {
+        this.lastStats.set(norm, { bars: barsUpserted, ticks: 0 });
+        return {
+          bars: barsUpserted,
+          ticksInserted: 0,
+          barsFound: bars.length,
+          ticksInWindow: windowTicks.length,
+        };
+      }
       const existingSet = new Set(existing.map((r) => r.tsMs.toString()));
       const fresh = windowTicks
         .map((t) => ({
@@ -196,7 +383,7 @@ class HistoryCollectorService {
         } catch (err: any) {
           // P2002 = unique constraint (symbol, tsMs): a concurrent writer already
           // persisted these real ticks. The overlap is honest — we skip and move on.
-          if (err?.code === "P2002") {
+          if (err?.code === "P2002" || isDbUnreachable(err)) {
             ticksInserted = 0;
           } else {
             throw err;
@@ -220,6 +407,10 @@ class HistoryCollectorService {
    * keyed (symbol, timeframe, bucketStartMs); the same unique key the local
    * tape collector writes, so the ai-engine's real observations reconcile the
    * same store without duplicating rows.
+   *
+   * PART 44 [494]: the ingest may carry an optional per-bar `source` stamp.
+   * The ai-engine's own observations are labelled `ai_engine` so consumers can
+   * tell a synthesized/observed bar from a raw tape bar at a glance.
    */
   public async upsertBars(
     symbol: string,
@@ -232,6 +423,7 @@ class HistoryCollectorService {
       close: number;
       volume?: number | null;
       tickCount?: number;
+      source?: string | null;
     }>,
   ): Promise<number> {
     const norm = (symbol || "").trim().toUpperCase();
@@ -253,24 +445,30 @@ class HistoryCollectorService {
         close,
         volume: bar.volume == null ? null : Number(bar.volume),
         tickCount: bar.tickCount == null ? 1 : Math.max(0, Math.round(Number(bar.tickCount))),
+        source: bar.source == null || String(bar.source).trim() === "" ? null : String(bar.source).trim(),
       };
-      await prisma.assetHistory.upsert({
-        where: {
-          symbol_timeframe_bucketStartMs: {
-            symbol: norm,
-            timeframe: tf,
-            bucketStartMs: BigInt(bar.bucketStartMs),
-          },
-        },
-        update: record,
-        create: {
-          symbol: norm,
-          timeframe: tf,
-          bucketStartMs: BigInt(bar.bucketStartMs),
-          ...record,
-        },
-      });
-      upserted += 1;
+      const persisted = await this.db(
+        "assetHistory.upsert(ingest)",
+        () =>
+          prisma.assetHistory.upsert({
+            where: {
+              symbol_timeframe_bucketStartMs: {
+                symbol: norm,
+                timeframe: tf,
+                bucketStartMs: BigInt(bar.bucketStartMs),
+              },
+            },
+            update: record,
+            create: {
+              symbol: norm,
+              timeframe: tf,
+              bucketStartMs: BigInt(bar.bucketStartMs),
+              ...record,
+            },
+          }),
+        null,
+      );
+      if (persisted) upserted += 1;
     }
     return upserted;
   }
@@ -323,14 +521,22 @@ class HistoryCollectorService {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm) return [];
     const cutoff = BigInt(nowMs - windowMinutes * HISTORY_BUCKET_MS);
-    const rows = await prisma.assetHistory.findMany({
-      where: {
-        symbol: norm,
-        timeframe: "1m",
-        bucketStartMs: { gte: cutoff },
-      },
-      orderBy: { bucketStartMs: "asc" },
-    });
+    // Wrapped because this is served straight from routes/history.routes.ts: an
+    // unhandled throw here is what turned a DB outage into an HTTP 500.
+    const rows = await this.db(
+      "assetHistory.findMany",
+      () =>
+        prisma.assetHistory.findMany({
+          where: {
+            symbol: norm,
+            timeframe: "1m",
+            bucketStartMs: { gte: cutoff },
+          },
+          orderBy: { bucketStartMs: "asc" },
+        }),
+      null,
+    );
+    if (rows === null) return [];
     return rows.map((r) => ({
       bucket_start_ms: Number(r.bucketStartMs),
       open: r.open,
@@ -339,7 +545,52 @@ class HistoryCollectorService {
       close: r.close,
       volume: r.volume,
       tick_count: r.tickCount,
+      source: r.source ?? null,
     }));
+  }
+
+  /**
+   * The newest `limit` persisted 1m bars for ONE symbol, oldest first.
+   *
+   * This is the BOOT BACKFILL read (PART 32.3 [248]). It deliberately takes a
+   * ROW COUNT rather than a wall-clock window: the in-memory candle aggregator
+   * needs "give me the most recent N minutes of real history", and a window
+   * would silently return fewer bars than requested for a symbol whose feed is
+   * sparse — which is exactly the case the backfill exists to cover.
+   *
+   * One read path for every asset type; nothing here inspects OTC / REAL /
+   * CRYPTO.
+   */
+  public async getRecentBars(
+    symbol: string,
+    limit = HISTORY_BACKFILL_BAR_LIMIT,
+  ): Promise<HistoryBar[]> {
+    const norm = (symbol || "").trim().toUpperCase();
+    const take = Math.max(1, Math.min(10_000, Math.round(Number(limit) || 0)));
+    if (!norm) return [];
+    const rows = await this.db(
+      "assetHistory.findMany(backfill)",
+      () =>
+        prisma.assetHistory.findMany({
+          where: { symbol: norm, timeframe: "1m" },
+          orderBy: { bucketStartMs: "desc" },
+          take,
+        }),
+      null,
+    );
+    if (rows === null) return [];
+    return rows
+      .map((r) => ({
+        bucket_start_ms: Number(r.bucketStartMs),
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume,
+        tick_count: r.tickCount,
+        source: r.source ?? null,
+      }))
+      .reverse();
   }
 
   /** Real tick count for one symbol over the trailing window. */
@@ -351,13 +602,11 @@ class HistoryCollectorService {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm) return 0;
     const cutoff = BigInt(nowMs - windowMinutes * HISTORY_BUCKET_MS);
-    try {
-      return await prisma.tickHistory.count({
-        where: { symbol: norm, tsMs: { gte: cutoff } },
-      });
-    } catch {
-      return 0;
-    }
+    return this.db(
+      "tickHistory.count",
+      () => prisma.tickHistory.count({ where: { symbol: norm, tsMs: { gte: cutoff } } }),
+      0,
+    );
   }
 
   /** Persisted 30-minute window health for one symbol (byte-truth proof). */

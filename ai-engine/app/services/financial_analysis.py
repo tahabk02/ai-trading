@@ -15,11 +15,31 @@ Pipeline stages (each stage contributes its genuine verdict):
                   gate (Bollinger / Turtle / Murphy / Nison / Chan / Carter /
                   Aronson / Aldridge / Faith).
   4. QUALITY    — apply_quality_gate: five-factor ensemble watershed at the
-                  T4 bar (QUALITY_EMIT_BAR = 0.70) when a real multi-factor
-                  window is supplied; otherwise honestly reported as None.
+                  emission bar (QUALITY_EMIT_BAR = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
+                  = 0.965 STRICT 2026-09-24) when a real multi-factor window is
+                  supplied; otherwise honestly reported as None.
+                  PART 33 [239]: the ensemble is weighted PER ASSET TYPE
+                  (OTC / REAL / CRYPTO) rather than by one shared vector — see
+                  asset_type_weights. Each type starts on a documented
+                  structural prior and may tilt only on ITS OWN resolved signals,
+                  and only once that type has >= MIN_RESOLVED_SIGNALS (30).
+                  Below the floor the payload reports learned=False; no weight
+                  is ever invented and the 0.965 emission bar is unchanged.
   5. TIER       — resolve_tier from signal_gatekeeper (T1 PREMIUM … T5 WEAK);
-                  a verdict is executable only when it clears the dispatched
-                  minimum tier (default T4 = 0.70).
+                  STRICT bar: a verdict is executable only when it clears the
+                  dispatched minimum tier (default MIN_EXECUTABLE_TIER = T1 =
+                  96.5%, restored 2026-09-24 over the LIVE-TEST T4 = 0.30).
+   6. REGIME     — PART 14 [46]: a bias-corrected Hurst classification of the
+                  real close tape (>= MIN_CLOSES = 100 candles). A RANDOM_WALK
+                  symbol is demoted to scored-only (tier T5, never executable)
+                  even at T1 confidence, stamped
+                  `suppressed_reason="regime_scored_only"` — UNLESS its real
+                  history reaches REGIME_GATE_BYPASS_CLOSES = 160 closes
+                  (LIVE-TEST bypass: surfaced but forced TRADABLE, not
+                  demoted). Fewer than 100 closes, or regime classification
+                  failure, means the regime gate is NOT asserted
+                  (``regime_gate`` stays None) — the existing multi-tier gate
+                  keeps its authority.
 
 Direction is ALWAYS kept when a real verdict is resolved — a sub-tier result
 is flagged ``market_waiting`` with the honest tier reached, never coerced to
@@ -27,6 +47,8 @@ HOLD and never procedurally fabricated into an executable signal.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pandas as pd
@@ -36,11 +58,32 @@ from typing import Any, Dict, List, Optional
 
 from .technical_analysis import TechnicalAnalysisService
 from .quant_matrix import evaluate_quant_matrix, QuantVerdict
-from .book_instruments import evaluate_book_confluence
-from .quality_gate import apply_quality_gate, build_factor_inputs_from_candles
+from .book_instruments import (
+    book_agreement_detail,
+    evaluate_book_confluence,
+    microstructure_queue,
+)
+from .quality_gate import (
+    apply_quality_gate,
+    build_factor_inputs_from_candles,
+    _rsi as _quality_rsi,
+)
+# PART 33 [239] — per-asset-type book-weight profiles. The five-factor ensemble
+# is no longer a single shared vector: each market type is weighted on its OWN
+# microstructure and may tilt only on ITS OWN resolved signals (>= 30).
+from .asset_type_weights import profile_by_symbol, weights_by_symbol
+from .asset_class import resolve_asset_class
+from .math_engine import ewma_volatility, garch11_forecast
+from .regime_detector import classify_regime, MIN_CLOSES
+from ..knowledge.book_chan import half_life_ou
 from .signal_gatekeeper import (
     TIER_LABELS,
     MIN_EXECUTABLE_TIER,
+    REGIME_GATE_TRADABLE,
+    REGIME_GATE_SCORED_ONLY,
+    REGIME_GATE_BYPASS_CLOSES,
+    SUPPRESSED_REASON_REGIME,
+    SUPPRESSED_TIER,
     is_dispatchable_tier,
     resolve_tier,
     tier_min_confidence,
@@ -49,6 +92,147 @@ from .signal_gatekeeper import (
 logger = structlog.get_logger(__name__)
 
 VALID_DIRECTIONS = ("BUY", "SELL")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PART 19 [107] — NAMED 50-CANDLE ROLLING FEATURE WINDOW
+# A fixed, documented trailing window whose REAL sub-model inputs (ATR(14),
+# RSI(14), EWMA/GARCH(1,1) volatility, OU half-life, microstructure queue)
+# are computed over the window and fed into the existing regime-gated
+# ensemble factor surface. This is a FEATURE-INPUT window only — it never
+# relaxes the regime classification gate (classify_regime still runs on the
+# full >= MIN_CLOSES historical tape in Stage 6).
+# ═══════════════════════════════════════════════════════════════════════════
+ROLLING_WINDOW = 50
+
+# RiskMetrics GARCH(1,1) parametrization: alpha = 1 − lambda, beta = lambda,
+# omega = 0 — the same EWMA model family horizon_engine relies on.
+_GARCH_ALPHA = 0.06
+_GARCH_BETA = 0.93
+
+
+def compute_rolling_window_features(
+    closes: List[float],
+    opens: Optional[List[float]] = None,
+    highs: Optional[List[float]] = None,
+    lows: Optional[List[float]] = None,
+    volumes: Optional[List[float]] = None,
+    *,
+    live_price: Optional[float] = None,
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+    window: int = ROLLING_WINDOW,
+) -> Dict[str, Any]:
+    """Compute REAL sub-model inputs over the trailing `window` candles.
+
+    Every feature is derived strictly from the supplied candle history — no
+    fabricated values. Non-finite or unavailable inputs are reported as None
+    together with the count of real candidates, never invented.
+
+    Returns:
+      - window_len / candles_total       transparency
+      - atr14                            Wilder ATR(14) on the window
+      - rsi14                            Wilder RSI(14) via quality-gate helper
+      - ewma_volatility                  RiskMetrics EWMA vol (lambda=0.94)
+      - garch11_forecast_vol             1-step GARCH(1,1) RiskMetrics vol
+      - garch11_persistence              alpha+beta of the parametrization
+      - ou_half_life                     OU mean-reversion half-life (Chan)
+      - microstructure_queue             PART 3 queue position (real quotes)
+      - volume_surge                     last bar vs prior-20 mean (None flat)
+    """
+    closes_clean = [float(c) for c in closes if math.isfinite(float(c))]
+    win = min(window, len(closes_clean))
+    if win < 2:
+        return {"window_len": 0, "candles_total": len(closes_clean)}
+    w_closes = closes_clean[-win:]
+
+    def _finite(v):
+        if v is None or not math.isfinite(float(v)):
+            return None
+        return round(float(v), 6)
+
+    atr14 = None
+    try:
+        w_opens = [float(o) for o in (opens or closes)][-win:]
+        w_highs = [float(h) for h in (highs or closes)][-win:]
+        w_lows = [float(l) for l in (lows or closes)][-win:]
+        ta = TechnicalAnalysisService()
+        enriched = ta.calculate_indicators(
+            pd.DataFrame({"open": w_opens, "high": w_highs, "low": w_lows, "close": w_closes})
+        )
+        atr14 = _finite(float(enriched["atr"].iloc[-1]))
+    except Exception:
+        atr14 = None
+
+    rsi14 = None
+    try:
+        rsi_series = _quality_rsi(w_closes, 14)
+        if rsi_series and rsi_series[-1] is not None:
+            rsi14 = _finite(rsi_series[-1])
+    except Exception:
+        rsi14 = None
+
+    ewma_vol = None
+    garch_forecast_vol = None
+    garch_persistence = _GARCH_ALPHA + _GARCH_BETA
+    try:
+        returns = [
+            w_closes[i] / w_closes[i - 1] - 1.0
+            for i in range(1, len(w_closes))
+            if w_closes[i - 1] > 0
+        ]
+        if len(returns) >= 2:
+            ewma_raw = ewma_volatility(returns, lambda_=0.94)
+            ewma_vol = _finite(ewma_raw)
+            garch_forecast_vol = _finite(
+                garch11_forecast(
+                    omega=0.0,
+                    alpha=_GARCH_ALPHA,
+                    beta=_GARCH_BETA,
+                    last_variance=ewma_raw * ewma_raw,
+                    last_return=returns[-1],
+                    horizon=1,
+                )
+            )
+    except Exception:
+        ewma_vol = None
+        garch_forecast_vol = None
+
+    ou_half_life = None
+    try:
+        hl = half_life_ou(w_closes)
+        # Only a POSITIVE half-life is mean-reversion evidence. A non-positive
+        # or infinite value means the window shows no reversion — reported as
+        # None, never a fabricated number.
+        if math.isfinite(float(hl)) and float(hl) > 0:
+            ou_half_life = _finite(hl)
+    except Exception:
+        ou_half_life = None
+
+    micro_queue = 0.0
+    if live_price is not None and math.isfinite(float(live_price)):
+        micro_queue = microstructure_queue(float(live_price), bid, ask)
+
+    volume_surge = None
+    if volumes:
+        vols = [float(v) for v in volumes if math.isfinite(float(v))]
+        if len(vols) >= 21:
+            prior = vols[-21:-1]
+            mean_prior = sum(prior) / len(prior)
+            if mean_prior > 0:
+                volume_surge = _finite(vols[-1] / mean_prior)
+
+    return {
+        "window_len": win,
+        "candles_total": len(closes_clean),
+        "atr14": atr14,
+        "rsi14": rsi14,
+        "ewma_volatility": ewma_vol,
+        "garch11_forecast_vol": garch_forecast_vol,
+        "garch11_persistence": _finite(garch_persistence),
+        "ou_half_life": ou_half_life,
+        "microstructure_queue": round(micro_queue, 6),
+        "volume_surge": volume_surge,
+    }
 
 
 @dataclass
@@ -72,7 +256,14 @@ class FinancialAnalysisReport:
     quality: Optional[float] = None     # five-factor ensemble 0..1 (None honest)
     quality_reason: Optional[str] = None
     quality_field: Dict[str, Any] = field(default_factory=dict)
-    factors: Dict[str, float] = field(default_factory=dict)
+    regime_gate: Optional[str] = None   # PART 14 [46] — "scored_only"|"tradable"|None
+    suppressed_reason: Optional[str] = None  # "regime_scored_only" rides the payload
+    regime_classification: Dict[str, Any] = field(default_factory=dict)  # PART 19 [108]
+    factors: Dict[str, Any] = field(default_factory=dict)
+    # PART 33 [239] — which asset type was weighted, with WHAT weights, and
+    # whether they are structural priors or learned from resolved signals.
+    asset_class: Optional[str] = None
+    weight_profile: Dict[str, Any] = field(default_factory=dict)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
 
@@ -193,6 +384,24 @@ class FinancialAnalysisService:
         volumes = np.array(
             [float(c.get("volume", 0.0) or 0.0) for c in candles], dtype=np.float64
         )
+
+        # ── PART 19 [107] — rolling 50-candle feature window ──
+        # Computed over the trailing ROLLING_WINDOW candles and fed into the
+        # Stage 4 factor surface below. Pure feature input: it never alters the
+        # candles handed to the books/quant stages or the regime gate.
+        window_features = compute_rolling_window_features(
+            closes.tolist(),
+            opens=opens.tolist(),
+            highs=highs.tolist(),
+            lows=lows.tolist(),
+            volumes=volumes.tolist(),
+            live_price=live_price,
+            bid=bid,
+            ask=ask,
+            window=ROLLING_WINDOW,
+        )
+        diagnostics["rolling_window"] = window_features
+        _book_confluence_raw = {}
         try:
             book = evaluate_book_confluence(
                 closes=closes,
@@ -209,19 +418,52 @@ class FinancialAnalysisService:
             )
             book_gate = str((book.confluence or {}).get("gate", "INSUFFICIENT"))
             book_score = float((book.confluence or {}).get("score", 0.0))
+            _book_confluence_raw = dict(book.confluence or {})
         except Exception:  # noqa: BLE001 — book tier is additive, never fatal
             book_gate = "INSUFFICIENT"
             book_score = 0.0
-        diagnostics.setdefault("book_confluence", {})
-        diagnostics["book_confluence"].setdefault("gate", book_gate)
-        diagnostics["book_confluence"].setdefault("score", round(book_score, 4))
+            _book_confluence_raw = {}
+        diagnostics["book_confluence"] = {
+            "gate": book_gate,
+            "score": round(book_score, 4),
+            # PART 19.2 [118] — the full confluence internals (convergence_index
+            # / alignment / magnitude / aligned_count / active_count) used to
+            # render the honest "n/n books aligned" label next to the score.
+            # The QUANT-stage book detail is authoritative (it produced the
+            # dispatched score); the Stage-3 re-evaluation above is only a
+            # fallback for callers that supplied direction/confidence directly.
+            "confluence": dict(
+                (diagnostics.get("book") or {}).get("confluence", {})
+                or _book_confluence_raw
+            ),
+        }
 
         # ── Stage 4: QUALITY — five-factor ensemble watershed ──
+        # PART 33 [239] — weighted by THIS symbol's asset type, not by one
+        # shared vector. On a fresh deployment every type reports
+        # learned=False and sits on its structural prior; the provenance rides
+        # on the payload so nothing downstream can mistake a prior for
+        # measured evidence.
         quality = None
         quality_reason = None
         quality_field: Dict[str, Any] = {}
+        asset_class = resolve_asset_class(symbol)
+        type_weights = weights_by_symbol(symbol)
+        weight_profile = profile_by_symbol(symbol)
         if factor_inputs:
-            qq = apply_quality_gate(direction, confidence, factor_inputs)
+            # PART 19 [107] — the rolling-window features ride into the
+            # five-factor ensemble's input surface (additive key; unknown keys
+            # are ignored by compute_factor_scores, None path untouched).
+            enriched_inputs = dict(factor_inputs)
+            enriched_inputs["rolling_window"] = window_features
+            qq = apply_quality_gate(
+                direction,
+                confidence,
+                enriched_inputs,
+                weights=type_weights,
+                asset_class=asset_class,
+                weights_source=weight_profile.get("source"),
+            )
             quality = qq.get("quality")
             quality_reason = qq.get("reason")
             quality_field = qq
@@ -230,7 +472,7 @@ class FinancialAnalysisService:
                 waiting_reason = "QUALITY_BELOW_GATE"
                 waiting_detail = (
                     f"NO SIGNAL — quality {quality:.4f} < watershed "
-                    f"{qq.get('gate', 0.70):.4f} ({quality_reason})"
+                    f"{qq.get('gate', 0.30):.4f} ({quality_reason})"
                 )
 
         # ── Stage 5: TIER — honest multi-tier gate ──
@@ -251,6 +493,59 @@ class FinancialAnalysisService:
                 f"minimum tier bar {exec_bar * 100.0:.2f}% (T{resolved_tier})"
             )
 
+        # ── Stage 6: REGIME — PART 14 [46] random_walk → scored-only ──
+        # A bias-corrected Hurst classification of the real tape. RANDOM_WALK
+        # symbols are NEVER tradable (demoted to T5 even at T1 confidence).
+        # The gate is only asserted when >= MIN_CLOSES real closes make a
+        # classification honest; shorter/failed windows leave regime_gate=None
+        # so the existing multi-tier gate keeps full authority.
+        regime_gate: Optional[str] = None
+        suppressed_reason: Optional[str] = None
+        # PART 19 [108] — the classification itself is surfaced (never relaxed)
+        # so downstream consumers/tables can show the REAL regime evidence.
+        regime_classification: Dict[str, Any] = {}
+        if len(closes) >= MIN_CLOSES:
+            try:
+                regime_result = classify_regime(closes.tolist())
+                regime_classification = {
+                    "regime": regime_result.regime,
+                    "hurst": regime_result.hurst,
+                    "adf_pvalue": regime_result.adf_pvalue,
+                    "confidence": regime_result.confidence,
+                    "closes": int(len(closes)),
+                    "window": ROLLING_WINDOW,
+                }
+                if regime_result.regime == "random_walk":
+                    # LIVE-TEST [2026-09-23]: >= REGIME_GATE_BYPASS_CLOSES real
+                    # closes → trusted history → force TRADABLE (regime surfaced,
+                    # verdict NOT demoted). REVERT: drop this bypass branch.
+                    if len(closes) >= REGIME_GATE_BYPASS_CLOSES:
+                        regime_gate = REGIME_GATE_TRADABLE
+                        suppressed_reason = None
+                    else:
+                        regime_gate = REGIME_GATE_SCORED_ONLY
+                        suppressed_reason = SUPPRESSED_REASON_REGIME
+                else:
+                    regime_gate = REGIME_GATE_TRADABLE
+            except Exception:  # noqa: BLE001 — never fails the pipeline
+                regime_gate = None
+                suppressed_reason = None
+        if regime_gate == REGIME_GATE_SCORED_ONLY:
+            resolved_tier = SUPPRESSED_TIER
+            executable = False
+            market_waiting = True
+            waiting_reason = "REGIME_RANDOM_WALK"
+            waiting_detail = (
+                "SCORED-ONLY — random_walk regime gate: this symbol is never "
+                "tradable regardless of confidence (PART 14 scored_only)"
+            )
+            logger.warning(
+                "REGIME_SCORED_ONLY_DEMOTED",
+                symbol=symbol,
+                direction=direction,
+                confidence=round(confidence, 2),
+            )
+
         report = FinancialAnalysisReport(
             symbol=symbol,
             direction=direction,
@@ -269,9 +564,17 @@ class FinancialAnalysisService:
             quality=quality,
             quality_reason=quality_reason,
             quality_field=quality_field,
-            factors=dict(verdict_factors or {}),
+            regime_gate=regime_gate,
+            suppressed_reason=suppressed_reason,
+            regime_classification=regime_classification,
+            factors=dict(
+                verdict_factors or {},
+                rolling_window=window_features,
+            ),
+            asset_class=asset_class,
+            weight_profile=weight_profile,
             diagnostics=diagnostics,
-            timestamp=pd.Timestamp.utcnow().isoformat(),
+            timestamp=pd.Timestamp.now("UTC").isoformat(),
         )
         logger.info(
             "FINANCIAL_ANALYSIS",
@@ -285,11 +588,22 @@ class FinancialAnalysisService:
         return report
 
     def to_dict(self, report: FinancialAnalysisReport) -> Dict[str, Any]:
-        """Serialize a report to the shared API payload contract."""
+        """Serialize a report to the shared API payload contract.
+
+        PART 19.2 [117] — the 0-100 number is honestly named BOOK AGREEMENT
+        (a confluence score), never a calibrated probability. The internal
+        numeric field on the report keeps the ``confidence`` identifier for
+        pipeline compatibility; the exposed schema uses ``book_agreement``.
+        """
         return {
             "symbol": report.symbol,
             "direction": report.direction,
-            "confidence": round(report.confidence, 4),
+            "book_agreement": round(report.confidence, 4),
+            "book_agreement_detail": book_agreement_detail(
+                (report.diagnostics or {})
+                .get("book_confluence", {})
+                .get("confluence", {})
+            ),
             "tier": report.tier,
             "tier_label": report.tier_label,
             "executable": report.executable,
@@ -304,6 +618,14 @@ class FinancialAnalysisService:
             },
             "quality": report.quality,
             "quality_reason": report.quality_reason,
+            # PART 33 [239] — the asset type this score was weighted for, and
+            # the full provenance of those weights (structural prior vs learned
+            # from >= 30 resolved signals of THIS type only).
+            "asset_class": report.asset_class,
+            "weight_profile": report.weight_profile,
+            "regime_gate": report.regime_gate,
+            "suppressed_reason": report.suppressed_reason,
+            "regime_classification": report.regime_classification,
             "factors": report.factors,
             "diagnostics": report.diagnostics,
             "timestamp": report.timestamp,

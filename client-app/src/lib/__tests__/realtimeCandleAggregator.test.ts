@@ -33,10 +33,14 @@ import {
   MIN_BAR_SPACING_PX,
   BARS_PER_FRAME,
   timeframeToSeconds,
+  MAX_TARGET_INTERVALS,
+  targetDurationMinutes,
   targetIntervalsFor,
+  targetViewportNeedsReanchor,
   targetProjectionKey,
   TargetProjectionEngine,
   SignalHoldBuffer,
+  tierTargetStyle,
   RealtimeCandleAggregator,
 } from "@/lib/realtimeCandleAggregator";
 import {
@@ -285,14 +289,16 @@ describe("history bar gate (mission history-parity)", () => {
 });
 
 describe("signal gate (mission AI-confidence parity)", () => {
-  it("test_signal_gate — BUY/SELL needs ≥98% (0.98) on both 0..1 and 0..100 scales, custom threshold honored", () => {
-    expect(signalGate("BUY", 0.5)).toBe(false);
-    expect(signalGate("BUY", 0.6)).toBe(false);
-    expect(signalGate("SELL", 0.98)).toBe(true);
-    expect(signalGate("SELL", 0.979)).toBe(false);
-    expect(signalGate("BUY", 99)).toBe(true);
-    expect(signalGate("BUY", 97)).toBe(false);
-    expect(signalGate("BUY", 30)).toBe(false);
+  it("test_signal_gate — BUY/SELL needs ≥96.5% (0.965, STRICT bar) on both 0..1 and 0..100 scales, custom threshold honored", () => {
+    expect(signalGate("BUY", 0.964)).toBe(false);
+    expect(signalGate("BUY", 0.965)).toBe(true);
+    expect(signalGate("BUY", 0.98)).toBe(true);
+    expect(signalGate("SELL", 0.979)).toBe(true); // ≥ 0.965
+    expect(signalGate("SELL", 0.964)).toBe(false);
+    expect(signalGate("BUY", 96.5)).toBe(true); // 0..100 scale
+    expect(signalGate("BUY", 96.4)).toBe(false);
+    expect(signalGate("BUY", 30)).toBe(false); // legacy LIVE-TEST floor now ignored
+    expect(signalGate("BUY", 25)).toBe(false);
     expect(signalGate(null, 0.99)).toBe(false);
     expect(signalGate(undefined, 0.99)).toBe(false);
     expect(signalGate("BUY", 0.7, 0.75)).toBe(false);
@@ -798,6 +804,12 @@ describe("predictive target candles (mission target-lead)", () => {
     );
     expect(targetViewportRange(0, 5, TARGET_RIGHT_GUTTER).from).toBe(0);
   });
+
+  it("re-anchor policy follows target geometry, not transient projection updates", () => {
+    expect(targetViewportNeedsReanchor(12, 12)).toBe(false);
+    expect(targetViewportNeedsReanchor(12, 24)).toBe(true);
+    expect(targetViewportNeedsReanchor(0, 1)).toBe(true);
+  });
 });
 
 describe("live target candle projection — buildTargetCandles (FINAL MISSION)", () => {
@@ -863,7 +875,7 @@ describe("live target candle projection — buildTargetCandles (FINAL MISSION)",
     expect(candles[3].close).toBe(40);
   });
 
-  it("test_target_candles_intervals_rounding_never_zero — round(leadMs/tfMs) with a ≥1 floor", () => {
+  it("test_target_candles_intervals_ceil_never_zero — ceil(leadMs/tfMs) with a ≥1 floor", () => {
     expect(
       buildTargetCandles({
         liveTipBucketMs: TIP_MS,
@@ -874,7 +886,7 @@ describe("live target candle projection — buildTargetCandles (FINAL MISSION)",
         expirationSeconds: 144,
         timeframeSeconds: 60,
       }).length,
-    ).toBe(2);
+    ).toBe(3);
     expect(
       buildTargetCandles({
         liveTipBucketMs: TIP_MS,
@@ -1191,18 +1203,39 @@ describe("live target candle projection — buildTargetCandles (FINAL MISSION)",
     expect(three[2].time).toBe(tipSec + 180);
   });
 
-  it("test_target_intervals_capped_at_30 — large expiration/timeframe ratio produces max 30 candles", () => {
+  it("test_target_intervals_safety_cap — pathological durations stop at the 120-candle ceiling", () => {
     const tfSec = 60;
+    const expirationSeconds = tfSec * (MAX_TARGET_INTERVALS + 60);
     const candles = buildTargetCandles({
       liveTipBucketMs: TIP_MS,
       liveClose: 100,
       targetPrice: 110,
       atr: 1,
       signal: "BUY",
-      expirationSeconds: tfSec * 60,
+      expirationSeconds,
       timeframeSeconds: tfSec,
     });
-    expect(candles.length).toBe(30);
+    expect(candles.length).toBe(MAX_TARGET_INTERVALS);
+    expect(candles[candles.length - 1].offsetSec).toBe(expirationSeconds);
+  });
+
+  it("keeps every Pro expiry exact on the S5 chart grid", () => {
+    const tipSec = Math.floor(TIP_MS / 1000);
+    for (const expirationSeconds of [60, 120, 180, 300, 600]) {
+      const candles = buildTargetCandles({
+        liveTipBucketMs: TIP_MS,
+        liveClose: 100,
+        targetPrice: 110,
+        atr: 1,
+        signal: "BUY",
+        expirationSeconds,
+        timeframeSeconds: 5,
+      });
+      expect(candles).toHaveLength(targetIntervalsFor(expirationSeconds, 5));
+      expect(candles[candles.length - 1].offsetSec).toBe(expirationSeconds);
+      expect(candles[candles.length - 1].time).toBe(tipSec + expirationSeconds);
+      expect(targetDurationMinutes(expirationSeconds)).toBe(expirationSeconds / 60);
+    }
   });
 
   it("test_target_renders_when_confidence_low — candles render even when gate would hide the label", () => {
@@ -1297,20 +1330,20 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
     expect(late!.remainingMs).toBe(0);
   });
 
-  it("test_gated_signal_blocks_below_threshold — 37% SELL demoted to NO SIGNAL on every surface", () => {
+  it("test_gated_signal_blocks_below_threshold — 25% SELL demoted to NO SIGNAL on every surface", () => {
     const view = buildSignalView(
-      { signal: "SELL", confidence: 37 },
+      { signal: "SELL", confidence: 25 },
       SIGNAL_CONFIDENCE_THRESHOLD,
     );
     expect(view.gated).toBe(false);
     expect(view.gatedSignal).toBeNull();
     expect(view.directionText).toBe("NO SIGNAL");
-    expect(view.badgeText).toBe("NO SIGNAL — confidence 37% < 98%");
-    expect(view.confPct).toBe(37);
-    expect(view.gatePct).toBe(98);
+    expect(view.badgeText).toBe("NO SIGNAL — confidence 25% < 96.5%");
+    expect(view.confPct).toBe(25);
+    expect(view.gatePct).toBe(96.5);
   });
 
-  it("test_gated_signal_passes_above_threshold — ≥98% BUY/SELL clears the gate on both scales", () => {
+  it("test_gated_signal_passes_above_threshold — ≥96.5% BUY/SELL clears the gate on both scales", () => {
     const view = buildSignalView({ signal: "BUY", confidence: 99 });
     expect(view.gated).toBe(true);
     expect(view.gatedSignal).toBe("BUY");
@@ -1320,6 +1353,12 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
       buildSignalView({ signal: "SELL", confidence: 0.981 }).gatedSignal,
     ).toBe("SELL");
     expect(
+      buildSignalView({ signal: "SELL", confidence: 97 }).gatedSignal,
+    ).toBe("SELL");
+    expect(
+      buildSignalView({ signal: "SELL", confidence: 96.4 }).gatedSignal,
+    ).toBeNull(); // sub-96.5 → no directional call
+    expect(
       buildSignalView({ signal: "SELL", confidence: 55 }).gatedSignal,
     ).toBeNull();
     expect(buildSignalView(null).gatedSignal).toBeNull();
@@ -1327,12 +1366,12 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
   });
 
   it("test_panel_and_chart_share_same_gated_signal — one prediction derives identical NO SIGNAL / SIGNAL on both surfaces", () => {
-    const blocked = { signal: "SELL" as const, confidence: 37 };
+    const blocked = { signal: "SELL" as const, confidence: 25 };
     const passed = { signal: "BUY" as const, confidence: 99 };
     const panelBlocked = buildSignalView(blocked);
     const chartBlocked = buildSignalView(blocked);
     expect(panelBlocked.gatedSignal).toBeNull();
-    expect(chartBlocked.badgeText).toBe("NO SIGNAL — confidence 37% < 98%");
+    expect(chartBlocked.badgeText).toBe("NO SIGNAL — confidence 25% < 96.5%");
     expect(chartBlocked.directionText).toBe(panelBlocked.directionText);
     const panelPassed = buildSignalView(passed);
     const chartPassed = buildSignalView(passed);
@@ -1372,12 +1411,12 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
 describe("expiration ↔ timeframe decoupling (FINAL MISSION 5.1–5.10)", () => {
   const SEC20 = Math.floor(T20_00 / 1000); // 20:00:00.000 UTC on the 1m grid
 
-  it("test_intervals_from_expiration_and_timeframe — target intervals = max(1, round(expSeconds / tfSeconds))", () => {
-    expect(targetIntervalsFor(60, 20)).toBe(3); // 5s  × 1m   → 3 buckets
-    expect(targetIntervalsFor(120, 20)).toBe(6); // 5s  × 2m   → 6 buckets
-    expect(targetIntervalsFor(180, 20)).toBe(9); // 5s  × 3m   → 9 buckets
-    expect(targetIntervalsFor(300, 60)).toBe(5); // 1m  × 5m   → 5 buckets
-    // floor ≥ 1 even for exp < bucket
+  it("test_intervals_from_expiration_and_timeframe — target intervals ceil the selected duration", () => {
+    expect(targetIntervalsFor(60, 20)).toBe(3);
+    expect(targetIntervalsFor(120, 20)).toBe(6);
+    expect(targetIntervalsFor(180, 20)).toBe(9);
+    expect(targetIntervalsFor(300, 60)).toBe(5);
+    expect(targetIntervalsFor(65, 20)).toBe(4);
     expect(targetIntervalsFor(30, 60)).toBe(1);
   });
 
@@ -1430,7 +1469,7 @@ describe("expiration ↔ timeframe decoupling (FINAL MISSION 5.1–5.10)", () =>
     expect(candles[3].close).toBe(104); // last slot lands exactly on the target
   });
 
-  it("test_target_color_follows_gated_signal — gated BUY → teal candles, failed gate → neutral, 98% threshold respected", () => {
+  it("test_target_color_follows_gated_signal — gated BUY → teal candles, failed gate → neutral, 96.5% threshold respected", () => {
     const gated = buildSignalView({ signal: "BUY", confidence: 99 });
     expect(gated.gatedSignal).toBe("BUY");
     const teal = buildTargetCandles({
@@ -1444,11 +1483,11 @@ describe("expiration ↔ timeframe decoupling (FINAL MISSION 5.1–5.10)", () =>
     });
     expect(teal.length).toBe(4);
     expect(teal[0].color).toContain("38,166,154"); // rgba(38,166,154,…) teal
-    const blocked = buildSignalView({ signal: "SELL", confidence: 37 });
+    const blocked = buildSignalView({ signal: "SELL", confidence: 25 });
     expect(blocked.gatedSignal).toBeNull();
-    expect(blocked.gated).toBe(false); // did NOT pass the 98% gate
-    expect(blocked.confPct).toBe(37);
-    expect(blocked.gatePct).toBe(98);
+    expect(blocked.gated).toBe(false); // did NOT pass the 96.5% gate
+    expect(blocked.confPct).toBe(25);
+    expect(blocked.gatePct).toBe(96.5);
     expect(blocked.confPct).toBeLessThan(SIGNAL_CONFIDENCE_THRESHOLD * 100);
     const neutral = buildTargetCandles({
       liveClose: 100,
@@ -1660,6 +1699,19 @@ describe("ARCHITECTURAL OVERHAUL — deterministic projection engine (tick vs. p
     expect(eng.currentKey).toBe(a.key);
   });
 
+  it("uses exact expiry slots when the duration is not bucket-aligned", () => {
+    const eng = new TargetProjectionEngine();
+    const snapshot = eng.present({
+      ...base,
+      timeframeSec: 20,
+      expirationSec: 65,
+    });
+    expect(snapshot.intervals).toBe(4);
+    expect(snapshot.firstSlotSec).toBe(TIP + 20);
+    expect(snapshot.lastSlotSec).toBe(TIP + 65);
+    expect(snapshot.candles[3].offsetSec).toBe(65);
+  });
+
   it("micro price fluctuation never rebuilds — liveClose shakes ±0.0003, geometry stays frozen to the anchor", () => {
     const eng = new TargetProjectionEngine();
     const a = eng.present(base);
@@ -1842,5 +1894,198 @@ describe("PART 6 — tier-gated target candles (T1–T3 overlay)", () => {
     });
     expect(t5.candles.length).toBe(0);
     expect(t5.key).toContain("tier|off");
+  });
+});
+
+describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
+  const TIP = 1_700_000;
+  const baseInputs = {
+    liveTipBucketMs: TIP * 1000,
+    liveClose: 100,
+    targetPrice: 104,
+    atr: 1,
+    signal: "BUY" as const,
+    expirationSeconds: 60,
+    timeframeSeconds: 60,
+  };
+
+  function alphaOf(rgba: string): number {
+    const last = rgba.slice(rgba.lastIndexOf(",") + 1).replace(")", "").trim();
+    const a = Number(last);
+    return Number.isFinite(a) ? a : -1;
+  }
+
+  it("per-tier body opacity: T1 ~full, T2 0.70, T3 0.45", () => {
+    const t1 = buildTargetCandles({ ...baseInputs, tier: "T1" });
+    const t2 = buildTargetCandles({ ...baseInputs, tier: "T2" });
+    const t3 = buildTargetCandles({ ...baseInputs, tier: "T3" });
+    expect(t1[0].color).toMatch(/^rgba\(/);
+    expect(alphaOf(t1[0].color)).toBeCloseTo(0.95, 3);
+    expect(alphaOf(t2[0].color)).toBeCloseTo(0.7, 3);
+    expect(alphaOf(t3[0].color)).toBeCloseTo(0.45, 3);
+  });
+
+  it("outline/wick alpha is 0.60 for every tier — the thin 2px outline at 60%", () => {
+    for (const tier of ["T1", "T2", "T3"]) {
+      const c = buildTargetCandles({ ...baseInputs, tier });
+      expect(alphaOf(c[0].borderColor)).toBeCloseTo(0.6, 3);
+      expect(alphaOf(c[0].wickColor)).toBeCloseTo(0.6, 3);
+    }
+  });
+
+  it("direction colour stays green/red — the tier only changes opacity", () => {
+    const buy = buildTargetCandles({ ...baseInputs, tier: "T1" });
+    expect(buy[0].color.startsWith("rgba(38,166,154,")).toBe(true); // BUY green
+    const sell = buildTargetCandles({
+      ...baseInputs,
+      signal: "SELL",
+      tier: "T3",
+    });
+    expect(sell[0].borderColor.startsWith("rgba(239,83,80,")).toBe(true); // SELL red
+  });
+
+  it(`T3 marks a "?" above the wick; T1/T2 carry NO marker`, () => {
+    const t1 = buildTargetCandles({ ...baseInputs, tier: "T1" });
+    const t2 = buildTargetCandles({ ...baseInputs, tier: "T2" });
+    const t3 = buildTargetCandles({ ...baseInputs, tier: "T3" });
+    expect(t1.every((c) => c.marker == null)).toBe(true);
+    expect(t2.every((c) => c.marker == null)).toBe(true);
+    expect(t3.length).toBeGreaterThan(0);
+    expect(t3.every((c) => c.marker === "?")).toBe(true);
+  });
+
+  it("tierTargetStyle is stable & finite for unknown/absent tiers (legacy hollow)", () => {
+    expect(tierTargetStyle(undefined).tierStyled).toBe(false);
+    expect(tierTargetStyle("T9").marker).toBeNull();
+    expect(tierTargetStyle("").tierStyled).toBe(false);
+    expect(tierTargetStyle("t3").marker).toBe("?");
+  });
+
+  it("absent tier keeps the LEGACY hollow visual (fill 0.08, solid border)", () => {
+    const legacy = buildTargetCandles({ ...baseInputs, tier: undefined });
+    expect(alphaOf(legacy[0].color)).toBeCloseTo(HOLLOW_FILL_ALPHA, 3);
+    expect(legacy[0].borderColor).toBe(targetColorFor("BUY"));
+    expect(legacy[0].marker).toBeNull();
+  });
+
+  it("PART 8 regression — T4/T5 NEVER produce a renderable target-candle track", () => {
+    const eng = new TargetProjectionEngine();
+    const t4 = eng.present({
+      liveTipBucketSec: TIP,
+      timeframeSec: 60,
+      expirationSec: 60,
+      liveClose: 100,
+      targetPrice: 104,
+      atr: 1,
+      signal: "BUY",
+      tier: "T4",
+    });
+    expect(t4.candles.length).toBe(0);
+    const t5 = eng.present({
+      liveTipBucketSec: TIP,
+      timeframeSec: 60,
+      expirationSec: 60,
+      liveClose: 100,
+      targetPrice: 104,
+      atr: 1,
+      signal: "BUY",
+      tier: "T5",
+    });
+    expect(t5.candles.length).toBe(0);
+    expect(t5.key).toContain("tier|off");
+    // A later identical T5 read yields NO change → no repaint can schedule.
+    const again = eng.present({
+      liveTipBucketSec: TIP,
+      timeframeSec: 60,
+      expirationSec: 60,
+      liveClose: 100,
+      targetPrice: 104,
+      atr: 1,
+      signal: "BUY",
+      tier: "T5",
+    });
+    expect(again.changed).toBe(false);
+    expect(again.candles.length).toBe(0);
+  });
+
+  it("SignalHoldBuffer surfaces suppressedReason: frozen + too_late, resets", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    expect(buf.evaluate("BUY", 0, 60)).toBe("BUY");
+    expect(buf.reason).toBeNull();
+    // A fresh CONTRARY candidate within the freeze window is withheld → frozen.
+    expect(buf.evaluate("SELL", 30, 60)).toBe("BUY");
+    expect(buf.reason).toBe("frozen");
+    // Engine time-gate: too_late blanks the label AND surfaces the reason.
+    expect(buf.evaluate("SELL", 30, 60, "too_late")).toBeNull();
+    expect(buf.reason).toBe("too_late");
+    // A bucket-elapsed agreeing read resumes normally (no lingering reason).
+    expect(buf.evaluate("SELL", 70, 60)).toBe("SELL");
+    expect(buf.reason).toBeNull();
+    buf.reset();
+    expect(buf.reason).toBeNull();
+  });
+});
+
+// ── PART 21 — SignalHoldBuffer freezes tier ATOMICALLY with the direction,
+// and view() is the single source of truth for every render consumer. ──
+describe("PART 21 — tier rides the hold buffer; view() is the ONE source of truth", () => {
+  it("commits tier with the direction; a free frozen contrary candidate cannot move it", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    expect(buf.evaluate("BUY", 100, 60, null, 100_000, "T2")).toBe("BUY");
+    expect(buf.view()).toMatchObject({
+      gatedSignal: "BUY",
+      tier: "T2",
+      suppressedReason: null,
+      bucketSec: 100,
+    });
+    // Fresh contrary candidate INSIDE the freeze window (new /predict: SELL T5).
+    expect(buf.evaluate("SELL", 130, 60, null, 130_200, "T5")).toBe("BUY");
+    expect(buf.view().gatedSignal).toBe("BUY");
+    expect(buf.view().tier).toBe("T2"); // frozen WITH the direction, not the new T5
+    expect(buf.view().suppressedReason).toBe("frozen");
+  });
+
+  it("after the freeze elapses a structural flip re-commits direction AND tier atomically", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    expect(buf.evaluate("SELL", 170, 60, null, 170_100, "T5")).toBe("SELL");
+    const v = buf.view();
+    expect(v.gatedSignal).toBe("SELL");
+    expect(v.tier).toBe("T5"); // both flipped at the SAME evaluate
+  });
+
+  it("a sustained neutral clears direction AND tier; the raw tier is only a fallback", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    expect(buf.evaluate(null, 160, 60, null, 160_050, "T4")).toBe("BUY");
+    expect(buf.evaluate(null, 160, 60, null, 163_100, "T4")).toBeNull();
+    const v = buf.view();
+    expect(v.gatedSignal).toBeNull();
+    // Neutral → tier falls back to the LATEST raw /predict tier for the
+    // target-candle gate (PART 8: T3 geometry with a gated-out label).
+    expect(v.tier).toBe("T4");
+  });
+
+  it("too_late/regime_suppressed keep the held tier (blank label, intact state)", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    expect(buf.evaluate("SELL", 120, 60, "too_late", 120_000, "T3")).toBeNull();
+    const v = buf.view();
+    expect(v.gatedSignal).toBeNull(); // HUD blanks
+    expect(v.tier).toBe("T2"); // held state (and its tier) intact for next bucket
+    expect(v.suppressedReason).toBe("too_late");
+    // And the NEXT bucket resumes the held BUY/T2 (PART 9 contract).
+    expect(buf.evaluate("BUY", 170, 60, null, 170_000, "T2")).toBe("BUY");
+  });
+
+  it("[136] the freeze window runs on bucketSec (wall clock), NOT realMs", () => {
+    const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
+    buf.evaluate("BUY", 100, 60, null, 100_000, "T2");
+    // Same bucket floor (wallSec still 100) but 50s of REAL time later: the
+    // freeze must NOT release — the freeze comparator is the broker-grid
+    // bucketSec, identical to TargetProjectionEngine.liveTipBucketSec.
+    expect(buf.evaluate("SELL", 100, 60, null, 150_000, "T5")).toBe("BUY");
+    expect(buf.view().tier).toBe("T2");
+    expect(buf.view().suppressedReason).toBe("frozen");
   });
 });

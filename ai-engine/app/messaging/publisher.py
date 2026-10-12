@@ -43,7 +43,12 @@ class RedisPublisher:
         # 2. Fallback to HTTP POST to Core Backend
         try:
             url = f"{settings.BACKEND_API_URL}/signals/receive"
-            response = await self.http_client.post(url, json=message)
+            headers: Dict[str, str] = {}
+            # PART 44.1 [503] — the receiver is now gated by the service-to-service
+            # shared secret; present the same key core-backend expects.
+            if settings.AI_ENGINE_API_KEY:
+                headers["X-API-Key"] = settings.AI_ENGINE_API_KEY
+            response = await self.http_client.post(url, json=message, headers=headers)
             if response.status_code == 200:
                 logger.info("Signal forwarded via HTTP Fallback")
             else:

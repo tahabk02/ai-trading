@@ -1,9 +1,10 @@
 import asyncio
 import math
+import os
 import time
 import httpx
 import structlog
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..core.config import settings
@@ -11,10 +12,15 @@ from ..core.config import settings
 logger = structlog.get_logger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — FULL 34-PAIR UNIVERSE (0 DEMO, 100% REAL)
+# STRICT OTC WHITELIST — FULL 44-PAIR UNIVERSE (0 DEMO, 100% REAL)
 # Mirrors core-backend symbolRegistry.service.ts. Includes the CRYPTO
 # MAJORS (BTC/USD, ETH/USD) resolved through CoinGecko's public API —
 # real exchange-aggregated prices, never synthetic.
+#
+# PART 14: adds 10 REAL NON-OTC wholesale forex pairs (assetSubType
+# "forex"). They resolve through the SAME already-integrated ECB feed
+# (Frankfurter reference rates + open.er-api spot) — a genuinely
+# integrated real market source, never an invented feed.
 #
 # Backed by live data sources:
 #   1. Fiat spot cross-rates: https://open.er-api.com/v6/latest/{BASE}
@@ -68,9 +74,29 @@ OTC_PAIRS: Dict[str, Dict[str, Any]] = {
     "KES/USD": {"base": "KES", "quote": "USD", "daily_vol_pct": 0.004},
 }
 
+# ── REAL NON-OTC FOREX (10) — PART 14 ────────────────────────────────
+# Standard wholesale forex pairs (assetSubType "forex"), disjoint from the
+# OTC book. They resolve through the SAME already-integrated ECB feed
+# (Frankfurter daily reference rates + open.er-api live spot). Verified to
+# return >= 100 real daily closes each (6-12 months history) — see PART 14
+# Step 1. No invented market data anywhere in this path.
+REAL_FOREX_PAIRS: Dict[str, Dict[str, Any]] = {
+    "EUR/SEK": {"base": "EUR", "quote": "SEK", "daily_vol_pct": 0.005},
+    "EUR/NOK": {"base": "EUR", "quote": "NOK", "daily_vol_pct": 0.005},
+    "EUR/DKK": {"base": "EUR", "quote": "DKK", "daily_vol_pct": 0.002},
+    "EUR/PLN": {"base": "EUR", "quote": "PLN", "daily_vol_pct": 0.006},
+    "EUR/CZK": {"base": "EUR", "quote": "CZK", "daily_vol_pct": 0.005},
+    "EUR/HUF": {"base": "EUR", "quote": "HUF", "daily_vol_pct": 0.006},
+    "USD/SEK": {"base": "USD", "quote": "SEK", "daily_vol_pct": 0.005},
+    "USD/NOK": {"base": "USD", "quote": "NOK", "daily_vol_pct": 0.006},
+    "USD/PLN": {"base": "USD", "quote": "PLN", "daily_vol_pct": 0.006},
+    "USD/CZK": {"base": "USD", "quote": "CZK", "daily_vol_pct": 0.006},
+}
+
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 OTC_SET: set = set(OTC_PAIRS.keys())
+REAL_FOREX_SET: set = set(REAL_FOREX_PAIRS.keys())
 
 
 def is_stock_symbol(symbol: str) -> bool:
@@ -82,9 +108,17 @@ def is_stock_symbol(symbol: str) -> bool:
 
 
 def is_otc_pair(symbol: str) -> bool:
-    """Strict membership check against the 10-pair whitelist."""
+    """Strict membership check against the OTC whitelist."""
     sym = (symbol or "").strip().upper()
     return sym in OTC_SET
+
+
+def is_real_forex_pair(symbol: str) -> bool:
+    """Strict membership check against the 10 REAL NON-OTC forex pairs
+    (assetSubType "forex"). These are standard wholesale pairs resolved via
+    the already-integrated ECB feed — never mixed into the OTC book."""
+    sym = (symbol or "").strip().upper()
+    return sym in REAL_FOREX_SET
 
 
 class MarketDataCollector:
@@ -101,13 +135,21 @@ class MarketDataCollector:
 
     OPEN_ER_API = "https://open.er-api.com/v6/latest"
     FRANKFURTER_API = "https://api.frankfurter.dev/v1"
+    # PART 28 — Yahoo Finance chart API (keyless intraday forex source). The 10
+    # REAL_NON_OTC pairs stream from here (1-minute OHLC bars) instead of the
+    # ECB daily close repeated all day. Gentle polling: bars change once/minute.
+    YAHOO_CHART_API = "https://query1.finance.yahoo.com/v8/finance/chart"
+    YAHOO_HOLD_MS = 9.0  # per-symbol re-serve window (last REAL intraday print)
 
     def __init__(self, base_url: str = "https://api.binance.com/api/v3"):
-        # base_url kept for API compatibility but unused — OTC forex only.
+        # base_url kept for API compatibility but unused — forex only.
         self.base_url = base_url
         self.client = httpx.AsyncClient(timeout=12.0)
         self._spot_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (price, ts)
         self._cache_ttl = 300.0  # 5 minutes — allows stale-cache hold during transient outages
+        # Yahoo per-symbol throttle cache — real N-OTC pairs only. Independent
+        # of _spot_cache (which is 5-min TTL and would freeze intraday motion).
+        self._yahoo_cache: Dict[str, Tuple[float, float]] = {}  # symbol -> (price, ts)
         # Held-price fallback: when ALL live sources fail, the last successfully
         # fetched price is retained for up to _held_price_ttl seconds so the
         # signal pipeline never enters a permanent LINGER failure loop. This is
@@ -118,7 +160,11 @@ class MarketDataCollector:
     # ── Lookup helpers ──
 
     def _spec(self, symbol: str) -> Optional[Dict[str, Any]]:
-        return OTC_PAIRS.get((symbol or "").strip().upper())
+        """Resolve a symbol spec: OTC pairs first, then the 10 real NON-OTC
+        wholesale forex pairs (PART 14). Both default to the SAME integrated
+        ECB feed (Frankfurter / open.er-api)."""
+        sym = (symbol or "").strip().upper()
+        return OTC_PAIRS.get(sym) or REAL_FOREX_PAIRS.get(sym)
 
     # ── Live spot (open.er-api.com) ──
 
@@ -136,7 +182,8 @@ class MarketDataCollector:
         now = float(asyncio.get_event_loop().time())
         cached = self._spot_cache.get(sym)
         if cached and (now - cached[1]) < self._cache_ttl:
-            return cached[0]
+            if not is_real_forex_pair(sym):
+                return cached[0]
 
         base, quote = spec["base"], spec["quote"]
 
@@ -157,6 +204,37 @@ class MarketDataCollector:
                     return price
             except Exception as e:
                 logger.warning("[OTC] coingecko crypto spot failed", symbol=sym, error=str(e))
+
+        # ── TIER 0.5 (PART 28): YAHOO intraday spot — REAL NON-OTC pairs ──
+        # Genuine 1-minute Forex prints run ahead of the ECB daily feed so the
+        # signal pipeline for these 10 pairs consumes live intraday motion, not
+        # a daily close frozen all day. Throttled per-symbol (9s hold re-serves
+        # the last real print; bars only change once a minute). OTC untouched.
+        if is_real_forex_pair(sym):
+            yahoo_held = self._yahoo_cache.get(sym)
+            if yahoo_held and (now - yahoo_held[1]) < self.YAHOO_HOLD_MS:
+                return yahoo_held[0]
+            try:
+                ticker = f"{base}{quote}=X"
+                url = (
+                    f"{self.YAHOO_CHART_API}/{ticker}"
+                    f"?interval=1m&range=1d&includePrePost=false"
+                )
+                resp = await self.client.get(
+                    url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+                )
+                resp.raise_for_status()
+                meta = ((resp.json().get("chart") or {}).get("result") or [{}])[0].get("meta") or {}
+                price = float(meta.get("regularMarketPrice") or 0)
+                if price > 0 and math.isfinite(price):
+                    price = round(price, 6)
+                    self._yahoo_cache[sym] = (price, now)
+                    self._spot_cache[sym] = (price, now)
+                    self._held_prices[sym] = (price, now)
+                    logger.info("[OTC][Yahoo] Live intraday forex spot fetched", symbol=sym, price=price, source="yahoo_finance")
+                    return price
+            except Exception as e:
+                logger.warning("[OTC][Yahoo] intraday forex spot failed", symbol=sym, error=str(e))
 
         try:
             url = f"{self.OPEN_ER_API}/{base}"
@@ -280,6 +358,24 @@ class MarketDataCollector:
         tf = (interval or "1d").lower()
         base, quote = spec["base"], spec["quote"]
 
+        # ── PART 28: REAL NON-OTC pairs route through Yahoo intraday bars ──
+        # M1/Hr candles for the 10 real pairs now come from Yahoo's 1-minute
+        # chart API (genuine intraday OHLC) instead of the ECB daily close.
+        # If Yahoo is unreachable we fall through to the Frankfurter daily
+        # path below — never fabricated either way.
+        if is_real_forex_pair(sym) and not spec.get("crypto_id"):
+            intraday = await self._fetch_yahoo_intraday_candles(sym, tf, limit)
+            if intraday:
+                logger.info(
+                    "[OTC][Yahoo] Intraday candles fetched",
+                    symbol=sym, count=len(intraday), timeframe=tf,
+                )
+                return intraday
+            logger.warning(
+                "[OTC][Yahoo] intraday candles unavailable — falling back to ECB daily",
+                symbol=sym, timeframe=tf,
+            )
+
         try:
             days = min(max(limit, 30), 365)
             # ── CALENDAR-WINDOW EXPANSION (zero-demo compliant) ──
@@ -291,10 +387,10 @@ class MarketDataCollector:
             # margin) makes >= `limit` REAL observations arrive naturally.
             # NO synthetic backfilling anywhere in this path.
             calendar_days = min(int(days * 1.5) + 30, 430)
-            start_date = (
-                datetime.utcnow().timestamp() - calendar_days * 86400
-            )
-            start_iso = datetime.utcfromtimestamp(start_date).strftime("%Y-%m-%d")
+            start_date = datetime.now(UTC).timestamp() - calendar_days * 86400
+            start_iso = datetime.fromtimestamp(
+                start_date, tz=UTC
+            ).strftime("%Y-%m-%d")
             url = f"{self.FRANKFURTER_API}/{start_iso}..?from={base}&to={quote}"
             resp = await self.client.get(url)
             if resp.status_code == 404:
@@ -363,6 +459,99 @@ class MarketDataCollector:
 
     # ── Strict fetch API (used by warmup / collector consumers) ──
 
+    async def _fetch_yahoo_intraday_candles(
+        self, symbol: str, interval: str = "1h", limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """Fetch REAL intraday OHLC candles for the 10 REAL non-OTC pairs from
+        Yahoo Finance's chart API (keyless, 1-minute base grid).
+
+        OHLC + volume are Yahoo's genuine intraday bars — no synthesis. The
+        interval is mapped to Yahoo's grid (1m/5m/15m/30m/60m/1d) and the range
+        is sized from the requested bar count.
+        """
+        sym = (symbol or "").strip().upper()
+        spec = self._spec(sym)
+        if not spec or spec.get("crypto_id") or not is_real_forex_pair(sym):
+            return []
+        base, quote = spec["base"], spec["quote"]
+        tf = (interval or "1h").lower()
+
+        interval_map = {
+            "1m": ("1m", 1),
+            "5m": ("5m", 5),
+            "15m": ("15m", 15),
+            "30m": ("30m", 30),
+            "1h": ("60m", 60),
+            "60m": ("60m", 60),
+            "1hr": ("60m", 60),
+            "1d": ("1d", 1440),
+        }
+        yahoo_interval, minutes = interval_map.get(tf, ("60m", 60))
+        days_needed = max(1, int(math.ceil(
+            (min(max(limit or 100, 10), 720) * minutes) / 1440.0
+        )))
+        if yahoo_interval == "1m":
+            yahoo_range = "1d"
+        elif days_needed <= 5:
+            yahoo_range = "5d"
+        elif days_needed <= 30:
+            yahoo_range = "1mo"
+        elif days_needed <= 90:
+            yahoo_range = "3mo"
+        else:
+            yahoo_range = "1y"
+
+        try:
+            ticker = f"{base}{quote}=X"
+            url = (
+                f"{self.YAHOO_CHART_API}/{ticker}"
+                f"?interval={yahoo_interval}&range={yahoo_range}&includePrePost=false"
+            )
+            resp = await self.client.get(
+                url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result = (data.get("chart") or {}).get("result") or []
+            if not result:
+                return []
+            ts = result[0].get("timestamp") or []
+            q = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+            opens, highs, lows, closes, vols = (
+                q.get("open") or [], q.get("high") or [], q.get("low") or [],
+                q.get("close") or [], q.get("volume") or [],
+            )
+            candles: List[Dict[str, Any]] = []
+            for i in range(len(ts)):
+                close = float(closes[i]) if i < len(closes) and closes[i] is not None else 0.0
+                open_v = float(opens[i]) if i < len(opens) and opens[i] is not None else close
+                high = float(highs[i]) if i < len(highs) and highs[i] is not None else close
+                low = float(lows[i]) if i < len(lows) and lows[i] is not None else close
+                if close <= 0 or not math.isfinite(close):
+                    continue
+                if open_v <= 0 or not math.isfinite(open_v):
+                    open_v = close
+                if high <= 0 or not math.isfinite(high):
+                    high = max(open_v, close)
+                if low <= 0 or not math.isfinite(low):
+                    low = min(open_v, close)
+                volume = float(vols[i]) if i < len(vols) and vols[i] is not None else 0.0
+                candles.append({
+                    "timestamp": int(int(ts[i]) * 1000),
+                    "open": round(open_v, 6),
+                    "high": round(high, 6),
+                    "low": round(low, 6),
+                    "close": round(close, 6),
+                    "volume": round(volume, 0),
+                })
+            return candles[-limit:]
+        except Exception as e:
+            logger.warning(
+                "[OTC][Yahoo] intraday candle fetch failed — zero-fabrication policy",
+                symbol=sym, error=str(e),
+            )
+            return []
+
     async def _fetch_crypto_history(self, symbol: str, limit: int) -> List[Dict[str, Any]]:
         """Fetch REAL daily crypto candles (BTC/USD, ETH/USD) from CoinGecko.
 
@@ -411,9 +600,9 @@ class MarketDataCollector:
             return []
 
     async def fetch(self, symbol: str, interval: str = "1d", limit: int = 500) -> Dict[str, Any]:
-        """Unified fetch for a whitelisted OTC pair — candles + live spot."""
+        """Unified fetch for a whitelisted OTC OR real non-OTC forex pair — candles + live spot."""
         sym = (symbol or "").strip().upper()
-        if not is_otc_pair(sym):
+        if not is_otc_pair(sym) and not is_real_forex_pair(sym):
             logger.error(
                 "[OTC] Rejecting non-whitelisted symbol at strict boundary",
                 symbol=symbol,
@@ -460,6 +649,26 @@ ASSET_HISTORY_UPSERT_INTERVAL_SECONDS = 60.0
 ASSET_HISTORY_WINDOW_LABEL = "30m"
 ASSET_HISTORY_TIMEFRAME = "1m"
 
+# ── BOUNDED FAN-OUT (2026-09-30) ─────────────────────────────────────────
+# run_once() used to fetch OTC_SET (34 symbols) STRICTLY SERIALLY, each with an
+# up-to-12s httpx timeout against three public REST endpoints, then POST to the
+# backend. Worst case one pass took 34 x 12s ~= 408s while the scheduler slept
+# only 60s, so passes piled up and the whole event loop spent its time on
+# public-internet round trips that failed open. A failed fetch is NOT negatively
+# cached, so the whole 34-symbol storm repeated every minute, indefinitely.
+#
+# Bounded concurrency keeps the pass wall-clock near one timeout instead of 34,
+# and a hard per-pass deadline guarantees a slow pass can never overlap the next
+# one. External REST is best-effort by construction: symbols that miss the
+# deadline simply produce no bar this minute (never fabricated), and the local
+# WebSocket tick pipeline remains the authoritative source either way.
+ASSET_HISTORY_FETCH_CONCURRENCY = int(
+    os.getenv("AI_ENGINE_ASSET_HISTORY_CONCURRENCY", "8")
+)
+ASSET_HISTORY_PASS_DEADLINE_SECONDS = float(
+    os.getenv("AI_ENGINE_ASSET_HISTORY_DEADLINE_S", "25")
+)
+
 
 class AssetHistoryUpsertJob:
     """Periodic ai-engine-side AssetHistory reconciliation job."""
@@ -480,46 +689,87 @@ class AssetHistoryUpsertJob:
         resp.raise_for_status()
         return resp.json()
 
+    async def _upsert_symbol(self, symbol: str, bucket_ms: int) -> int:
+        """Fetch one real live rate and idempotently upsert its 1m bar.
+
+        Returns the number of bars ingested (0 on any failure). Never
+        fabricates: without a genuine live rate, no row is emitted.
+        """
+        try:
+            price = await self.collector.fetch_live_spot(symbol)
+        except Exception as e:
+            logger.warning("[AssetHistory] live spot failed", symbol=symbol, error=str(e))
+            return 0
+        if not price or price <= 0 or not math.isfinite(price):
+            return 0  # no real rate → no row (never fabricate)
+
+        payload = {
+            "symbol": symbol,
+            "timeframe": ASSET_HISTORY_TIMEFRAME,
+            "bars": [
+                {
+                    "bucketStartMs": bucket_ms,
+                    "open": round(price, 6),
+                    "high": round(price, 6),
+                    "low": round(price, 6),
+                    "close": round(price, 6),
+                    "volume": None,
+                    "tickCount": 1,
+                }
+            ],
+        }
+        try:
+            result = await self._post_bars(payload)
+            upserted = int(result.get("ingested", 0))
+        except Exception as e:
+            logger.warning("[AssetHistory] upsert failed", symbol=symbol, error=str(e))
+            return 0
+        logger.info(
+            "AssetHistory upserted",
+            symbol=symbol,
+            bars=upserted,
+            window=ASSET_HISTORY_WINDOW_LABEL,
+        )
+        return upserted
+
     async def run_once(self) -> int:
         total = 0
         bucket_ms = self.minute_bucket_ms(time.time() * 1000.0)
-        for symbol in sorted(OTC_SET):
-            try:
-                price = await self.collector.fetch_live_spot(symbol)
-            except Exception as e:
-                logger.warning("[AssetHistory] live spot failed", symbol=symbol, error=str(e))
-                continue
-            if not price or price <= 0 or not math.isfinite(price):
-                continue  # no real rate → no row (never fabricate)
+        symbols = sorted(OTC_SET)
 
-            payload = {
-                "symbol": symbol,
-                "timeframe": ASSET_HISTORY_TIMEFRAME,
-                "bars": [
-                    {
-                        "bucketStartMs": bucket_ms,
-                        "open": round(price, 6),
-                        "high": round(price, 6),
-                        "low": round(price, 6),
-                        "close": round(price, 6),
-                        "volume": None,
-                        "tickCount": 1,
-                    }
-                ],
-            }
-            try:
-                result = await self._post_bars(payload)
-                upserted = int(result.get("ingested", 0))
-            except Exception as e:
-                logger.warning("[AssetHistory] upsert failed", symbol=symbol, error=str(e))
-                continue
-            total += upserted
-            logger.info(
-                "AssetHistory upserted",
-                symbol=symbol,
-                bars=upserted,
-                window=ASSET_HISTORY_WINDOW_LABEL,
+        # Bounded concurrency: wall-clock is now ~one timeout, not len(symbols)
+        # of them. The semaphore keeps us from opening 34 simultaneous sockets.
+        sem = asyncio.Semaphore(max(1, ASSET_HISTORY_FETCH_CONCURRENCY))
+
+        async def _guarded(symbol: str) -> int:
+            async with sem:
+                return await self._upsert_symbol(symbol, bucket_ms)
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(_guarded(s) for s in symbols),
+                    return_exceptions=True,
+                ),
+                timeout=ASSET_HISTORY_PASS_DEADLINE_SECONDS,
             )
+        except asyncio.TimeoutError:
+            # A slow pass is abandoned, NOT retried into the next interval.
+            logger.warning(
+                "[AssetHistory] pass exceeded deadline; skipping remainder",
+                deadline_s=ASSET_HISTORY_PASS_DEADLINE_SECONDS,
+                symbols=len(symbols),
+            )
+            return 0
+
+        for symbol, res in zip(symbols, results):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "[AssetHistory] symbol failed",
+                    symbol=symbol, error=str(res),
+                )
+                continue
+            total += res
         return total
 
     async def run_forever(self) -> None:

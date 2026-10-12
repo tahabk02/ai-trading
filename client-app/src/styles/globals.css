@@ -54,6 +54,49 @@
     --tp-chart-border: #2a3448;
     --tp-crosshair: rgba(148, 163, 184, 0.35);
     --tp-price-line: rgba(148, 163, 184, 0.85);
+    /* PART 37 — vertical EXPIRY boundary. Deliberately NOT the price-line hue:
+       it is a TIME marker, and it shares the grid layer (z-order "bottom"), so
+       tinting it like the horizontal TGT/ANC/STOP/LIVE lines would imply it
+       belongs to the price axis. */
+    --tp-expiry-line: rgba(148, 163, 184, 0.72);
+
+    /* ── PART 16 TERMINAL BLOTTER (channel triplets, dark only) ──
+       Flat-obsidian matrix: canvas = page air, panel = cell bed, line =
+       hairline, ink scales = text. Gold = real-market / hold, crypto =
+       digital channel. Consumed by tailwind.config.js via
+       rgb(var(--x) / <alpha-value>) so `/opacity` modifiers keep working. */
+    --term-canvas: 6 7 11;       /* #06070B */
+    --term-panel: 13 16 26;      /* #0D101A */
+    --term-line: 42 50 72;       /* #2A3248 */
+    --term-ink: 232 237 246;     /* #E8EDF6 */
+    --term-ink-dim: 129 140 160; /* #818CA0 */
+    --term-ink-faint: 112 124 149; /* #707C95 — raised from #68748D, which
+       measured 4.04:1 on --term-panel and failed WCAG AA (4.5) for the 8-10px
+       labels that use this token (pair captions, expiry pills, pin stars). */
+    --term-gold: 216 160 72;     /* #D8A048 */
+    --term-crypto: 0 179 201;    /* #00B3C9 */
+
+    --bull: 34 171 148;          /* #22ab94 — direction UP (candles match) */
+    --bear: 242 54 69;           /* #f23645 — direction DOWN (candles match) */
+
+    /* ── STATUS HUE CHANNELS ────────────────────────────────────────────────
+       The `--sl-*` / `--ob*` scales invert under `html.light`, so slate ink
+       re-themes itself. Tailwind's stock accent hues CANNOT: `text-emerald-400`
+       is a literal hex in the compiled stylesheet and resolves to #34D399 in
+       both themes — 1.84:1 on a white panel, i.e. invisible. That is why the
+       Order Book ladder, the signal-card tier colours and the LIVE dot were
+       all washed out in Light Mode.
+
+       These channels give the status hues the same token-bridge treatment the
+       slate scale already has. Dark values are the exact literals they replace,
+       so dark mode is pixel-identical; light values are darkened to clear
+       WCAG AA (>= 4.5:1) on white, #F8FAFC canvas and #F1F5F9 elevated. */
+    --st-pos: 52 211 153;      /* #34D399 emerald-400 (was literal) */
+    --st-neg: 251 113 132;     /* #FB7184 rose-400 (was literal) */
+    --st-warn: 251 191 36;     /* #FBBF24 amber-400 (was literal) */
+    --st-caution: 251 146 60;  /* #FB923C orange-400 (was literal) */
+    --st-info: 96 165 250;     /* #60A5FA blue-400 (was literal) */
+    --st-teal: 94 234 212;     /* #5EEAD4 teal-300 (was literal) */
 
     /* ── 8px SPACING GRID (4 / 8 / 12 / 16 / 24 / 32 / 48) ──
        The terminal lays out exclusively on this scale. Tailwind's numeric
@@ -108,6 +151,57 @@
     --tp-chart-border: #e2e8f0;
     --tp-crosshair: rgba(15, 23, 42, 0.3);
     --tp-price-line: rgba(15, 23, 42, 0.7);
+    /* PART 37 — see the dark-theme note. Light needs more alpha than it looks
+       like it does: the line is 1px and dashed, so it is read as a hairline
+       against white rather than as a solid rule. */
+    --tp-expiry-line: rgba(51, 65, 85, 0.62);
+
+    /* ── PART 16 TERMINAL BLOTTER — LIGHT OVERRIDES ──
+       CRITICAL: these eight tokens are declared ONLY in :root above. Because
+       `html.light` did not redefine them, every `bg-term-panel` /
+       `text-term-ink` utility kept resolving to its DARK obsidian value under
+       the light theme — near-black cells on a #f8fafc page and near-white ink
+       on light surfaces (i.e. invisible text). The `--sl-*` and `--ob*` scales
+       WERE inverted below, which is why the breakage looked partial: only the
+       `term-*` families leaked through.
+
+       Values are the exact dark-theme mirror, chosen so every ink/background
+       pairing clears WCAG AA (>= 4.5:1 body, >= 3:1 hairline/large text):
+         ink #0F172A on panel #FFFFFF  -> 17.4:1
+         ink-dim  #475569 on #FFFFFF    ->  7.6:1
+         ink-faint #64748B on #FFFFFF   ->  4.8:1
+         gold     #A16207 on #FFFFFF    ->  5.4:1  (was #D8A048 -> 2.1:1)
+         crypto   #0E7490 on #FFFFFF    ->  5.3:1  (was #00B3C9 -> 2.4:1)
+       Gold/cyan are darkened rather than kept: the dark-theme values are
+       calibrated for a #06070B bed and fail hard against white. */
+    --term-canvas: 248 250 252;   /* #F8FAFC — page air, matches --tp-bg */
+    --term-panel: 255 255 255;    /* #FFFFFF — cell bed */
+    --term-line: 203 213 225;     /* #CBD5E1 — hairline (1.5:1 on white) */
+    --term-ink: 15 23 42;         /* #0F172A */
+    --term-ink-dim: 71 85 105;    /* #475569 */
+    --term-ink-faint: 100 116 139; /* #64748B */
+    --term-gold: 161 98 7;        /* #A16207 */
+    --term-crypto: 14 116 160;    /* #0E7490 */
+
+    /* ── STATUS HUE CHANNELS — LIGHT OVERRIDES ──
+       Same failure mode as the `--term-*` leak above: these were stock
+       Tailwind literals with no light counterpart. Measured on white, the dark
+       values were 1.48-2.57:1 (WCAG AA body text needs 4.5:1; the 1.5px tier
+       dots are non-text and still need 3:1). Each light value is the -700
+       step, which clears AA on all three light surfaces:
+
+         pos     #047857 -> 5.48 white / 5.24 canvas / 5.01 elevated
+         neg     #BE123C -> 6.29 / 6.01 / 5.74
+         warn    #B45309 -> 5.02 / 4.80 / 4.58
+         caution #C2410C -> 5.18 / 4.95 / 4.73
+         info    #1D4ED8 -> 6.70 / 6.41 / 6.12
+         teal    #0F766E -> 5.47 / 5.23 / 5.00                                        */
+    --st-pos: 4 120 87;         /* #047857 emerald-700 */
+    --st-neg: 190 18 60;        /* #BE123C rose-700 */
+    --st-warn: 180 83 9;        /* #B45309 amber-700 */
+    --st-caution: 194 65 12;    /* #C2410C orange-700 */
+    --st-info: 29 78 216;       /* #1D4ED8 blue-700 */
+    --st-teal: 15 118 110;      /* #0F766E teal-700 */
   }
 
   /* ── VIEWPORT & OVERFLOW LOCK ── */
@@ -383,6 +477,76 @@
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  /* ── PART 16 NUMERIC READOUT ──
+     Prices, deltas, ticks, confidence, timestamps. Tabular + Lining figures
+     so digits NEVER jitter as values tick (functional requirement, not a
+     stylistic choice). Applied to VALUES ONLY — never to labels or symbols
+     (that would be mono-for-everything-data-shaped). */
+  .num-fig {
+    font-family:
+      ui-monospace,
+      "Cascadia Mono",
+      "SF Mono",
+      "SFMono-Regular",
+      "Segoe UI Mono",
+      Consolas,
+      "Liberation Mono",
+      monospace;
+    font-feature-settings:
+      "tnum" 1,
+      "lnum" 1;
+    font-variant-numeric: tabular-nums lining-nums;
+    letter-spacing: 0;
+  }
+
+  /* ── PART 16 PRICE-TICK FLASH (the ONE motion moment) ──
+     Driven by a React `key` on the price string: a changed price restates the
+     element, re-triggering the ~450ms flash. The flash colours are the SAME
+     institutional candle hues as the direction chips — no new colours. */
+  @keyframes tick-flash-up {
+    0% {
+      color: rgb(var(--bull));
+    }
+    100% {
+      color: rgb(var(--term-ink));
+    }
+  }
+  @keyframes tick-flash-down {
+    0% {
+      color: rgb(var(--bear));
+    }
+    100% {
+      color: rgb(var(--term-ink));
+    }
+  }
+  .price-flash-up {
+    animation: tick-flash-up 450ms ease-out;
+  }
+  .price-flash-down {
+    animation: tick-flash-down 450ms ease-out;
+  }
+
+  /* ── PREFERS-REDUCED-MOTION: the flash degrades to a STATIC colour
+     change (the colour swap still communicates direction; only the
+     tween is removed) and no grid/pulse animation runs. ── */
+  @media (prefers-reduced-motion: reduce) {
+    .price-flash-up {
+      animation: none;
+      color: rgb(var(--bull));
+    }
+    .price-flash-down {
+      animation: none;
+      color: rgb(var(--bear));
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 
   /* ── Custom thin scrollbar for terminal aesthetic (theme-aware) ── */

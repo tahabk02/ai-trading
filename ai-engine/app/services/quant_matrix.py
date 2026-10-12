@@ -68,6 +68,8 @@ from .signal_gatekeeper import (
     TIER_LABELS,
     is_dispatchable_tier,
     resolve_tier,
+    MIN_EXECUTABLE_TIER,
+    CONFLUENCE_DISPATCH_TIER,
 )
 
 EPS = 1e-12
@@ -84,21 +86,23 @@ HIGH_CONFIDENCE_ALERT_THRESHOLD = 90.0
 # ── MULTI-TIER THERMAL GATE ──
 # USER REQUIREMENT: replace the single 98% hard gate with an honest multi-tier
 # signal system. A directional verdict is dispatched when its genuine 10-book
-# confluence score clears the weakest EXECUTABLE tier — T4-LOW (70%) — under
-# every market regime, calm OR stressed. The thermal bar is therefore FLAT at
-# THERMAL_GATE_FLOOR == TIER_THRESHOLDS["T4"] (70%): the multi-variable
+# confluence score clears the weakest EXECUTABLE tier — T4-LOW — under every
+# market regime, calm OR stressed. The thermal bar is therefore FLAT at
+# THERMAL_GATE_FLOOR == TIER_THRESHOLDS["T4"]: the multi-variable
 # market-stress signal (real ATR expansion, accelerating tick velocity,
 # multi-factor coherence, book absorption) is still COMPUTED and surfaced in
-# diagnostics, but it can NEVER lower the dispatch bar below 70%. Tiers are
-# resolved from the same continuous confluence score (T1 PREMIUM >= 96.5,
-# T2 HIGH >= 90, T3 MEDIUM >= 80, T4 LOW >= 70 — see signal_gatekeeper), so a
-# medium-strength but genuine setup dispatches honestly at its true tier
+# diagnostics, but it can NEVER lower the dispatch bar below that floor. Tiers
+# are resolved from the same continuous confluence score (T1 PREMIUM >= 96.5,
+# T2 HIGH >= 90, T3 MEDIUM >= 80, T4 LOW — see signal_gatekeeper).
+# LIVE-TEST [2026-09-23]: T4 floor 70% → 30% (derived below from
+# TIER_THRESHOLDS["T4"], so it tracks the single source automatically).
+# So a medium-strength but genuine setup dispatches honestly at its true tier
 # instead of being held sub-thermal forever. Any attempt below the weakest
 # tier KEEPS its true BUY/SELL direction and is flagged market-waiting
 # (CONFLUENCE_BELOW_THERMAL) that names the gate — the state is never HOLD.
 # Rigorous risk filters (ATR regime, queue, evidence persistence, logical-AND
 # pillars) remain untouched and independent of this gate.
-THERMAL_GATE_FLOOR = round(TIER_THRESHOLDS["T4"] * 100.0, 2)   # 70 — T4-LOW bar
+THERMAL_GATE_FLOOR = round(TIER_THRESHOLDS["T4"] * 100.0, 2)   # 30 — T4-LOW bar (temp; was 70)
 THERMAL_GATE_CEILING = round(TIER_THRESHOLDS["T4"] * 100.0, 2)  # flat (== floor)
 
 
@@ -800,7 +804,7 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
     definitive = bool(
         direction in ("BUY", "SELL")
         and conf_score >= dynamic_threshold
-        and is_dispatchable_tier(confluence_gate)
+        and is_dispatchable_tier(confluence_gate, CONFLUENCE_DISPATCH_TIER)
     )
     if definitive:
         # True CALL/PUT — the books have mathematically converged at >=98%.
@@ -845,12 +849,28 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
     if confidence_gated:
         market_waiting = True
         waiting_reason = "CONFLUENCE_BELOW_THERMAL"
-        waiting_detail = (
-            f"Direction {gated_direction} held below thermal: 10-book multiplicative "
-            f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% "
-            f"thermal gate (market_stress={market_stress:.2f}; gate={confluence_gate}; "
-            f"blockers: {', '.join(confluence.get('blockers', [])) or 'none'})"
-        )
+        # `confidence_gated` has TWO distinct causes; the old single message
+        # asserted the sub-thermal one even when the score CLEARED the bar and
+        # the hold came from incomplete evidence pillars capping the dispatch
+        # tier (it then printed a false "X% < Y%" inequality).
+        _blockers = [str(b) for b in (confluence.get("blockers") or [])]
+        _blocker_txt = ", ".join(_blockers) if _blockers else "none"
+        _books = f"{confluence.get('aligned_count', 0)}/{confluence.get('active_count', 0)} active books aligned"
+        if conf_score < dynamic_threshold:
+            waiting_detail = (
+                f"Direction {gated_direction} held below thermal: multiplicative "
+                f"confluence {confidence:.2f}% < {dynamic_threshold:.1f}% thermal "
+                f"gate ({_books}; market_stress={market_stress:.2f}; "
+                f"gate={confluence_gate}; blockers: {_blocker_txt})"
+            )
+        else:
+            waiting_detail = (
+                f"Direction {gated_direction} cleared the {dynamic_threshold:.1f}% "
+                f"thermal gate at {confidence:.2f}% ({_books}) but incomplete "
+                f"evidence pillars cap the dispatch tier at {confluence_gate}, "
+                f"below the {MIN_EXECUTABLE_TIER} bar "
+                f"(market_stress={market_stress:.2f}; blockers: {_blocker_txt})"
+            )
     else:
         market_waiting = False
         waiting_reason = None

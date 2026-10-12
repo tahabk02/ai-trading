@@ -3,11 +3,12 @@
  *
  * PRODUCTION ENFORCEMENT: This file is the single source of truth for the
  * entire frontend asset universe. NO stocks, NO fallback tickers.
- * Exactly these 34 REAL instruments are recognized and tradable — matching
+ * Exactly these 44 REAL instruments are recognized and tradable — matching
  * Pocket Option / professional broker standards:
  *
  *   OTC FOREX (32)   : EUR/USD OTC, GBP/USD OTC … KES/USD OTC
  *   CRYPTO MAJORS (2): BTC/USD, ETH/USD (routed + labelled as crypto)
+ *   REAL FOREX  (10) : EUR/SEK, USD/NOK … (standard wholesale non-OTC pairs)
  *
  * STRICT ASSET CLASSIFICATION (OTC vs FOREX vs CRYPTO):
  * Every entry carries an explicit `assetSubType` — "otc" | "forex" | "crypto".
@@ -32,7 +33,7 @@ export interface SymbolDefinition {
   symbol: string;
   /** Human-readable name (e.g. "Australian Dollar / US Dollar") */
   name: string;
-  type: "otc" | "crypto";
+  type: "otc" | "crypto" | "forex";
   /**
    * STRICT ASSET CLASSIFICATION — "forex" (standard wholesale forex),
    * "otc" (Pocket Option OTC instrument), "crypto" (crypto major). Explicit
@@ -48,8 +49,113 @@ export interface SymbolDefinition {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// FULL POCKET OPTION / BROKER UNIVERSE — 34 REAL ASSETS, 0 DEMO
-// 32 OTC forex (assetSubType "otc") + BTC/USD + ETH/USD (crypto).
+// REAL FOREX (10) — standard wholesale NON-OTC pairs (PART 14/15).
+// Backed by REAL ECB reference rates via Frankfurter + open.er-api — the
+// same integrated feed already used for the OTC book. Classified
+// assetSubType "forex" (NOT "otc") — a wholly different venue/pricing
+// model that must never be mixed with the Pocket Option OTC book.
+// Declared FIRST so OTC_FOREX_PAIRS can spread it and the terminal grid
+// can render the REAL pair group as its own distinct class.
+// ════════════════════════════════════════════════════════════════════
+export const REAL_FOREX_PAIRS: SymbolDefinition[] = [
+  {
+    symbol: "EUR/SEK",
+    name: "Euro / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/SEK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/NOK",
+    name: "Euro / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/NOK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/DKK",
+    name: "Euro / Danish Krone",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/DKK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/PLN",
+    name: "Euro / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/PLN",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/CZK",
+    name: "Euro / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/CZK",
+    digits: 5,
+  },
+  {
+    symbol: "EUR/HUF",
+    name: "Euro / Hungarian Forint",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "EUR/HUF",
+    digits: 5,
+  },
+  {
+    symbol: "USD/SEK",
+    name: "US Dollar / Swedish Krona",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/SEK",
+    digits: 5,
+  },
+  {
+    symbol: "USD/NOK",
+    name: "US Dollar / Norwegian Krone",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/NOK",
+    digits: 5,
+  },
+  {
+    symbol: "USD/PLN",
+    name: "US Dollar / Polish Zloty",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/PLN",
+    digits: 5,
+  },
+  {
+    symbol: "USD/CZK",
+    name: "US Dollar / Czech Koruna",
+    type: "forex",
+    assetSubType: "forex",
+    payout: 92,
+    label: "USD/CZK",
+    digits: 5,
+  },
+];
+
+// ════════════════════════════════════════════════════════════════════
+// FULL POCKET OPTION / BROKER UNIVERSE — 44 REAL ASSETS, 0 DEMO
+// 32 OTC forex (assetSubType "otc") + BTC/USD + ETH/USD (crypto)
+// + the 10 REAL_FOREX_PAIRS above (assetSubType "forex"). The OTC array
+// deliberately spreads REAL_FOREX_PAIRS so whitelist / lookup / trading
+// consumers keep the full 44-instrument universe.
 // ════════════════════════════════════════════════════════════════════
 export const OTC_FOREX_PAIRS: SymbolDefinition[] = [
   // ── Forex Majors (7) ────────────────────────────────────────────────
@@ -372,6 +478,11 @@ export const OTC_FOREX_PAIRS: SymbolDefinition[] = [
     label: "KES/USD OTC",
     digits: 5,
   },
+
+  // ── REAL FOREX (10) — PART 14/15. Standard wholesale NON-OTC pairs,
+  //     spread from REAL_FOREX_PAIRS so every consumer of OTC_FOREX_PAIRS
+  //     still resolves the full 44-instrument universe. ───────────────
+  ...REAL_FOREX_PAIRS,
 ];
 
 /**
@@ -382,14 +493,29 @@ export const OTC_WHITELIST: Set<string> = new Set(
   OTC_FOREX_PAIRS.map((p) => p.symbol),
 );
 
+/**
+ * Set of the REAL_FOREX_PAIRS symbols only (assetSubType "forex") for
+ * O(1) "is this a real-market pair" checks — used by the terminal grid to
+ * render the REAL badge and regime-gate (scored-only) display.
+ */
+export const REAL_FOREX_SET: Set<string> = new Set(
+  REAL_FOREX_PAIRS.map((p) => p.symbol),
+);
+
 /** Symbol strings only (e.g. "AUD/USD", "CAD/JPY") — shown in dropdowns */
 export const ALL_SYMBOL_TICKERS: string[] = OTC_FOREX_PAIRS.map(
   (s) => s.symbol,
 );
 
+/** Full 44-asset symbol list — OTC/crypto preamble + the 10 real pairs. */
+export const ALL_UNIVERSE_TICKERS: string[] = [
+  ...ALL_SYMBOL_TICKERS,
+  ...REAL_FOREX_PAIRS.map((p) => p.symbol),
+];
+
 /**
  * Strict validation — the ONLY symbol validation used in the frontend.
- * Returns true ONLY for the 34 whitelisted instruments.
+ * Returns true ONLY for the 44 whitelisted instruments.
  * Everything else (AAPL, NVDA, SPY...) → false.
  */
 export function isWhitelistedOtcpair(symbol: string): boolean {
@@ -412,8 +538,9 @@ export const DEFAULT_SYMBOL = OTC_FOREX_PAIRS[0].symbol; // "EUR/USD"
 
 /**
  * STRICT ASSET CLASSIFICATION for any symbol (mirror of the backend helper).
+ *   • An entry in OTC_FOREX_PAIRS (OTC or real-forex) returns its OWN
+ *     authoritative assetSubType.
  *   • BTC/USD, ETH/USD (any casing/separator)               → "crypto"
- *   • A whitelisted OTC forex pair                          → "otc"
  *   • Any other non-whitelisted `/`-separated currency pair → "forex"
  *   • Anything else                                          → "otc" (default)
  */
@@ -426,7 +553,8 @@ export function getAssetSubType(symbol: string): AssetSubType {
   if (compact === "BTCUSD" || compact === "ETHUSD" || compact === "BTCUSDT" || compact === "ETHUSDT") {
     return "crypto";
   }
-  if (OTC_WHITELIST.has(norm)) return "otc";
+  const entry = OTC_FOREX_PAIRS.find((p) => p.symbol === norm);
+  if (entry) return entry.assetSubType;
   if (norm.includes("/")) return "forex";
   return "otc";
 }
@@ -497,7 +625,7 @@ export function getPairLabel(symbol: string): string {
 export interface SymbolSearchResult {
   symbol: string;
   name: string;
-  type: "otc" | "crypto";
+  type: "otc" | "crypto" | "forex";
   label: string;
   digits: number;
 }
@@ -558,6 +686,21 @@ function toSymbolSearchResult(p: SymbolDefinition): SymbolSearchResult {
 // ── BACK-COMPAT: old exported names are now ALIASES to the whitelist ──
 // These were previously 80-asset arrays. They are now hard-bound to the
 // OTC whitelist so any legacy import cannot reintroduce stock/crypto.
+/**
+ * The FULL terminal universe: every OTC pair, the real wholesale forex pairs
+ * (which `OTC_FOREX_PAIRS` deliberately spreads) and crypto. Deduped and
+ * canonical. Defined HERE rather than in the store so that pure filter logic
+ * (`lib/assetFilter`) can import the universe without pulling in the Zustand
+ * store — the store imports the filter module, so the reverse edge would be a
+ * circular import that leaves `ALL_MARKET_SYMBOLS` undefined at module init.
+ */
+export const ALL_MARKET_SYMBOLS: string[] = Array.from(
+  new Set([
+    ...OTC_FOREX_PAIRS.map((p) => p.symbol),
+    ...REAL_FOREX_PAIRS.map((p) => p.symbol),
+  ]),
+);
+
 export const ALL_SYMBOLS: SymbolDefinition[] = OTC_FOREX_PAIRS;
 export const US_STOCKS: SymbolDefinition[] = [];
 export const CRYPTO_PAIRS: SymbolDefinition[] = [];

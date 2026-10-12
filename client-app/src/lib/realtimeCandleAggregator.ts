@@ -45,11 +45,34 @@ import { targetCandlesEnabled } from "./signalTiers";
 // ── PO-Canonical Timeframe Contract ──
 // Pocket Option uses a specific set of chart intervals. We use uppercase
 // canonical keys (M1, H1, D1) matching PO's internal naming convention.
+//
+// PART 39 [371]/[373] — EVIDENCE FOR THIS SET (no guessing):
+//  • Pocket Option's own blog, "How to Read Pocket Option Charts" (19 Feb 2025):
+//    "Timeframe selector – ranges from 5 seconds to 1 month", and the FAQ
+//    "timeframes down to 5 seconds". That fixes the FLOOR (5s) and the CEILING
+//    (1 month) on PO's chart selector.
+//  • The PocketOptionAPI reference docs list the 14 intervals the PO API serves
+//    (S1, S5, S10, S15, S30, M1, M5, M15, M30, H1, H4, D1, W1, MN1).
+//  • S1 is deliberately NOT carried: PO's own copy says the chart floor is
+//    5 seconds, so S1 reads as API-only. No UI source confirms it.
+//  • PO's cabinet UI is unreachable from here (live host drops at TCP connect;
+//    the Wayback captures of /en/cabinet/* only ever redirect to /login), so
+//    the exact "twenty timeframes" a mirror claims for the full selector list
+//    could NOT be enumerated — W1 and MN1 are the only frames added on
+//    confirmed evidence (range ceiling), everything else stays as it was.
+//
+// EPOCH-FLOOR CAVEAT for the two slow frames: bucketStart() floors onto a
+// fixed ms grid, so W1 bars open on Thursday (epoch was 1970-01-01) instead of
+// PO's calendar week, and MN1 bars are fixed 30-day blocks instead of calendar
+// months. Calendar-aligning them would break every `ts % bucketMs === 0`
+// invariant (leadShiftBucket, the target-candle expiry math, historyBarCheck),
+// so they are shipped as analysis frames with this stated deviation.
 
 export type Timeframe =
   | "S5" | "S10" | "S15" | "S30"
   | "M1" | "M2" | "M3" | "M5" | "M10" | "M15" | "M30"
-  | "H1" | "H4" | "D1";
+  | "H1" | "H4" | "D1"
+  | "W1" | "MN1";
 
 /** Bucket width in milliseconds — PO canonical intervals. */
 export const TIMEFRAME_MS: Record<Timeframe, number> = {
@@ -67,6 +90,9 @@ export const TIMEFRAME_MS: Record<Timeframe, number> = {
   "H1": 3_600_000,
   "H4": 14_400_000,
   "D1": 86_400_000,
+  "W1": 604_800_000,
+  // Fixed 30-day block (epoch-floor), NOT a calendar month — see the caveat.
+  "MN1": 2_592_000_000,
 };
 
 export const SUPPORTED_TIMEFRAMES = Object.keys(TIMEFRAME_MS) as Timeframe[];
@@ -117,15 +143,46 @@ export function timeframeToSeconds(timeframe: string): number {
 
 // ── History Bar Gate (PO-parity retention table) ──
 
-/** Per-bucket-width lookback retention in ms (PO-parity). */
+/**
+ * Per-bucket-width lookback retention in ms — how far back a seeded bar may be
+ * and still be accepted for the selected grid.
+ *
+ * The six original entries are the PO-parity retention table. The ten added by
+ * PART 39 [372]/[373] were missing entirely, so those frames silently fell back
+ * to the 24h default below (S10/S15/S30/M2/M3/M10/M30/H4/W1/MN1) and a frame
+ * switch appeared to wipe the pane. They are INTERPOLATED between their
+ * neighbours — PO does not publish a retention table, so these are not claimed
+ * as PO-verified, only as sane per-frame windows that keep the gate meaningful.
+ */
 export const MAX_HISTORY_LOOKBACK: Record<string, number> = {
   [TIMEFRAME_MS["S5"]]: 3_600_000,        // 1h
+  [TIMEFRAME_MS["S10"]]: 7_200_000,       // 2h   (interpolated)
+  [TIMEFRAME_MS["S15"]]: 10_800_000,      // 3h   (interpolated)
+  [TIMEFRAME_MS["S30"]]: 21_600_000,      // 6h   (interpolated)
   [TIMEFRAME_MS["M1"]]: 86_400_000,       // 24h
+  [TIMEFRAME_MS["M2"]]: 172_800_000,      // 2d   (interpolated)
+  [TIMEFRAME_MS["M3"]]: 259_200_000,      // 3d   (interpolated)
   [TIMEFRAME_MS["M5"]]: 604_800_000,      // 7d
+  [TIMEFRAME_MS["M10"]]: 864_000_000,     // 10d  (interpolated)
   [TIMEFRAME_MS["M15"]]: 2_592_000_000,   // 30d
+  [TIMEFRAME_MS["M30"]]: 2_592_000_000,   // 30d  (interpolated)
   [TIMEFRAME_MS["H1"]]: 7_776_000_000,    // 90d
+  [TIMEFRAME_MS["H4"]]: 15_552_000_000,   // 180d (interpolated)
   [TIMEFRAME_MS["D1"]]: 31_536_000_000,   // 365d
+  [TIMEFRAME_MS["W1"]]: 63_072_000_000,   // 730d (interpolated)
+  [TIMEFRAME_MS["MN1"]]: 157_680_000_000, // 5y   (interpolated)
 };
+
+/**
+ * PART 39 [375] — the 100-close minimum.
+ *
+ * Mirrors ai-engine's `regime_detector.MIN_CLOSES = 100`: below 100 closed
+ * bars on the selected (symbol, timeframe) grid there is not enough tape for
+ * any honest period-based read, so the chart announces that it is still
+ * BUILDING HISTORY instead of implying a quiet market. The engine raises a
+ * ValueError rather than silently defaulting for the same reason.
+ */
+export const MIN_HISTORY_CLOSES = 100;
 
 /** Lookback retention in ms for a given bucket width. */
 export function historyLookbackMs(bucketWidthMs: number): number {
@@ -155,9 +212,10 @@ export function historyBarCheck(
 // ── Signal Gate (AI-confidence parity) ──
 
 /** Hard confidence threshold for directional signals (PO AI parity).
- *  Mirrors the AI Engine's canonical HARD_GATE = 0.98 — the only signals the
- *  client renders as directional are the engine's 0.98-dispatched emissions. */
-export const SIGNAL_CONFIDENCE_THRESHOLD = 0.98;
+ *  STRICT 96.5% HIGH-PRECISION BAR (2026-09-24): restored 0.30 → 0.965,
+ *  mirroring engine signal_gatekeeper.MIN_EXECUTABLE_TIER (T1 PREMIUM).
+ *  Quick Trade BUY/SELL unlocks only at the strict executable bar. */
+export const SIGNAL_CONFIDENCE_THRESHOLD = 0.965;
 
 /** Normalize a confidence value (0..1 or 0..100) into 0..1. */
 export function normalizeConfidence(raw: number): number {
@@ -264,11 +322,19 @@ export function targetIntervals(leadMinutes: number, timeframeMinutes: number): 
   return Math.max(1, Math.min(30, Math.round(lead / tf)));
 }
 
+export const MAX_TARGET_INTERVALS = 120;
+
 export function targetIntervalsFor(expirationSeconds: number, timeframeSeconds: number): number {
   const exp = Number(expirationSeconds);
   const tf = Number(timeframeSeconds);
   if (!Number.isFinite(exp) || !Number.isFinite(tf) || tf <= 0) return 1;
-  return Math.max(1, Math.min(30, Math.round(exp / tf)));
+  return Math.max(1, Math.min(MAX_TARGET_INTERVALS, Math.ceil(exp / tf)));
+}
+
+export function targetDurationMinutes(expirationSeconds: number): number {
+  const exp = Number(expirationSeconds);
+  if (!Number.isFinite(exp) || exp <= 0) return 1;
+  return Math.max(0.01, Math.round((exp / 60) * 100) / 100);
 }
 
 export interface TargetSlot {
@@ -295,6 +361,60 @@ export function targetSlots(
     });
   }
   return slots;
+}
+
+// ── PART 37: EXPIRY MARKER CLOCK ──
+
+/**
+ * The bucket the chart's vertical EXPIRY marker anchors to: the LAST slot the
+ * projection actually occupies.
+ *
+ * WHY THIS IS `targetSlots` AND NOT `liveTipBucketSec + expirationSeconds`:
+ * those are the same number for every real expiry/timeframe pair, but they are
+ * not the same RULE. The projection spans `ceil(exp / tf)` buckets
+ * (`targetIntervalsFor`), so its last slot is
+ *
+ *     liveTipBucketSec + ceil(exp / tf) * tf        >=  liveTipBucketSec + exp
+ *
+ * and the inequality is STRICT whenever `tf` does not divide `exp` — e.g. a 60s
+ * expiry on the M3 (180s) grid draws ONE projected candle at +180s, and a
+ * marker at +60s would sit inside the zone, to the LEFT of the last candle it
+ * is supposed to terminate. Every ladder expiry (60/120/300/600) divides every
+ * sub-minute/M1 grid, so on the charts an operator actually uses this returns
+ * `liveTipBucketSec + expirationSeconds` bit-for-bit; deriving it from the
+ * projection instead means a future off-grid expiry can never silently drift
+ * the marker off the candles it annotates. `src/lib/__tests__/expiryMarker.test.ts`
+ * pins BOTH facts.
+ */
+export function expiryMarkerBucketSec(
+  liveTipBucketSec: number,
+  expirationSeconds: number,
+  timeframeSeconds: number,
+): number {
+  const tip = Number(liveTipBucketSec);
+  const exp = Number(expirationSeconds);
+  const tf = Number(timeframeSeconds);
+  if (!Number.isFinite(tip) || tip <= 0) return 0;
+  if (!Number.isFinite(exp) || exp <= 0) return 0;
+  if (!Number.isFinite(tf) || tf <= 0) return 0;
+  const slots = targetSlots(tip, tf, targetIntervalsFor(exp, tf));
+  const last = slots[slots.length - 1];
+  return last ? last.timeSec : 0;
+}
+
+/**
+ * UTC `HH:MM:SS` for the marker label. UTC because `formatAxisTime` — the
+ * chart's own axis formatter — is UTC: a local-time label next to a UTC axis
+ * would put the marker and its own axis reading in different zones.
+ */
+export function expiryMarkerClockLabel(expiryBucketSec: number): string {
+  const sec = Math.round(Number(expiryBucketSec));
+  if (!Number.isFinite(sec) || sec <= 0) return "";
+  const d = new Date(sec * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
 }
 
 // ── Axis Time Formatter ──
@@ -371,6 +491,66 @@ export function targetHollowFillRgba(
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${HOLLOW_FILL_ALPHA.toFixed(3)})`;
 }
 
+// ── PART 8: TIER-AWARE TARGET CANDLE STYLING ──
+// The engine demotes the OVERLAY with the tier it dispatched:
+//   T1 (PREMIUM)  → near-full body opacity, thin 2px outline at 60% alpha
+//   T2 (HIGH)     → 70% body opacity, the same outline
+//   T3 (MEDIUM)   → 45% body opacity, same outline + a "?" honesty marker
+//   below T3      → never rendered as a target candle (PART 6 gate)
+//   no tier       → LEGACY hollow overlay (unchanged visual)
+// The direction colours (green/red) are untouched — only opacity changes, so a
+// projected candle can NEVER be mistaken for a confirmed live candle (the 2px
+// outline at 60% is the distinguishing cue). lightweight-charts v4 has no
+// per-candle dashed border, so the "dashed outline" is honestly rendered as a
+// 2px border at 60% alpha over the semi-transparent body.
+export const TIER_OUTLINE_ALPHA = 0.6;
+export const TIER_OUTLINE_WIDTH = 2;
+
+export interface TierTargetStyle {
+  /** Body-fill alpha for this tier (T1 ~full, T2 0.70, T3 0.45). */
+  bodyAlpha: number;
+  /** Outline/wick alpha — identical (60%) across T1–T3. */
+  outlineAlpha: number;
+  /** "?" marker above the wick — T3 only. */
+  marker: "?" | null;
+  /** True when tier-aware styling applies (T1–T3); false = legacy hollow. */
+  tierStyled: boolean;
+}
+
+export function tierTargetStyle(tier?: string | null): TierTargetStyle {
+  const t = (tier || "").trim().toUpperCase();
+  if (t === "T1") {
+    return {
+      bodyAlpha: 0.95,
+      outlineAlpha: TIER_OUTLINE_ALPHA,
+      marker: null,
+      tierStyled: true,
+    };
+  }
+  if (t === "T2") {
+    return {
+      bodyAlpha: 0.7,
+      outlineAlpha: TIER_OUTLINE_ALPHA,
+      marker: null,
+      tierStyled: true,
+    };
+  }
+  if (t === "T3") {
+    return {
+      bodyAlpha: 0.45,
+      outlineAlpha: TIER_OUTLINE_ALPHA,
+      marker: "?",
+      tierStyled: true,
+    };
+  }
+  return {
+    bodyAlpha: HOLLOW_FILL_ALPHA,
+    outlineAlpha: 1,
+    marker: null,
+    tierStyled: false,
+  };
+}
+
 export interface TargetFrameCandle {
   time: number;
   open: number;
@@ -383,6 +563,8 @@ export interface TargetFrameCandle {
   alpha: number;
   offsetSec: number;
   index: number;
+  /** PART 8 — "?" honesty marker above the wick for T3 only; null otherwise. */
+  marker: "?" | null;
 }
 
 export interface TargetCandleData extends TargetFrameCandle {}
@@ -395,16 +577,51 @@ export function buildTargetFrame(opts: {
   target: number;
   atr: number;
   signal: string | null | undefined;
+  expirationSeconds?: number;
+  /** PART 8 — engine tier (T1…T3 reach this point). Drives opacity + marker. */
+  tier?: string | null;
+  /**
+   * VISUAL baseline the projected candles grow from — the DISPLAYED close of
+   * the last live bar (Heikin-Ashi when the tape renders as HA).
+   *
+   * The projection is drawn on the SAME right price scale as the candle series,
+   * so anchoring it on the REAL close while the tape shows smoothed HA geometry
+   * leaves a visible gap between the last live candle and the first projected
+   * one. Anchoring on the displayed close removes that gap while `target` stays
+   * the real, tradable level, so arc(1) STILL lands exactly on target.
+   * Falls back to `liveClose` when absent or non-positive.
+   */
+  visualAnchor?: number;
 }): TargetFrameCandle[] {
-  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal } = opts;
+  const { liveTipBucketSec, timeframeSec, intervals, liveClose, target, atr, signal, expirationSeconds, tier } = opts;
   if (!Number.isFinite(liveTipBucketSec) || liveTipBucketSec <= 0) return [];
   if (!Number.isFinite(intervals) || intervals < 1) return [];
   if (!Number.isFinite(timeframeSec) || timeframeSec <= 0) return [];
   if (!Number.isFinite(liveClose) || liveClose <= 0) return [];
   if (!Number.isFinite(target) || target <= 0) return [];
   const n = Math.max(1, Math.round(intervals));
-  const delta = target - liveClose;
-  const borderColor = targetColorFor(signal);
+  // VISUAL baseline: the displayed last close, so the projection connects to the
+  // rendered candle. Falls back to the real close when no display baseline is
+  // supplied (SSR / no series yet). Either way arc(1) lands exactly on `target`.
+  const visInput = Number(opts.visualAnchor);
+  const baseline =
+    Number.isFinite(visInput) && visInput > 0 ? visInput : liveClose;
+  const delta = target - baseline;
+  // PART 8 — the tier drives the BODY opacity while the direction colour is
+  // untouched; the outline stays at 60% alpha for every tier so the projected
+  // candles always read as an overlay, never as confirmed live candles.
+  const style = tierTargetStyle(tier);
+  const rgb =
+    signal === "BUY"
+      ? TARGET_RGB.BUY
+      : signal === "SELL"
+        ? TARGET_RGB.SELL
+        : TARGET_RGB.NEUTRAL;
+  const bodyRgba = (a: number) =>
+    `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`;
+  const borderColor = style.tierStyled
+    ? bodyRgba(style.outlineAlpha)
+    : targetColorFor(signal);
   const wickColor = borderColor;
   // MATH TAPER (Alpha.5 Pro, Part 4) — the projected close follows the
   // math-target arc instead of a straight line:
@@ -420,33 +637,42 @@ export function buildTargetFrame(opts: {
   // absolute safety cap (50% of the anchor level) kills pathological ATR
   // values, and the low is clamped at 0 so geometry is always finite.
   const atrValid = Number.isFinite(atr) && atr > 0;
-  const basePrice = Math.max(Math.abs(liveClose), Math.abs(target));
+  const basePrice = Math.max(Math.abs(baseline), Math.abs(target));
   const safetyCap = Math.max(basePrice * 0.5, 1e-9);
   const frame: TargetFrameCandle[] = [];
-  let prevClose = liveClose;
+  const configuredExpiration = Number(expirationSeconds);
+  const finalOffsetSec =
+    Number.isFinite(configuredExpiration) && configuredExpiration > 0
+      ? configuredExpiration
+      : n * timeframeSec;
+  let prevClose = baseline;
   for (let i = 1; i <= n; i++) {
     const k = i;
     const t = k / n;
     const arc = 0.5 * t + 0.5 * t * t;
-    const close = liveClose + delta * arc;
-    const open = i === 1 ? liveClose : prevClose;
+    const close = baseline + delta * arc;
+    const open = i === 1 ? baseline : prevClose;
     const taper = (n - k) / n;
     const wick = Math.min(atrValid ? atr * 0.35 * taper : 0, safetyCap);
     const high = Math.max(open, close) + wick;
     const low = Math.max(0, Math.min(open, close) - wick);
-    const alpha = targetAlpha(k, n);
+    // PART 8 — tier-styled bodies carry the tier opacity; legacy keeps the
+    // hollow fill + per-slot alpha-decay value.
+    const alpha = style.tierStyled ? style.bodyAlpha : targetAlpha(k, n);
+    const offsetSec = i === n ? finalOffsetSec : k * timeframeSec;
     frame.push({
-      time: liveTipBucketSec + k * timeframeSec,
+      time: liveTipBucketSec + offsetSec,
       open,
       high,
       low,
       close,
-      color: targetHollowFillRgba(signal),
+      color: style.tierStyled ? bodyRgba(style.bodyAlpha) : targetHollowFillRgba(signal),
       borderColor,
       wickColor,
       alpha,
-      offsetSec: k * timeframeSec,
+      offsetSec,
       index: k,
+      marker: style.marker,
     });
     prevClose = close;
   }
@@ -474,6 +700,19 @@ export function targetViewportRange(
   return { from, to };
 }
 
+export function targetViewportNeedsReanchor(
+  previousIntervals: number,
+  nextIntervals: number,
+): boolean {
+  const previous = Number.isFinite(previousIntervals)
+    ? Math.max(0, Math.round(previousIntervals))
+    : 0;
+  const next = Number.isFinite(nextIntervals)
+    ? Math.max(0, Math.round(nextIntervals))
+    : 0;
+  return previous !== next;
+}
+
 /** Build predictive target candles for the chart projection layer.
  *  Candles ALWAYS render when the four data preconditions hold — the 96.5%
  *  confidence gate ONLY affects the BUY/SELL label, NOT the candle geometry.
@@ -491,15 +730,20 @@ export function buildTargetCandles(opts: {
   tier?: string | null | undefined;
   expirationSeconds: number;
   timeframeSeconds: number;
+  /** DISPLAYED last close (HA when the tape renders HA). See buildTargetFrame. */
+  visualAnchor?: number;
 }): TargetCandleData[] {
-  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, tier, expirationSeconds, timeframeSeconds } = opts;
+  const { liveTipBucketMs, liveClose, targetPrice, atr, signal, tier, expirationSeconds, timeframeSeconds, visualAnchor } = opts;
+  // Tier gate: an engine-graded T4/T5 verdict never draws a trajectory. An
+  // ABSENT tier keeps the legacy render (contract pinned by
+  // realtimeCandleAggregator.test.ts "absent tier keeps legacy behaviour").
   if (tier && !targetCandlesEnabled(tier)) return [];
   if (!Number.isFinite(liveTipBucketMs) || liveTipBucketMs <= 0) return [];
   if (!Number.isFinite(targetPrice) || targetPrice <= 0) return [];
   if (!Number.isFinite(timeframeSeconds) || timeframeSeconds <= 0) return [];
   if (!Number.isFinite(expirationSeconds) || expirationSeconds <= 0) return [];
   const tipSec = Math.floor(liveTipBucketMs / 1000);
-  const intervals = Math.max(1, Math.min(30, Math.round(expirationSeconds / timeframeSeconds)));
+  const intervals = targetIntervalsFor(expirationSeconds, timeframeSeconds);
   return buildTargetFrame({
     liveTipBucketSec: tipSec,
     timeframeSec: timeframeSeconds,
@@ -508,6 +752,9 @@ export function buildTargetCandles(opts: {
     target: targetPrice,
     atr,
     signal,
+    expirationSeconds,
+    tier,
+    visualAnchor,
   });
 }
 
@@ -538,6 +785,13 @@ export interface TargetProjectionInputs {
   signal: "BUY" | "SELL" | null;
   /** PART 6 — engine tier (T1…T5). Empty overlay unless T1–T3. */
   tier?: string | null;
+  /**
+   * DISPLAYED close of the last live bar (Heikin-Ashi when the tape renders HA).
+   * Used ONLY for the drawn baseline so the overlay connects to the rendered
+   * candle; the trajectory still terminates on the real `targetPrice`.
+   * Excluded from the structural key so it cannot reintroduce per-tick rebuilds.
+   */
+  visualAnchor?: number;
 }
 
 export interface TargetProjectionSnapshot {
@@ -637,8 +891,8 @@ export class TargetProjectionEngine {
         candles: this.candles,
         anchorLiveClose: this.anchorLiveClose,
         targetPrice: inputs.targetPrice,
-        firstSlotSec: tipSec + tfSec,
-        lastSlotSec: tipSec + intervals * tfSec,
+        firstSlotSec: tipSec + Math.min(tfSec, expSec),
+        lastSlotSec: tipSec + expSec,
         changed: false,
       };
     }
@@ -649,13 +903,19 @@ export class TargetProjectionEngine {
           ? this.anchorLiveClose
           : 0;
     // PART 6 — T4/T5 tiers never draw the trajectory: overlay is empty.
+    // An absent tier keeps the legacy render (pinned by the aggregator suite);
+    // a graded tier below T3 is suppressed.
     const tierEnabled = inputs.tier
       ? targetCandlesEnabled(inputs.tier)
       : true;
     this.candles = tierEnabled
       ? buildTargetCandles({
           liveTipBucketMs: tipSec * 1000,
+          // REAL close — the truthful anchor and the memo's baseline.
           liveClose: anchor,
+          // DISPLAYED close — where the overlay physically attaches. Absent in
+          // tests/SSR, where buildTargetCandles falls back to `anchor`.
+          visualAnchor: inputs.visualAnchor,
           targetPrice: inputs.targetPrice,
           atr: inputs.atr,
           signal: inputs.signal,
@@ -672,8 +932,8 @@ export class TargetProjectionEngine {
       candles: this.candles,
       anchorLiveClose: anchor,
       targetPrice: inputs.targetPrice,
-      firstSlotSec: tipSec + tfSec,
-      lastSlotSec: tipSec + intervals * tfSec,
+      firstSlotSec: tipSec + Math.min(tfSec, expSec),
+      lastSlotSec: tipSec + expSec,
       changed: true,
     };
   }
@@ -698,46 +958,212 @@ export class TargetProjectionEngine {
 // A directional signal commits at a bucket boundary and is IMMUTABLE for the
 // active bucket duration (freeze window). Confidence jitter around the 96.5%
 // gate can only flip the UI label after the bucket elapses, and a return to
-// neutral must persist for `holdNeutralEvals` consecutive reads — so the
-// BUY/SELL label never shimmers on every second tick.
+// neutral must persist for `holdNeutralEvals` reads SEPARATED BY REAL TIME —
+// so the BUY/SELL label never shimmers on every second tick.
+//
+// PART 11 — why the neutral-clear is measured in real time, not read count:
+// the renderer re-evaluates effectiveSignal() on every rAF frame / 1s HUD tick
+// while `wallSec` (the broker-grid bucket floor) does NOT advance between
+// prints, so "consecutive reads" in production were mere milliseconds apart.
+// Two null reads at the freeze-release instant (bucket rollover) used to blank
+// the label in ~2 frames even when the signal was only briefly under the gate,
+// then return it — the production "HUD flicker". The cleared neutral now has
+// to persist `neutralHysteresisMs` of real elapsed time (`realMs`) while the
+// freeze window itself still runs on the broker-grid `wallSec`.
 
 export interface SignalHoldBufferOptions {
-  /** Consecutive neutral reads before a held directional signal clears. */
+  /** Consecutive TIME-SEPARATED neutral reads before a held signal clears. */
   holdNeutralEvals?: number;
   /** Freeze window in wall seconds (default M1 = 60s). */
   commitBucketSec?: number;
+  /** PART 11 — minimum real elapsed time between two neutral reads for the
+   *  second read to count toward `holdNeutralEvals` (ms). Guards the
+   *  bucket-release flicker: without it, reads compressed onto one wallSec
+   *  (every frame/1s tick) let a 2-frame transient null blank the label. */
+  neutralHysteresisMs?: number;
+}
+
+/** PART 21 — the ONE current-view object every render consumer (HUD label,
+ *  bar tint, target-candle gate, card badge) reads. A single evaluate() call
+ *  produces it, so direction + tier are frozen/cleared ATOMICALLY — never two
+ *  independently fetched copies a future rename could pull apart (the PART 20
+ *  drift class). */
+export interface SignalHoldView {
+  /** Direction the HUD/label renders. Blanked by too_late / regime_scored_only. */
+  gatedSignal: "BUY" | "SELL" | null;
+  /** Frozen held tier while a direction is held; else the latest raw /predict
+   *  tier (PART 8: a T3 candle legitimately renders with a gated-out label). */
+  tier: string | null;
+  /** Broker-grid bucket floor (s) of the last evaluate — the freeze-window clock. */
+  bucketSec: number;
+  suppressedReason: SignalSuppressReason;
+  /** PART 40 [394] — the ENGINE regime gate of the latest /predict payload
+   *  ("tradable" | "scored_only" | "pending_high_precision" | null/unknown).
+   *  NEVER frozen with a held direction: the gate is a verdict on the CURRENT
+   *  regime, so a newly closed gate must blank the projection immediately.
+   *  Fail-closed — anything but the exact string "tradable" withholds. */
+  regimeGate: string | null;
+  /** PART 40 [395] — the payload's raw `suppressed_reason` beside the gate
+   *  (otc_hf_fail / mtf_misaligned / below_high_precision_bar /
+   *  insufficient_history / stale_market_out_of_safety_bounds / …): the
+   *  engine's stated SUB-reason, surfaced verbatim instead of a blank. */
+  regimeDetail: string | null;
+}
+
+/** PART 9 — WHY the stabilized signal is not (or not yet) what raw says:
+ *  - ``"frozen"``  a fresh directional candidate was withheld by the freeze
+ *                  window (buffer stability — the held signal is immutable
+ *                  until its bucket elapses).
+ *  - ``"too_late"`` the engine demoted this emission (not enough real time
+ *                  left in the bucket to act); the UI shows blank + this
+ *                  reason instead of a misleading signal.
+ *  - ``"regime_scored_only"`` PART 14 — the engine's regime gate classified
+ *                  this symbol as random_walk, so the emission is scored-only
+ *                  and never tradable regardless of confidence.
+ *  - ``null``     nothing suppressed. */
+export type SignalSuppressReason =
+  | "too_late"
+  | "frozen"
+  | "regime_scored_only"
+  | null;
+
+/** PART 21 — normalize an engine tier for the hold buffer; unknown → null. */
+export function normalizeViewTier(tier: unknown): string | null {
+  if (typeof tier !== "string") return null;
+  const t = tier.trim().toUpperCase();
+  return t === "T1" || t === "T2" || t === "T3" || t === "T4" || t === "T5"
+    ? t
+    : null;
+}
+
+/** PART 40 [394] — normalize the engine's `regime_gate`. Case/whitespace
+ *  tolerated (the surface lowercases), but the value itself is kept verbatim
+ *  so an unknown future gate string still renders as its own honest reason
+ *  rather than being coerced into a known one. Non-strings → null. */
+export function normalizeViewRegimeGate(gate: unknown): string | null {
+  if (typeof gate !== "string") return null;
+  const g = gate.trim().toLowerCase();
+  return g === "" ? null : g;
+}
+
+/** PART 40 [395] — normalize the engine's `suppressed_reason` sub-reason. */
+export function normalizeViewRegimeDetail(reason: unknown): string | null {
+  if (typeof reason !== "string") return null;
+  const r = reason.trim().toLowerCase();
+  return r === "" ? null : r;
 }
 
 export class SignalHoldBuffer {
   private held: "BUY" | "SELL" | null = null;
   private committedSec = Number.MIN_SAFE_INTEGER;
   private nullStreak = 0;
+  private lastNullMs = 0;
+  private suppressedReason: SignalSuppressReason = null;
+  /** PART 21 — tier frozen atomically with the held direction; cleared with it. */
+  private heldTier: string | null = null;
+  /** Latest raw /predict tier — the target-candle fallback once neutral. */
+  private lastRawTier: string | null = null;
+  /** PART 40 [394] — latest raw /predict regime gate. Always the LATEST
+   *  verdict (never frozen with a held direction). */
+  private lastRawRegimeGate: string | null = null;
+  /** PART 40 [395] — latest raw /predict suppressed_reason sub-reason. */
+  private lastRawRegimeDetail: string | null = null;
+  /** Broker-grid bucket floor (s) of the latest evaluate — the freeze clock. */
+  private lastBucketSec = 0;
   private readonly holdNeutralEvals: number;
   private readonly commitBucketSec: number;
+  private readonly neutralHysteresisMs: number;
 
   constructor(opts?: SignalHoldBufferOptions) {
     this.holdNeutralEvals = Math.max(1, opts?.holdNeutralEvals ?? 2);
     this.commitBucketSec = Math.max(1, opts?.commitBucketSec ?? 60);
+    // PART 11 — DERIVED, not guessed: neutralHysteresisMs = p95(inter-read
+    // jitter) * 1.5, same methodology as MIN_ACTIONABLE_WINDOW_MS (PART 9).
+    // Measured from the real ai-engine log (15,072 LIVE_TICK_QUANT_DISPATCHED
+    // events = the WS store writer that drives the paint-loop read cadence at
+    // the volatile rollover instant): p95 inter-arrival = 984ms. 984 * 1.5 =
+    // 1476ms, rounded up to 1500ms. Every sub-gate null window shorter than
+    // ~1.5s cannot accumulate 2 spaced reads → no bucket-release flicker.
+    this.neutralHysteresisMs = Math.max(0, opts?.neutralHysteresisMs ?? 1500);
   }
 
-  /** Feed the raw gated signal. Returns the STABILIZED signal. */
+  /** Feed the raw gated signal. Returns the STABILIZED signal.
+   *  ``suppress`` = "too_late" (PART 9) surfaces an ENGINE-side time-gate
+   *  suppression: there isn't enough real time left in the bucket to act, so
+   *  the emission is blanked (never shown at an un-actionable instant) while
+   *  the committed hold state is kept intact for the next bucket.
+   *  ``realMs`` (PART 11) is the REAL elapsed clock — the paint loop's
+   *  Date.now(), NOT the broker-grid wallSec. wallSec is bucket-floor-quantized
+   *  and does not advance between prints, so it cannot measure how long a
+   *  neutral has persisted; the neutral-clear hysteresis uses realMs. When
+   *  omitted (legacy callers/tests) it falls back to `wallSec * 1000`, which
+   *  preserves the original read-count semantics for seconds-spaced reads.
+   *
+   *  PART 40 [394] — `regimeGate` / `regimeDetail` ride the SAME evaluate()
+   *  call as direction + tier so the render consumers can never read a gate
+   *  from a different payload than the tier beside it. They are committed as
+   *  the LATEST raw verdict on every call (including the suppressed returns
+   *  below), never frozen: a gate that closes must blank the projection at
+   *  once, not at the end of the held direction's freeze window. */
   evaluate(
     raw: "BUY" | "SELL" | null,
     wallSec: number,
     bucketSec?: number,
+    suppress: "too_late" | "regime_scored_only" | null = null,
+    realMs?: number,
+    /* PART 21 — engine tier (T1…T5), committed ATOMICALLY with the direction. */
+    tier?: string | null,
+    /* PART 40 — engine regime gate + sub-reason of this same payload. */
+    regimeGate?: string | null,
+    regimeDetail?: string | null,
   ): "BUY" | "SELL" | null {
     const freeze = Math.max(1, bucketSec ?? this.commitBucketSec);
+    const nowMs =
+      Number.isFinite(realMs) && (realMs ?? 0) > 0 ? realMs : wallSec * 1000;
+    this.lastRawTier = normalizeViewTier(tier);
+    this.lastRawRegimeGate = normalizeViewRegimeGate(regimeGate);
+    this.lastRawRegimeDetail = normalizeViewRegimeDetail(regimeDetail);
+    this.lastBucketSec = wallSec;
+    this.suppressedReason = null;
+    // PART 9 — engine time-gate: signal too close to bucket close to act.
+    if (suppress === "too_late") {
+      this.suppressedReason = "too_late";
+      return null;
+    }
+    // PART 14 — regime gate: a random_walk symbol is scored-only, never
+    // tradable regardless of confidence. Same blanking semantics as the
+    // time-gate so the UI surfaces the regime reason.
+    if (suppress === "regime_scored_only") {
+      this.suppressedReason = "regime_scored_only";
+      return null;
+    }
     // Currently held directional signal — frozen for its active bucket
     if (this.held !== null) {
       const frozen = wallSec - this.committedSec < freeze;
-      if (frozen) return this.held; // immutable within the freeze window
+      if (frozen) {
+        // A fresh CONTRARY candidate is withheld by the freeze window — that
+        // is a suppression event: the label stays as held, but the reason is
+        // surfaced so the UI can explain why it did not flip.
+        if (raw !== null && raw !== this.held) {
+          this.suppressedReason = "frozen";
+        }
+        return this.held; // immutable within the freeze window
+      }
       // Bucket elapsed — evaluate for change
       if (raw === null) {
-        this.nullStreak += 1;
-        if (this.nullStreak >= this.holdNeutralEvals) {
-          this.held = null;
-          this.nullStreak = 0;
-          this.committedSec = wallSec;
+        // PART 11 — a neutral read counts toward the clear only once it is
+        // REAL time apart from the previous counted read. Reads compressed
+        // onto one wallSec (renderer re-evaluating every frame/1s tick) no
+        // longer clear the label merely by being 2 consecutive frames.
+        if (nowMs - this.lastNullMs >= this.neutralHysteresisMs) {
+          this.nullStreak += 1;
+          this.lastNullMs = nowMs;
+          if (this.nullStreak >= this.holdNeutralEvals) {
+            this.held = null;
+            this.heldTier = null;
+            this.nullStreak = 0;
+            this.committedSec = wallSec;
+          }
         }
         // committedSec is NOT updated on a non-committing read; the bucket
         // window stays open so successive neutral reads can count toward the
@@ -746,14 +1172,18 @@ export class SignalHoldBuffer {
       }
       // Structural directional candidate arrives after the freeze → commit now
       this.held = raw;
+      this.heldTier = this.lastRawTier ?? this.heldTier;
       this.nullStreak = 0;
+      this.lastNullMs = 0;
       this.committedSec = wallSec;
       return this.held;
     }
     // Currently neutral — directional commits immediately; neutral accumulates
     if (raw !== null) {
       this.held = raw;
+      this.heldTier = this.lastRawTier ?? this.heldTier;
       this.nullStreak = 0;
+      this.lastNullMs = 0;
       this.committedSec = wallSec;
     } else {
       this.nullStreak += 1;
@@ -764,12 +1194,49 @@ export class SignalHoldBuffer {
   /** Reset to neutral. */
   reset(): void {
     this.held = null;
+    this.heldTier = null;
+    this.lastRawTier = null;
+    this.lastRawRegimeGate = null;
+    this.lastRawRegimeDetail = null;
+    this.lastBucketSec = 0;
     this.committedSec = Number.MIN_SAFE_INTEGER;
     this.nullStreak = 0;
+    this.lastNullMs = 0;
+    this.suppressedReason = null;
   }
 
   get current(): "BUY" | "SELL" | null {
     return this.held;
+  }
+
+  /** PART 21 — the ONE source of truth every render consumer reads. Built in
+   *  the SAME evaluate() call, so direction + tier are frozen/cleared
+   *  atomically. `tier` reports the frozen held tier while a direction is held;
+   *  once neutral it falls back to the latest raw tier so PART 8's
+   *  T3-candles-with-gated-out-label geometry still renders. `gatedSignal`
+   *  mirrors the evaluate() RETURN — suppressed reasons blank it. */
+  view(): SignalHoldView {
+    return {
+      gatedSignal:
+        this.suppressedReason === "too_late" ||
+        this.suppressedReason === "regime_scored_only"
+          ? null
+          : this.held,
+      tier: this.held !== null ? this.heldTier : this.lastRawTier,
+      bucketSec: this.lastBucketSec,
+      suppressedReason: this.suppressedReason,
+      // PART 40 [394]/[395] — always the LATEST gate/detail of the payload
+      // that produced this evaluate(), so a newly closed gate blanks the
+      // projection immediately (see the evaluate() contract).
+      regimeGate: this.lastRawRegimeGate,
+      regimeDetail: this.lastRawRegimeDetail,
+    };
+  }
+
+  /** PART 9/14 — why the signal is suppressed
+   *  ("too_late" | "regime_scored_only" | "frozen" | null). */
+  get reason(): SignalSuppressReason {
+    return this.suppressedReason;
   }
 }
 
@@ -796,6 +1263,16 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
+  /**
+   * SETTLED-BAR PROVENANCE. Set ONLY on bars the backend sealed
+   * (`ServerClosedCandle.isFinal`). A settled bar is immutable: the chart merge
+   * must never repaint it with a client-side row for the same bucket, which is
+   * what produced broken/repainting closed candles. Client-closed and forming
+   * bars leave this undefined and stay provisional.
+   */
+  isFinal?: boolean;
+  /** Bucket the aggregator could not fill from real ticks (rendered as a gap). */
+  isGap?: boolean;
 }
 
 // ── NATIVE HEIKIN ASHI TRANSFORMATION ENGINE ──
@@ -935,6 +1412,78 @@ export function toHeikinAshiSeries<T extends HeikinAshiBar>(candles: T[]): T[] {
     prev = next;
     return { ...c, ...bar };
   });
+}
+
+/**
+ * ══ RAW vs DISPLAY DOMAIN SEPARATION ══════════════════════════════════════
+ *
+ * The chart mixes two different price domains and MUST NOT confuse them:
+ *
+ *   • RAW    — real broker OHLC. The only truthful price domain. Every
+ *              predictive artefact (target-candle trajectory anchor, price
+ *              levels, stop, HUD last price) MUST be derived from this.
+ *   • DISPLAY — the Heikin-Ashi fold of RAW. A RENDERING transform only: the
+ *              body/wick geometry is smoothed, so its close is a lagging
+ *              midpoint, NOT a tradable price.
+ *
+ * The defect this pair of helpers exists to prevent: writing a live RAW tick
+ * straight into the already-folded display array. That put raw geometry on an
+ * HA axis for the forming bar (the "giant spike / stretched candle" artefact)
+ * AND made the target anchor flip between raw and HA values on every rebuild,
+ * so the TGT trajectory no longer matched the tape.
+ *
+ * `display` is therefore a PURE function of `raw` at all times — rebuild it from
+ * `raw`, never mutate it in place.
+ *
+ * ══ RULED OUT: "wicks stretch to the grid edges" is NOT a renderer bug ══════
+ *
+ * A later investigation (PART 32[228]) asked for the OHLC→pixel coordinate
+ * mapping to be audited, hypothesising that each candle's wick was being mapped
+ * against the FULL visible price domain rather than its own high/low. That
+ * hypothesis is FALSE and must not be re-chased:
+ *
+ *   • There is NO coordinate-mapping code. The main tape is a NATIVE
+ *     lightweight-charts `addCandlestickSeries` (financial-chart.tsx) whose
+ *     wick pixels come from the library's internal canvas renderer. The chart
+ *     component contains no `priceToCoordinate`/`coordinateToPrice` math, no
+ *     custom `ICandlePaneRenderer`/`IPanePrimitive`, and no `getContext`/
+ *     `fillRect` canvas drawing of its own.
+ *   • Therefore wick top/bottom are ALWAYS that candle's own high/low. A wick
+ *     physically cannot be mapped against the whole domain.
+ *   • Measured on the live terminal: bodies ~3.2px wide × ~13px tall with >90%
+ *     of candles showing a wick extending past the body — i.e. textbook
+ *     candlestick anatomy.
+ *   • `scaleMargins: { top: 0.08, bottom: 0.22 }` on the price scale already
+ *     supplies the domain padding that PART 32[229] asked to be added.
+ *
+ * The genuinely long wicks are the DATA, not the mapping: on spread-heavy OTC
+ * feeds real high/low sit far from open/close, and the Heikin-Ashi fold
+ * redistributes extremes further (HA high = max(high, close, open_prev)).
+ * The precision problem is a different one — this fold makes DISPLAY geometry
+ * disagree with the RAW price domain that TGT/ANC/LIVE labels are drawn from,
+ * so see the RAW-vs-DISPLAY contract above.
+ */
+export interface RawDisplaySeries<T> {
+  raw: T[];
+  display: T[];
+}
+
+export function syncRawDisplay<T extends HeikinAshiBar>(raw: T[]): RawDisplaySeries<T> {
+  const safe = Array.isArray(raw) ? raw : [];
+  return { raw: safe, display: toHeikinAshiSeries(safe) };
+}
+
+/**
+ * Last RAW close — the only correct anchor for predictive geometry.
+ *
+ * Returns 0 for an empty series so callers fall through to their own fallback
+ * rather than anchoring a trajectory to `NaN`/`undefined`.
+ */
+export function rawAnchorClose(raw: Array<{ close: number }> | null | undefined): number {
+  if (!Array.isArray(raw) || raw.length === 0) return 0;
+  const last = raw[raw.length - 1];
+  const close = Number(last?.close);
+  return Number.isFinite(close) && close > 0 ? close : 0;
 }
 
 /**
@@ -2696,6 +3245,20 @@ export class RealtimeCandleAggregator {
 
   /** Closed candles plus the in-progress bar — NATIVE Heikin-Ashi, ready to hand to the chart. */
   public getSeries(symbol: string): Candle[] {
+    return toHeikinAshiSeries(this.getRawSeries(symbol));
+  }
+
+  /**
+   * RAW (untransformed) closed candles plus the in-progress bar.
+   *
+   * The chart merge MUST fold Heikin-Ashi ONCE over the fully merged
+   * server + client row set: transforming the client rows here and then
+   * splicing raw server rows into the same array produced one series with two
+   * different candle geometries (HA bodies for client buckets, raw bodies for
+   * server buckets) and a broken HA_Open recursion at the seam. Raw rows are
+   * the merge currency; the chart applies the single fold.
+   */
+  public getRawSeries(symbol: string): Candle[] {
     const state = this.symbols.get((symbol || "").trim().toUpperCase());
     if (!state) return [];
     const rows: Candle[] = [];
@@ -2708,7 +3271,7 @@ export class RealtimeCandleAggregator {
       if (prev && c.timestamp <= prev.timestamp) continue;
       rows.push(c);
     }
-    return toHeikinAshiSeries(rows);
+    return rows;
   }
 
   /** The bar currently accumulating ticks, or null before the first tick. NATIVE Heikin-Ashi. */

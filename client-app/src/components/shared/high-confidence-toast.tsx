@@ -30,12 +30,15 @@ import {
 import { useSocket } from "@/hooks/useSocket";
 import { useLangContext } from "@/hooks/useLangContext";
 import { useTradingStore } from "@/store/useTradingStore";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
+import { resolveExecutionFloor } from "@/lib/signalTiers";
+import { isAlertEligible } from "@/lib/alertGate";
 import { cn } from "@/utils/cn";
 import { formatPairPrice } from "@/utils/format";
 
-/** PRODUCTION THRESHOLD — mirrors the v12 AI Engine DEFINITIVE 98% thermal
- *  gate; a signal is priority-alerted only when all ten books organically
- *  converge to an actionable CALL/PUT at or above this confidence. */
+/** Fallback alert bar when no selection is available yet (SSR-safe).
+ *  Mirrors the engine default T1 bar; the live value below replaces it once
+ *  the terminal store hydrates. */
 const HIGH_CONFIDENCE_THRESHOLD = 98.0;
 
 interface HighConfidenceSignal {
@@ -153,17 +156,39 @@ export const HighConfidenceToast: React.FC = () => {
 
   // ── CLIENT-SIDE CONFIDENCE MONITOR (defense-in-depth) ──
   // Watches every prediction that lands in the trading store. Whenever the
-  // live AI confidence crosses the strict 96.5% DEFINITIVE thermal gate with
-  // an active CALL/PUT direction, this monitor raises the same priority alert
-  // as the backend WS broadcast — guaranteeing the trader is notified even if
-  // the socket event was missed during a reconnect window.
+  // live AI confidence crosses the operator's SELECTED tier floor with an
+  // active BUY/SELL direction, this monitor raises the same priority alert as
+  // the backend WS broadcast — guaranteeing the trader is notified even if the
+  // socket event was missed during a reconnect window.
+  //
+  // Flexible tiers (2026-09-30): the alert bar follows the operator's tier
+  // selection instead of a hardcoded 98%. A trader who deliberately widened to
+  // T3 wants T3 alerts; one on the default T1 keeps the strict behaviour.
   const predictionData = useTradingStore((s) => s.predictionData);
+  const minTier = useMarketTerminalStore((s) => s.minTier);
+  const alertBarPct = resolveExecutionFloor(minTier).barFrac * 100;
+  // The WS listener is registered ONCE, so it reads the live bar through a ref
+  // instead of re-subscribing every time the operator changes tiers.
+  const alertBarPctRef = useRef(alertBarPct);
+  alertBarPctRef.current = alertBarPct;
   useEffect(() => {
     if (!predictionData) return;
     const conf = Number(predictionData.confidence);
     const dir = predictionData.signal;
-    if (!Number.isFinite(conf) || conf <= HIGH_CONFIDENCE_THRESHOLD) return;
+    if (!Number.isFinite(conf) || conf < alertBarPct) return;
     if (dir !== "BUY" && dir !== "SELL") return;
+    // PART 41 [403] — the tier floor is not enough: a SCORED-ONLY verdict
+    // (executable:false or a pending/tradable-less regime gate) is silent even
+    // at 98% book agreement. No toast, no sound — the metal must be tradable.
+    if (
+      !isAlertEligible({
+        executable: predictionData.executable,
+        tier: predictionData.tier,
+        regime_gate: predictionData.regime_gate,
+      })
+    ) {
+      return;
+    }
 
     const signature = `${predictionData.symbol}|${dir}|${predictionData.timeframe}`;
     if (!shouldAlert(signature)) return;
@@ -177,7 +202,7 @@ export const HighConfidenceToast: React.FC = () => {
       timeframe: predictionData.timeframe ?? "1d",
       timestamp: predictionData.timestamp ?? new Date().toISOString(),
     });
-  }, [predictionData]);
+  }, [predictionData, alertBarPct]);
 
   useEffect(() => {
     // ── Shared alert pipeline — used by BOTH the WS listener and the ──
@@ -206,14 +231,30 @@ export const HighConfidenceToast: React.FC = () => {
       targetPrice?: number;
       timeframe?: string;
       timestamp?: string;
+      executable?: boolean;
+      tier?: string | null;
+      regime_gate?: string | null;
     }) => {
       if (!payload?.symbol || !payload?.signalType) return;
       if (payload.signalType !== "BUY" && payload.signalType !== "SELL") return;
 
-      // Enforce the >=96.5% THERMAL-GATE threshold + cooldown dedup on the
-      // wire payload too (only organically converged DEFINITIVE alerts).
+      // PART 41 [403] — the server already gates who it broadcasts; the client
+      // re-verifies the same predicate here and FAILS CLOSED: a wire verdict
+      // that cannot prove executable && T1..T3 && "tradable" never rings.
+      if (
+        !isAlertEligible({
+          executable: payload.executable,
+          tier: payload.tier,
+          regime_gate: payload.regime_gate,
+        })
+      ) {
+        return;
+      }
+
+      // Enforce the operator's selected tier floor + cooldown dedup on the
+      // wire payload too (only alerts for bands the trader actually trades).
       const conf = Number(payload.confidence ?? 0);
-      if (!Number.isFinite(conf) || conf <= HIGH_CONFIDENCE_THRESHOLD) return;
+      if (!Number.isFinite(conf) || conf < alertBarPctRef.current) return;
       const signature = `${payload.symbol}|${payload.signalType}|${payload.timeframe ?? ""}`;
       if (!shouldAlert(signature)) return;
 

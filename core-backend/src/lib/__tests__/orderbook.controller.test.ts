@@ -22,6 +22,7 @@ vi.mock("../../services/forexData.service", () => ({
 import {
   getOrderBook,
   orderbookHealth,
+  FOREX_CHAIN_BUDGET_MS,
 } from "../../controllers/orderbook.controller";
 
 type JsonBody = Record<string, unknown>;
@@ -92,12 +93,17 @@ describe("GET /api/v1/orderbook (MASTER MISSION part 1)", () => {
 
   it("test_orderbook_returns_504_json_on_upstream_timeout", async () => {
     vi.useFakeTimers();
-    // Upstream never settles → the controller's 5s hard cap must answer 504.
+    // Upstream never settles → the controller's hard cap must answer 504.
+    //
+    // PART 32.5a [261]: that cap is no longer 5s. It is sized to the whole forex
+    // cascade (primary + all fallback tiers) so a slow primary can no longer eat
+    // the entire deadline and cut the fallback tiers off before they run. The
+    // 504 must therefore still happen, but later and after the full budget.
     handlers.getLiveSpot.mockReturnValue(new Promise(() => {}));
     handlers.getHistoricalCandles.mockReturnValue(new Promise(() => {}));
     const target = capture();
     getOrderBook(reqWith({ symbol: "EUR/USD" }), target.res);
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(FOREX_CHAIN_BUDGET_MS + 1_000);
     await target.done;
     expect(target.calls.length).toBe(1);
     const { code, body } = target.calls[0];

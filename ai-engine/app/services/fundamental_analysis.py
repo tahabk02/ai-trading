@@ -19,6 +19,7 @@ fabrications) and callers treat "no fundamentals" as an explicit state.
 
 import asyncio
 import structlog
+from datetime import date, timedelta
 from typing import Any, Dict
 
 import httpx
@@ -144,8 +145,8 @@ class FundamentalAnalysisService:
         # ── Tier 2: fiat pairs via Frankfurter (ECB macro context) ──
         if base in _ECB_CURRENCIES and quote in _ECB_CURRENCIES:
             try:
-                end_date = __import__("datetime").date.today()
-                start_date = end_date - __import__("datetime").timedelta(days=45)
+                end_date = date.today()
+                start_date = end_date - timedelta(days=45)
                 async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
                     resp = await client.get(
                         f"https://api.frankfurter.dev/v1/"

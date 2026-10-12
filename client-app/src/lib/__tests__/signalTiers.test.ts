@@ -19,7 +19,7 @@ describe("signalTiers — client mirror of the engine's multi-tier ladder (PART 
     expect(TIER_THRESHOLDS.T3).toBe(0.8);
     expect(TIER_THRESHOLDS.T4).toBe(0.7);
     expect(TIER_ORDER).toEqual(["T1", "T2", "T3", "T4", "T5"]);
-    expect(MIN_EXECUTABLE_TIER).toBe("T4");
+    expect(MIN_EXECUTABLE_TIER).toBe("T1"); // STRICT 96.5% bar
     expect(TARGET_CANDLES_MIN_TIER).toBe("T3");
   });
 
@@ -32,9 +32,12 @@ describe("signalTiers — client mirror of the engine's multi-tier ladder (PART 
     expect(resolveTier(0.85)).toBe("T3");
     expect(resolveTier(80.0)).toBe("T3");
     expect(resolveTier(0.75)).toBe("T4");
+    expect(resolveTier(0.7)).toBe("T4"); // exactly at the T4 floor
     expect(resolveTier(70.0)).toBe("T4");
     expect(resolveTier(0.69)).toBe("T5"); // below T4 → WEAK
     expect(resolveTier(60.0)).toBe("T5");
+    expect(resolveTier(0.29)).toBe("T5"); // far below T4 → WEAK
+    expect(resolveTier(25)).toBe("T5");
   });
 
   it("normalizeTierConfidence keeps 0..1 unchanged and rescales 0..100", () => {

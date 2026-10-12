@@ -32,7 +32,20 @@ import axios, { AxiosInstance } from "axios";
 import * as dotenv from "dotenv";
 import * as path from "path";
 
-dotenv.config({ path: path.resolve(__dirname, "../../.env") });
+/**
+ * Load core-backend's OWN env, resolved from this file's location.
+ *
+ * The previous `path.resolve(__dirname, "../../.env")` walked two levels up —
+ * from `<repo>/core-backend/scripts` that is `<repo>`'s PARENT directory, not
+ * core-backend — so it read an unrelated env file (and missed the one this
+ * service actually uses). Reuse the service loader so the script, the API, and
+ * `npm start` all resolve configuration identically.
+ *
+ * `override: false` keeps a real injected environment (CI token, etc.) ahead
+ * of anything on disk.
+ */
+const SERVICE_ROOT = path.resolve(__dirname, "..");
+dotenv.config({ path: path.join(SERVICE_ROOT, ".env"), override: false, quiet: true });
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIGURATION
@@ -55,7 +68,7 @@ const REFRESH_INTERVAL_MS = Number(process.env.FOREX_PUBLISH_REFRESH_MS) || 60_0
 const REQUEST_TIMEOUT_MS = 15_000;
 
 // Free public rate APIs (same cascade as ForexDataService)
-const FRANKFURTER_BASE = "https://api.frankfurter.app";
+const FRANKFURTER_BASE = "https://api.frankfurter.dev/v1";
 const OPEN_ER_API_BASE = "https://open.er-api.com/v6/latest";
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 

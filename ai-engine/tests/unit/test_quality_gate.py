@@ -6,11 +6,14 @@ multi-tier ladder as the confluence gate (signal_gatekeeper):
 
   GATE_WEIGHTS  = mtf .25 | momentum .25 | volatility .15 | volume .15 | pressure .20
   ensemble_score = Σ weight × factor (every factor is an honest 0|1)
-  EMIT ⇔ ensemble tier is dispatchable (>= T4-LOW 0.70), resolved honestly:
-      5/5 = 1.00 → T1 PREMIUM · 4/5 = 0.75-0.85 → T4/T3 · 3/5 = 0.60 → T5 BLOCK.
+  EMIT ⇔ ensemble tier is dispatchable (STRICT MIN_EXECUTABLE_TIER = T1,
+  0.965 — 2026-09-24 restored over the LIVE-TEST T4-LOW 0.30 floor),
+  resolved honestly:
+      5/5 = 1.00 → T1 PREMIUM EMIT · 4/5 = 0.85 → T3 BLOCK · 1/5 = 0.25 → T5 BLOCK.
 
-A single failed factor no longer blankets-everything sub-thermal: it honestly
-downgrades the emission to the tier the real evidence supports.
+Under the strict bar ANY single failed factor caps the score at ≤ 0.85 —
+i.e. IMMEDIATELY below the 0.965 emission floor — so the ensemble BLOCKS
+instead of merely downgrading. Only a perfect 5/5 clears the watershed.
 """
 
 import pytest
@@ -54,17 +57,17 @@ def _aligned_inputs() -> dict:
     }
 
 
-# ── 1 ── the quality bar is the weakest EXECUTABLE tier (T4=0.70)
-def test_quality_emit_bar_is_weakest_tier():
+# ── 1 ── the quality bar is the STRICT executable tier (T1 = 0.965)
+def test_quality_emit_bar_is_strict_executable_tier():
     assert QUALITY_EMIT_BAR == pytest.approx(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER])
-    assert QUALITY_EMIT_BAR == pytest.approx(0.70)
-    assert current_hard_gate() == pytest.approx(0.70)
+    assert QUALITY_EMIT_BAR == pytest.approx(0.965)
+    assert current_hard_gate() == pytest.approx(0.965)
     assert round(sum(GATE_WEIGHTS.values()), 6) == pytest.approx(1.0)
     assert FACTOR_ORDER == ["mtf", "momentum", "volatility", "volume", "pressure"]
 
 
-# ── 2 ── a one-timeframe window admits no MTF confluence → honest T4 emission
-def test_mtf_single_tf_downgrades_to_t4():
+# ── 2 ── a one-timeframe window admits no MTF confluence → honest BLOCK
+def test_mtf_single_tf_blocks_the_ensemble():
     from unittest.mock import patch
 
     inputs = _aligned_inputs()
@@ -74,43 +77,44 @@ def test_mtf_single_tf_downgrades_to_t4():
     assert factors["mtf"] == 0               # one TF can never claim confluence
     assert factors["momentum"] == 1
     verdict = evaluate_quality(factors)
-    assert verdict["decision"] == "EMIT"
-    assert verdict["tier"] == "T4"          # 0.75 — honest LOW, not a hard block
+    assert verdict["decision"] == "BLOCK"    # 0.75 < 0.965 strict bar
+    assert verdict["tier"] == "T4"          # honest LOW, but not executable
     assert verdict["tier_label"] == "LOW"
+    assert verdict["reason"].startswith("QUALITY_BELOW_GATE")
 
 
-# ── 3 ── momentum disagreement (weight .25 loss → 0.75) = honest T4
-def test_momentum_failure_downgrades_to_t4():
+# ── 3 ── momentum disagreement (weight .25 loss → 0.75) = strict BLOCK
+def test_momentum_failure_blocks_the_ensemble():
     verdict = evaluate_quality(
         {"mtf": 1, "momentum": 0, "volatility": 1, "volume": 1, "pressure": 1}
     )
-    assert verdict["decision"] == "EMIT"
+    assert verdict["decision"] == "BLOCK"
     assert verdict["tier"] == "T4"
     assert verdict["quality"] == pytest.approx(0.75)
 
 
-# ── 4 ── wild/crushed volatility (ATR outside band) = honest T3
-def test_volatility_failure_downgrades_to_t3():
+# ── 4 ── wild/crushed volatility (ATR outside band) = strict BLOCK
+def test_volatility_failure_blocks_the_ensemble():
     verdict = evaluate_quality(
         {"mtf": 1, "momentum": 1, "volatility": 0, "volume": 1, "pressure": 1}
     )
-    assert verdict["decision"] == "EMIT"
-    assert verdict["tier"] == "T3"      # 0.85 → MEDIUM
+    assert verdict["decision"] == "BLOCK"
+    assert verdict["tier"] == "T3"      # 0.85 → MEDIUM, below the bar
     assert verdict["quality"] == pytest.approx(0.85)
 
 
-# ── 5 ── no real volume surge → honest T3
-def test_volume_failure_downgrades_to_t3():
+# ── 5 ── no real volume surge → strict BLOCK
+def test_volume_failure_blocks_the_ensemble():
     verdict = evaluate_quality(
         {"mtf": 1, "momentum": 1, "volatility": 1, "volume": 0, "pressure": 1}
     )
-    assert verdict["decision"] == "EMIT"
+    assert verdict["decision"] == "BLOCK"
     assert verdict["tier"] == "T3"
-    assert verdict["reason"] == "ALL_FACTORS_ALIGNED"
+    assert verdict["reason"].startswith("QUALITY_BELOW_GATE")
 
 
-# ── 6 ── balanced order-flow (not one-sided) → honest T3
-def test_pressure_failure_downgrades_to_t3():
+# ── 6 ── balanced order-flow (not one-sided) → strict BLOCK
+def test_pressure_failure_blocks_the_ensemble():
     inputs = _aligned_inputs()
     inputs["buy_volume"] = 1000.0
     inputs["sell_volume"] = 1000.0  # buy share 0.50 — not one-sided
@@ -119,12 +123,12 @@ def test_pressure_failure_downgrades_to_t3():
     verdict_d = evaluate_quality(
         {"mtf": 1, "momentum": 1, "volatility": 1, "volume": 1, "pressure": 0}
     )
-    assert verdict_d["decision"] == "EMIT"
+    assert verdict_d["decision"] == "BLOCK"
     assert verdict_d["tier"] == "T3"
     assert verdict_d["quality"] == pytest.approx(0.80)
 
 
-# ── 7 ── full alignment = T1 PREMIUM; 3/5 = T5 BLOCK (below the weakest tier)
+# ── 7 ── perfect alignment = T1 PREMIUM EMIT; anything less strict-BLOCKS
 def test_score_tiers_five_factors():
     verdict = evaluate_quality(
         {"mtf": 1, "momentum": 1, "volatility": 1, "volume": 1, "pressure": 1}
@@ -134,7 +138,7 @@ def test_score_tiers_five_factors():
     assert verdict["tier_label"] == "PREMIUM"
     assert verdict["quality"] == pytest.approx(1.0)
 
-    # 3/5 aligned → 0.60 < 0.70 → T5 WEAK → BLOCK (the only true hard block)
+    # 3/5 aligned → 0.50 < 0.70 → T5 WEAK → BLOCK (never dispatched)
     verdict_w = evaluate_quality(
         {"mtf": 1, "momentum": 1, "volatility": 0, "volume": 0, "pressure": 0}
     )
@@ -142,8 +146,16 @@ def test_score_tiers_five_factors():
     assert verdict_w["tier"] == "T5"
     assert verdict_w["quality"] == pytest.approx(0.50)
 
+    # 1/5 aligned (0.25) → T5 WEAK → BLOCK
+    verdict_b = evaluate_quality(
+        {"mtf": 1, "momentum": 0, "volatility": 0, "volume": 0, "pressure": 0}
+    )
+    assert verdict_b["decision"] == "BLOCK"
+    assert verdict_b["tier"] == "T5"
+    assert verdict_b["quality"] == pytest.approx(0.25)
 
-# ── 8 ── full payload contract: T5 block -> signal null + confidence 0
+
+# ── 8 ── full payload contract: sub-bar ensemble → signal null + confidence 0
 def test_apply_quality_gate_payload_and_waiting():
     from unittest.mock import patch
 
@@ -152,12 +164,13 @@ def test_apply_quality_gate_payload_and_waiting():
     assert qq["signal"] == "BUY"
     assert qq["confidence"] > 0.0
     assert qq["tier"] == "T1"
-    assert qq["quality"] >= 0.70
+    assert qq["quality"] >= 0.965  # clears the STRICT T1 bar
     assert set(qq["factors"].keys()) == set(FACTOR_ORDER)
     assert qq["market_waiting"] is False
     assert qq["reason"] == "ALL_FACTORS_ALIGNED"
 
-    # only ~50% ensemble (3 of the 5 factors) is a true T5 hard block
+    # 0.65 < 0.965 (STRICT bar) → BLOCK: signal null + confidence 0.0, direction
+    # kept as market_waiting (never coerced to HOLD). Only 5/5 emits under T1.
     weak_inputs = _aligned_inputs()
     weak_inputs["atr"] = 0.1              # outside the volatility band → vol 0
     weak_inputs["buy_volume"] = 1000.0
@@ -168,7 +181,7 @@ def test_apply_quality_gate_payload_and_waiting():
     assert qb["confidence"] == 0.0
     assert qb["tier"] == "T5"
     assert qb["market_waiting"] is True
-    assert qb["quality"] < 0.70
+    assert qb["quality"] == pytest.approx(0.65)
 
     ql = apply_quality_gate("BUY", 99.0, None)
     assert ql["quality"] is None

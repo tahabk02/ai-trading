@@ -132,13 +132,13 @@ export const OrderBook: React.FC<OrderBookProps> = ({
     return (
       <div className="bg-obsidian border border-slate-800 rounded-xl overflow-hidden min-w-0 shadow-sm">
         <div className="p-4">
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-2">
+          <h3 className="text-sm font-bold text-slate-50 uppercase tracking-wider mb-2">
             {t("orderBook")}
           </h3>
-          <p className="text-[10px] text-rose-400 font-mono">{error}</p>
+          <p className="text-[10px] text-st-neg font-mono">{error}</p>
           <button
             onClick={() => symbol && fetchOrderBook(symbol)}
-            className="mt-2 text-[10px] text-blue-400 hover:underline font-mono"
+            className="mt-2 text-[10px] text-st-info hover:underline font-mono"
           >
             Retry
           </button>
@@ -164,16 +164,16 @@ export const OrderBook: React.FC<OrderBookProps> = ({
       >
         <div className="flex items-center justify-between px-4 pt-4 pb-2">
           <div>
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+            <h3 className="text-sm font-bold text-slate-50 uppercase tracking-wider">
               {t("orderBook")}
             </h3>
-            <p className="text-[10px] text-slate-500 mt-0.5 font-mono tracking-tight">
+            <p className="text-[10px] text-ink-muted mt-0.5 font-mono tracking-tight">
               {pairLabel}
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
             <AssetClassBadge symbol={pairLabel} />
-            <span className="text-[9px] text-slate-500 font-mono">
+            <span className="text-[9px] text-ink-muted font-mono">
               {pairLabel}
             </span>
           </div>
@@ -181,16 +181,16 @@ export const OrderBook: React.FC<OrderBookProps> = ({
 
         {/* LIVE L1 QUOTE — REAL TAPE, NO DEPTH */}
         <div className="px-4 py-4 space-y-2">
-          <div className="flex items-center justify-between rounded-lg px-3 py-3 bg-obsidian-950/60 border border-slate-700/50">
+          <div className="flex items-center justify-between rounded-lg px-3 py-3 bg-obsidian-950/60 border border-slate-800/50">
             <div className="flex flex-col gap-0.5">
               <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider">
                 {t("liveQuote")}
               </span>
-              <span className="text-lg font-bold text-white font-mono tabular-nums">
+              <span className="text-lg font-bold text-slate-50 font-mono tabular-nums">
                 {midPrice > 0 ? formatPairPriceLocal(midPrice, symbol) : "—"}
               </span>
               {lastPrice > 0 && midPrice !== lastPrice && (
-                <span className="text-[9px] text-slate-500 font-mono">
+                <span className="text-[9px] text-ink-muted font-mono">
                   last {formatPairPriceLocal(lastPrice, symbol)}
                 </span>
               )}
@@ -201,8 +201,8 @@ export const OrderBook: React.FC<OrderBookProps> = ({
                 {spread > 0 ? formatPairPriceLocal(spread, symbol) : "—"}
                 {spreadPercent > 0 ? ` (${spreadPercent.toFixed(3)}%)` : ""}
               </span>
-              <span className="inline-flex items-center gap-1 text-[9px] text-amber-400 font-mono uppercase tracking-wider font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              <span className="inline-flex items-center gap-1 text-[9px] text-st-warn font-mono uppercase tracking-wider font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse" />
                 L1
               </span>
             </div>
@@ -212,8 +212,8 @@ export const OrderBook: React.FC<OrderBookProps> = ({
           </p>
         </div>
 
-        <div className="mt-2 px-4 py-3 border-t border-slate-800 flex justify-between items-center bg-obsidian-950/80">
-          <span className="text-[9px] text-slate-500 font-mono">
+        <div className="mt-2 px-4 py-3 border-t border-slate-800 flex justify-between items-center bg-elevated">
+          <span className="text-[9px] text-ink-muted font-mono">
             {orderBookData?.source ?? "forex_otc"}
           </span>
           <span className="text-[9px] text-slate-400 font-mono">
@@ -232,23 +232,23 @@ export const OrderBook: React.FC<OrderBookProps> = ({
       {/* Header */}
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <div>
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+          <h3 className="text-sm font-bold text-slate-50 uppercase tracking-wider">
             {t("orderBook")}
           </h3>
-          <p className="text-[10px] text-slate-500 mt-0.5 font-mono tracking-tight">
+          <p className="text-[10px] text-ink-muted mt-0.5 font-mono tracking-tight">
             {pairLabel}
           </p>
         </div>
         <div className="flex flex-col items-end gap-1">
           <AssetClassBadge symbol={pairLabel} />
-          <span className="text-[9px] text-slate-500 font-mono">
+          <span className="text-[9px] text-ink-muted font-mono">
             {pairLabel}
           </span>
         </div>
       </div>
 
       {/* Column Headers */}
-      <div className="grid grid-cols-3 gap-0 px-4 pb-1 text-[10px] font-mono text-slate-500 border-b border-slate-800/60">
+      <div className="grid grid-cols-3 gap-0 px-4 pb-1 text-[10px] font-mono text-ink-muted border-b border-slate-800/60">
         <div
           className={`${isRightAligned ? "text-right" : "text-left"} font-bold`}
         >
@@ -272,22 +272,22 @@ export const OrderBook: React.FC<OrderBookProps> = ({
           asks.map((level, i) => (
             <div
               key={`ask-${i}`}
-              className="grid grid-cols-3 gap-0 text-[11px] font-mono group cursor-pointer hover:bg-rose-500/10 px-1 py-[2px] rounded transition-colors relative"
+              className="grid grid-cols-3 gap-0 text-[11px] font-mono group cursor-pointer hover:bg-st-neg/10 px-1 py-[2px] rounded transition-colors relative"
             >
               <div
-                className="absolute inset-y-0 right-0 bg-rose-500/10 rounded transition-all"
+                className="absolute inset-y-0 right-0 bg-st-neg/10 rounded transition-all"
                 style={{
                   width: `${(level.total / maxAskTotal) * 100}%`,
                   opacity: 0.3,
                 }}
               />
-              <span className="text-rose-400 relative z-10 font-bold">
+              <span className="text-st-neg relative z-10 font-bold">
                 {formatPairPriceLocal(level.price, symbol)}
               </span>
               <span className="text-slate-300 relative z-10">
                 {formatQty(level.quantity)}
               </span>
-              <span className="text-slate-500 relative z-10 text-right">
+              <span className="text-ink-muted relative z-10 text-right">
                 {formatTotal(level.total)}
               </span>
             </div>
@@ -326,22 +326,22 @@ export const OrderBook: React.FC<OrderBookProps> = ({
           bids.map((level, i) => (
             <div
               key={`bid-${i}`}
-              className="grid grid-cols-3 gap-0 text-[11px] font-mono group cursor-pointer hover:bg-emerald-500/10 px-1 py-[2px] rounded transition-colors relative"
+              className="grid grid-cols-3 gap-0 text-[11px] font-mono group cursor-pointer hover:bg-st-pos/10 px-1 py-[2px] rounded transition-colors relative"
             >
               <div
-                className="absolute inset-y-0 left-0 bg-emerald-500/10 rounded transition-all"
+                className="absolute inset-y-0 left-0 bg-st-pos/10 rounded transition-all"
                 style={{
                   width: `${(level.total / maxBidTotal) * 100}%`,
                   opacity: 0.3,
                 }}
               />
-              <span className="text-emerald-400 relative z-10 font-bold">
+              <span className="text-st-pos relative z-10 font-bold">
                 {formatPairPriceLocal(level.price, symbol)}
               </span>
               <span className="text-slate-300 relative z-10">
                 {formatQty(level.quantity)}
               </span>
-              <span className="text-slate-500 relative z-10 text-right">
+              <span className="text-ink-muted relative z-10 text-right">
                 {formatTotal(level.total)}
               </span>
             </div>
@@ -354,22 +354,22 @@ export const OrderBook: React.FC<OrderBookProps> = ({
       </div>
 
       {/* Footer Stats */}
-      <div className="mt-2 px-4 py-3 border-t border-slate-800 flex justify-between items-center bg-obsidian-950/80">
+      <div className="mt-2 px-4 py-3 border-t border-slate-800 flex justify-between items-center bg-elevated">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            <span className="text-[9px] text-emerald-400 font-mono uppercase tracking-wider font-bold">
+            <span className="w-2 h-2 rounded-full bg-st-pos" />
+            <span className="text-[9px] text-st-pos font-mono uppercase tracking-wider font-bold">
               {t("buys")}: {bids.length}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-rose-500" />
-            <span className="text-[9px] text-rose-400 font-mono uppercase tracking-wider font-bold">
+            <span className="w-2 h-2 rounded-full bg-st-neg" />
+            <span className="text-[9px] text-st-neg font-mono uppercase tracking-wider font-bold">
               {t("sells")}: {asks.length}
             </span>
           </div>
         </div>
-        <div className="text-[9px] text-slate-500 font-mono">
+        <div className="text-[9px] text-ink-muted font-mono">
           {isLevel1
             ? "L1"
             : `${bids.length + asks.length} ${t("levels")}`}

@@ -10,12 +10,14 @@ import { formatPairPrice } from "@/utils/format";
 import { getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TierBadge } from "@/components/shared/tier-badge";
+import { BookAgreementDepthNote } from "@/components/shared/book-agreement-depth-note";
 import {
   useTradingStore,
-  selectCurrentPrice,
   selectSetActiveSymbol,
   selectGetPrediction,
 } from "@/store/useTradingStore";
+import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
+import { QUOTE_PROVENANCE_STALE_MS, isPoOfflineOtc } from "@/lib/quoteProvenance";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -28,6 +30,19 @@ interface SignalProps {
     signalType?: "BUY" | "SELL";
     price?: number | null;
     confidence?: number | null;
+    /**
+     * PART 19.2 [118] — raw confluence internals + "n/n books aligned" label.
+     * PART 35.3 [358] — the 0-100 number is STRATEGY BOOK AGREEMENT, not a
+     * calibrated probability and not order-book evidence.
+     */
+    book_agreement_detail?: {
+      convergence_index?: number;
+      alignment?: number;
+      magnitude?: number;
+      aligned_count?: number;
+      active_count?: number;
+      label?: string;
+    } | null;
     /** AI Engine dispatch tier T1…T5 (PART 6). */
     tier?: string | null;
     createdAt?: string | null;
@@ -54,9 +69,91 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
 
   const setActiveSymbol = useTradingStore(selectSetActiveSymbol);
   const getPrediction = useTradingStore(selectGetPrediction);
+  /** PART 35.3 [359][360] — engine's order-book depth flag for this score. */
+  const bookConfluence = useTradingStore((s) => s.predictionData?.book_confluence);
+  // PART 35.3 [360] — the rail renders ONE WIDGET PER LIVE SIGNAL, but
+  // `predictionData` is the REST prediction for the ACTIVE symbol only. Left
+  // ungated, every widget in the rail inherits that one symbol's depth evidence
+  // and stamps it onto other instruments' scores. Only the widget whose symbol
+  // IS the predicted symbol may claim the evidence; the others render nothing.
+  const predictionSymbol = useTradingStore(
+    (s) => s.predictionData?.symbol ?? null,
+  );
+  const normalizeSymbol = (v: string | null | undefined) =>
+    (v ?? "").replace(/[\/\s_-]/g, "").toUpperCase();
+  const ownsDepthEvidence =
+    !!normalizeSymbol(predictionSymbol) &&
+    normalizeSymbol(predictionSymbol) === normalizeSymbol(symbol);
 
-  const unifiedPrice = useTradingStore(selectCurrentPrice);
-  const price = unifiedPrice > 0 ? unifiedPrice : 0;
+  const invert = normalizeSymbol(symbol) === normalizeSymbol(displayType);
+
+  // ════════════════════════════════════════════════════════════════════
+  // PART 41 [398] — PER-CARD PRICE, NEVER THE ACTIVE SYMBOL'S.
+  // Every card used to read `selectCurrentPrice` (the ACTIVE symbol) and stamp
+  // it as its own execution price — a GBP/USD active session printed ~1.32 on
+  // the BTC/USD card. The card price now resolves from its OWN symbol: the
+  // signal payload price first, then the per-symbol quote map keyed by
+  // `signal.symbol`. Unknown → "--". There is intentionally NO fallback to the
+  // active symbol's price.
+  // ════════════════════════════════════════════════════════════════════
+  const railSymbol = (signal?.symbol ?? "").trim().toUpperCase();
+  const payloadPrice =
+    typeof signal?.price === "number" &&
+    Number.isFinite(signal.price) &&
+    signal.price > 0
+      ? signal.price
+      : 0;
+  const symbolQuote = useMarketTerminalStore((s) => {
+    if (!railSymbol) return undefined;
+    // Direct key first — the backend keys quotes by the canonical symbol.
+    if (s.quotes?.[railSymbol]) return s.quotes[railSymbol];
+    // Slash/spacing variants ("BTC / USD" → "BTC/USD") fall back to a compact
+    // match across the whole map. Cheap: this path only runs for variant keys.
+    const compact = railSymbol.replace(/[\/\s_-]/g, "");
+    for (const q of Object.values(s.quotes ?? {})) {
+      if (q?.symbol && q.symbol.replace(/[\/\s_-]/g, "").toUpperCase() === compact) {
+        return q;
+      }
+    }
+    return undefined;
+  });
+  const quotePrice =
+    typeof symbolQuote?.price === "number" &&
+    Number.isFinite(symbolQuote.price) &&
+    symbolQuote.price > 0
+      ? symbolQuote.price
+      : 0;
+  const price = payloadPrice > 0 ? payloadPrice : quotePrice;
+  const priceUnknown = !(price > 0);
+
+  // PART 41 [399] — the rail carries the SAME stale marker as the panel.
+  // A verdict built on a quote older than the provenance threshold (15s) or
+  // flagged stale/held by the backend must not wear PREMIUM styling. We report
+  // the age outright ("STALE Ns") instead of silently downgrading the tier.
+  const quoteAgeMs =
+    typeof symbolQuote?.freshAgeMs === "number" &&
+    Number.isFinite(symbolQuote.freshAgeMs)
+      ? symbolQuote.freshAgeMs
+      : typeof symbolQuote?.ageMs === "number" &&
+          Number.isFinite(symbolQuote.ageMs)
+        ? symbolQuote.ageMs
+        : symbolQuote?.lastTickAt && !Number.isNaN(Date.parse(symbolQuote.lastTickAt))
+          ? Date.now() - Date.parse(symbolQuote.lastTickAt)
+          : null;
+  const stale =
+    !!symbolQuote &&
+    (symbolQuote.staleLive === true ||
+      symbolQuote.stale === true ||
+      (quoteAgeMs != null && quoteAgeMs > QUOTE_PROVENANCE_STALE_MS));
+  const staleSeconds =
+    quoteAgeMs != null && stale
+      ? Math.max(1, Math.round(quoteAgeMs / 1000))
+      : null;
+
+  // PART 43.4 [469] — an OTC pair priced by a NON-PO feed (PO OFFLINE / market
+  // proxy) must NOT present a tradeable execution price. The rail resolves the
+  // same per-symbol quote map the card uses, so its `source` is authoritative.
+  const poOffline = isPoOfflineOtc(railSymbol, symbolQuote ?? null);
 
   // ════════════════════════════════════════════════════════════════
   // ABSOLUTE CONFIDENCE SANITIZER — KILLS OVERFLOW AT CLIENT BOUNDARY
@@ -66,19 +163,24 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
     Math.max(normalizedConf > 1 ? normalizedConf : normalizedConf * 100, 0),
     100,
   );
+  // PART 19.2 [118] — book agreement internals: how many of the ten strategy
+  // books actually aligned with the dispatched direction. Rendered next to the
+  // % so the number reads as AGREEMENT, never as a probability.
+  const booksA = signal?.book_agreement_detail?.aligned_count ?? null;
+  const booksN = signal?.book_agreement_detail?.active_count ?? null;
   // ── PART 6 TIER-COLORED CONFIDENCE — palette mirrors the engine ladder ──
   // T1 emerald (>=96.5), T2 teal (>=90), T3 amber (>=80), T4 orange (>=70),
   // T5 gray. Replaces the old ad-hoc >90/>80/>72 bands with the canonical
   // T1-T5 tiers the engine dispatches.
   const unknownTierColor =
     displayConfidence >= 96.5
-      ? "text-emerald-400"
+      ? "text-st-pos"
       : displayConfidence >= 90
-        ? "text-teal-300"
+        ? "text-st-teal"
         : displayConfidence >= 80
-          ? "text-amber-400"
+          ? "text-st-warn"
           : displayConfidence >= 70
-            ? "text-orange-400"
+            ? "text-st-caution"
             : "text-slate-400";
 
   const handleViewChart = () => {
@@ -92,17 +194,17 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
   return (
     <div
       onClick={handleViewChart}
-      className="bg-obsidian-900 border border-slate-800 rounded-xl p-3 sm:p-5 shadow-2xl hover:border-blue-500/50 transition-all duration-300 cursor-pointer"
+      className="bg-obsidian-900 border border-slate-800 rounded-xl p-3 sm:p-5 shadow-card dark:shadow-2xl hover:border-blue-500/50 transition-all duration-300 cursor-pointer"
     >
       {/* ── Header: Symbol + Badge (BUY 🟢 / SELL 🔴) ── */}
       <div className="flex justify-between items-start mb-3 sm:mb-4 gap-2">
         <div className="min-w-0 flex-1">
-          <h3 className="text-base sm:text-xl font-bold text-white tracking-tight truncate flex items-center gap-2">
+          <h3 className="text-base sm:text-xl font-bold text-slate-50 tracking-tight truncate flex items-center gap-2">
             {getPairLabel(symbol)}
             <AssetClassBadge symbol={symbol} />
           </h3>
           <p
-            className="text-slate-500 text-[10px] sm:text-xs uppercase font-semibold mt-0.5"
+            className="text-ink-muted text-[10px] sm:text-xs uppercase font-semibold mt-0.5"
             dir={detectLang() === "ar" ? "rtl" : "ltr"}
           >
             {createdAt ? format(new Date(createdAt), "HH:mm:ss") : "--"} · LOCAL
@@ -112,9 +214,9 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           className={cn(
             "shrink-0 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full text-[10px] sm:text-xs font-bold flex items-center gap-1 min-h-[28px] sm:min-h-[32px]",
             isBuy
-              ? "bg-emerald-500/10 text-emerald-400"
+              ? "bg-st-pos/10 text-st-pos"
               : isSell
-                ? "bg-rose-500/10 text-rose-400"
+                ? "bg-st-neg/10 text-st-neg"
                 : "bg-slate-500/10 text-slate-300",
           )}
         >
@@ -132,19 +234,44 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
       {/* ── Price & Confidence Grid ── */}
       <div className="grid grid-cols-2 gap-2 sm:gap-4">
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
-          <p className="text-slate-500 text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
+          <p className="text-ink-muted text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
             Execution Price
           </p>
-          <p className="text-white font-mono text-sm sm:text-lg truncate">
-            ${formatPairPrice(price, symbol)}
+          <p className="text-slate-50 font-mono text-sm sm:text-lg truncate">
+            {priceUnknown || poOffline ? (
+              "--"
+            ) : (
+              <>${formatPairPrice(price, symbol)}</>
+            )}
           </p>
+          {/* PART 43.4 [469] — PO OFFLINE: no tradeable execution price. */}
+          {poOffline ? (
+            <p
+              data-testid="rail-po-offline-marker"
+              className="text-st-caution text-[9px] sm:text-[10px] font-bold uppercase tracking-wider truncate mt-0.5"
+            >
+              PO OFFLINE · MARKET PROXY
+            </p>
+          ) : null}
+          {/* PART 41 [399] — same stale marker as the panel: age the quote out
+              loud instead of showing PREMIUM styling on a stale-built verdict. */}
+          {stale ? (
+            <p
+              data-testid="rail-stale-marker"
+              className="text-st-caution text-[9px] sm:text-[10px] font-bold uppercase tracking-wider truncate mt-0.5"
+            >
+              STALE {staleSeconds != null ? `${staleSeconds}s` : ""}
+            </p>
+          ) : null}
         </div>
         <div className="bg-obsidian-950/60 rounded-lg p-2 sm:p-3">
-          <p className="text-slate-500 text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
-            AI Confidence
+          <p className="text-ink-muted text-[9px] sm:text-[10px] uppercase font-bold mb-0.5 sm:mb-1">
+            Strategy Book Agreement
           </p>
-          {/* ── REAL DYNAMIC CONFIDENCE — tier colors reflect the exact ──
-              ── floating-point value returned by the unbiased engine. ── */}
+          {/* ── REAL DYNAMIC BOOK AGREEMENT — tier colors reflect the exact ──
+              ── floating-point value returned by the unbiased engine. This  ──
+              ── number is a CONFLUENCE SCORE (agreement among ten strategy  ──
+              ── books on the same tape), NOT a calibrated probability.     ── */}
           <p
             className={cn(
               "text-sm sm:text-lg font-bold truncate tabular-nums",
@@ -153,6 +280,17 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           >
             {displayConfidence.toFixed(1)}%
           </p>
+          {booksN && booksN > 0 ? (
+            <p className="text-ink-muted text-[8px] sm:text-[9px] uppercase font-semibold truncate tabular-nums mt-0.5">
+              {booksA}/{booksN} books
+            </p>
+          ) : null}
+          {/* PART 35.3 [359][360] — depth provenance, visible not tooltip-only. */}
+          <div className="mt-1 flex justify-end">
+            <BookAgreementDepthNote
+              bookConfluence={ownsDepthEvidence ? bookConfluence : null}
+            />
+          </div>
         </div>
       </div>
 
@@ -162,6 +300,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
           tier={signal?.tier}
           confidence={displayConfidence}
           size="sm"
+          degraded={stale}
         />
       </div>
 

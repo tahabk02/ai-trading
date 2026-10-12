@@ -1,4 +1,5 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
+import { timingSafeEqual, createHash } from "crypto";
 import { PrismaClient } from "@prisma/client";
 import { CacheService } from "../services/cache.service";
 import { logger } from "../utils/logger";
@@ -7,6 +8,7 @@ import axios from "axios";
 import { forexDataService } from "../services/forexData.service";
 import { realtimeTickBuffer } from "../services/realtimeTickBuffer.service";
 import { pocketOptionBridgeService } from "../services/pocketOptionBridge.service";
+import { poAuthManager } from "../services/poAuthManager";
 import { orderbookHealth } from "../controllers/orderbook.controller";
 import { historyCollector } from "../services/historyCollector.service";
 import packageJson from "../../package.json";
@@ -173,6 +175,40 @@ export const rootHealthRouter: Router = (() => {
       });
     }
   });
+  // GET /health/ticks?symbol=XYZ&n=30 — tape diagnostic (PART 43.5 [472]).
+  r.get("/ticks", (req: Request, res: Response) => {
+    const symbol = String(req.query.symbol ?? req.query.s ?? "")
+      .trim()
+      .toUpperCase();
+    if (!symbol) {
+      res.status(400).json({ error: "symbol is required" });
+      return;
+    }
+    const n = Math.min(Math.max(Number(req.query.n) || 30, 1), 200);
+    res.json(buildTapeDebugSnapshot(symbol, n));
+  });
+  // GET /health/po-auth — PO session/credential self-healing posture (PART on
+  // SSID automation). Observational: never mutates state.
+  r.get("/po-auth", (_req: Request, res: Response) => {
+    res.json(poAuthManager.buildSnapshot());
+  });
+  // POST /health/po-auth/refresh — trigger a background SSID refresh.
+  // GUARDED (PART 43.6 [480]): admin key or internal-only.
+  r.post(
+    "/po-auth/refresh",
+    poAuthRefreshGuard,
+    async (req: Request, res: Response) => {
+      res.json(await runPoAuthRefresh(req.query.reason));
+    },
+  );
+  // POST /health/po-auth/reset — HUMAN-ONLY circuit-breaker reset.
+  r.post(
+    "/po-auth/reset",
+    poAuthRefreshGuard,
+    (req: Request, res: Response) => {
+      res.json(runPoAuthReset(req.query.reason));
+    },
+  );
   return r;
 })();
 
@@ -267,6 +303,138 @@ export function buildFeedHealthSnapshot(): {
 }
 
 /**
+ * Trigger a background Pocket Option SSID refresh (session tier, then the
+ * opt-in last-resort credential tier) and return the outcome plus a fresh
+ * auth snapshot. Best-effort: `poAuthManager.refresh` never throws, so this can
+ * never 5xx the health surface.
+ */
+async function runPoAuthRefresh(reasonRaw: unknown): Promise<{
+  ok: boolean;
+  method: string;
+  durationMs: number;
+  reason: string;
+  error?: string;
+  snapshot: ReturnType<typeof poAuthManager.buildSnapshot>;
+}> {
+  const reason =
+    typeof reasonRaw === "string" && reasonRaw.trim()
+      ? reasonRaw.trim()
+      : "manual";
+  const result = await poAuthManager.refresh(reason, { humanReset: true });
+  return { ...result, snapshot: poAuthManager.buildSnapshot() };
+}
+
+/**
+ * Human-triggered circuit-breaker reset (PART 43.6 [480]): clears the open
+ * circuit / challenge interlock after the operator has investigated. Mutation
+ * is intentional here — a human decided to retry.
+ */
+function runPoAuthReset(reasonRaw: unknown): {
+  ok: true;
+  reason: string;
+  snapshot: ReturnType<typeof poAuthManager.buildSnapshot>;
+} {
+  const reason =
+    typeof reasonRaw === "string" && reasonRaw.trim()
+      ? reasonRaw.trim()
+      : "operator";
+  poAuthManager.resetBreaker(reason);
+  return { ok: true, reason, snapshot: poAuthManager.buildSnapshot() };
+}
+
+/**
+ * PART 43.7 [486] — client IP derivation for the mutating-route guard.
+ *
+ * `req.ip` is used, NOT the raw socket address, because the service sits behind
+ * a reverse proxy (DevTunnels / nginx) that terminates TLS and appends the real
+ * client to `X-Forwarded-For`. `index.ts` sets `app.set("trust proxy", 1)` so
+ * Express trusts exactly ONE hop: `req.ip` becomes the address that trusted
+ * proxy reported (the real client). A caller cannot forge it by sending its own
+ * `X-Forwarded-For` — spoofed entries sit to the LEFT of the trusted hop and are
+ * ignored. With no trust-proxy setting, `req.ip` would be the proxy's loopback
+ * address for EVERY remote caller, which is precisely why the hosted posture
+ * fails closed instead of trusting "loopback" (see below).
+ */
+function clientIp(req: Request): string {
+  return String(req.ip || req.socket?.remoteAddress || "");
+}
+
+/** Loopback (IPv4/IPv6, incl. IPv4-mapped) — dev-only convenience path. */
+export function isLoopbackIp(ip: string): boolean {
+  const v = (ip || "").trim();
+  return (
+    v === "localhost" ||
+    v === "::1" ||
+    v.startsWith("127.") ||
+    v.startsWith("::ffff:127.")
+  );
+}
+
+/**
+ * PART 43.6 [480] / PART 43.7 [486] — POST /health/po-auth/refresh|reset are
+ * MUTATING surfaces. They are gated and, when hosted, FAIL CLOSED:
+ *
+ *   • FAIL CLOSED (hosted): with NO PO_HEALTH_ADMIN_KEY the routes are
+ *     effectively DISABLED — 404, indistinguishable from a route that does not
+ *     exist. They never fall back to "loopback-only", which a reverse proxy
+ *     defeats by presenting the caller on loopback.
+ *   • KEY configured (hosted or not): the caller MUST present it in the
+ *     `X-PO-Admin-Key` header (constant-time compare). Absent → 401, wrong →
+ *     403. There is NO loopback bypass once a key exists.
+ *   • DEV only (PO_HEALTH_HOSTED=false, no key): loopback callers pass;
+ *     non-loopback → 403. Convenience for local development only.
+ *
+ * GET /health/po-auth (read-only snapshot) is NOT gated.
+ */
+export function poAuthRefreshGuard(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const configured = (secrets.PO_HEALTH_ADMIN_KEY || "").trim();
+
+  if (!configured) {
+    // Hosted + no key → fail closed: the mutating routes must not exist.
+    if (secrets.PO_HEALTH_HOSTED) {
+      res.status(404).json({ error: "Not Found" });
+      return;
+    }
+    // Development-only: internal (loopback) callers.
+    if (isLoopbackIp(clientIp(req))) {
+      next();
+      return;
+    }
+    res.status(403).json({
+      error:
+        "forbidden: internal-only — set PO_HEALTH_ADMIN_KEY to allow a remote caller",
+    });
+    return;
+  }
+
+  const supplied = (req.get("x-po-admin-key") || "").trim();
+  if (supplied && safeEqualString(supplied, configured)) {
+    next();
+    return;
+  }
+  res.status(supplied ? 403 : 401).json({
+    error: supplied
+      ? "forbidden: invalid X-PO-Admin-Key"
+      : "unauthorized: X-PO-Admin-Key required",
+  });
+}
+
+/**
+ * Constant-time string equality. Both inputs are SHA-256 hashed first so hashing
+ * runs over fixed-length buffers (no early exit on a length difference) and the
+ * comparison itself is `crypto.timingSafeEqual`.
+ */
+function safeEqualString(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a).digest();
+  const hb = createHash("sha256").update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+/**
  * GET /health/orderbook
  *
  * Reports the /orderbook endpoint's last outcome from the controller's health
@@ -290,6 +458,56 @@ router.get("/data", (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /health/ticks?symbol=XYZ&n=30 — PART 43.5 [472] TAPE DIAGNOSTIC.
+ *
+ * Dumps the last `n` raw ring entries for a symbol (oldest → newest) with the
+ * AUTHORING SOURCE, price and timestamp of each. Lets an operator confirm at a
+ * glance whether a pair is fed a genuine PO tick or a static market proxy that
+ * a fallback re-serves every second (constant price, source != pocket_option*,
+ * last tick < 1s old = the PO-offline-proxy hypothesis). Purely observational.
+ */
+export function buildTapeDebugSnapshot(
+  symbol: string,
+  n = 30,
+): {
+  symbol: string;
+  count: number;
+  newest: {
+    price: number;
+    iso: string;
+    source: string | null;
+    heldMsAgo: number;
+    stale: boolean;
+  } | null;
+  distinctPrices: number;
+  allPricesConstant: boolean;
+  newestSourceIsPo: boolean;
+  ticks: ReturnType<typeof realtimeTickBuffer.getTapeDebug>;
+} {
+  const ticks = realtimeTickBuffer.getTapeDebug(symbol, n);
+  const newest = ticks.length > 0 ? ticks[ticks.length - 1] : null;
+  const distinct = new Set(ticks.map((t) => t.price));
+  return {
+    symbol: String(symbol || "").trim().toUpperCase(),
+    count: ticks.length,
+    newest: newest
+      ? {
+          price: newest.price,
+          iso: newest.iso,
+          source: newest.source,
+          heldMsAgo: newest.heldMsAgo,
+          stale: newest.stale,
+        }
+      : null,
+    distinctPrices: distinct.size,
+    allPricesConstant: ticks.length > 1 && distinct.size === 1,
+    newestSourceIsPo:
+      newest?.source != null && /^pocket_option/i.test(newest.source),
+    ticks,
+  };
+}
+
+/**
  * GET /health/feed — live-feed health snapshot (mirror of root namespace).
  * Reports feed status, last genuine tick, ticks_received and candles_emitted
  * so the market terminal can surface live bridge health.
@@ -297,6 +515,58 @@ router.get("/data", (_req: Request, res: Response) => {
 router.get("/feed", (_req: Request, res: Response) => {
   res.json(buildFeedHealthSnapshot());
 });
+
+// GET /health/ticks?symbol=XYZ&n=30 — tape diagnostic (PART 43.5 [472]).
+router.get("/ticks", (req: Request, res: Response) => {
+  const symbol = String(req.query.symbol ?? req.query.s ?? "")
+    .trim()
+    .toUpperCase();
+  if (!symbol) {
+    res.status(400).json({ error: "symbol is required" });
+    return;
+  }
+  const n = Math.min(Math.max(Number(req.query.n) || 30, 1), 200);
+  res.json(buildTapeDebugSnapshot(symbol, n));
+});
+
+/**
+ * GET /health/po-auth — Pocket Option SSID self-healing posture.
+ *
+ * Observational snapshot: whether the opt-in last-resort credential fallback is
+ * configured, whether a captured session file exists (and its age), and the
+ * outcome of the last refresh. Purely read-only — never mutates state.
+ */
+router.get("/po-auth", (_req: Request, res: Response) => {
+  res.json(poAuthManager.buildSnapshot());
+});
+
+/**
+ * POST /health/po-auth/refresh — trigger a background SSID refresh via
+ * session/refresh_ssid.py (session tier, then the opt-in credential tier).
+ * Returns the refresh outcome + a fresh snapshot. Never throws.
+ * GUARDED (PART 43.6 [480]): admin key or internal-only. This is the human
+ * path and may run while the circuit breaker is open.
+ */
+router.post(
+  "/po-auth/refresh",
+  poAuthRefreshGuard,
+  async (req: Request, res: Response) => {
+    res.json(await runPoAuthRefresh(req.query.reason));
+  },
+);
+
+/**
+ * POST /health/po-auth/reset — HUMAN-ONLY circuit-breaker reset after an
+ * operator has investigated (captcha/2FA interlock or 3x login failure).
+ * GUARDED like /po-auth/refresh.
+ */
+router.post(
+  "/po-auth/reset",
+  poAuthRefreshGuard,
+  (req: Request, res: Response) => {
+    res.json(runPoAuthReset(req.query.reason));
+  },
+);
 
 /**
  * GET /health

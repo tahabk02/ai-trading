@@ -29,8 +29,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Fix Windows Proactor event loop conflict with Playwright/Asyncio in Python 3.10+
-if sys.platform == "win32":
+# Fix Windows Proactor event loop conflict with Playwright/Asyncio in Python 3.10+.
+# The SelectorEventLoop cannot spawn subprocesses at all (asyncio.subprocess has
+# never worked under it on Windows), which breaks Playwright's driver launch on
+# Python 3.13. Proactor — the Windows default — gained the needed asyncio
+# subprocess support and is what Python >=3.13 must keep.
+if sys.platform == "win32" and sys.version_info < (3, 13):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 SESSION_DIR = Path(__file__).resolve().parent

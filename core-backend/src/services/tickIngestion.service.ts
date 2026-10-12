@@ -28,11 +28,12 @@ import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { githubDataProvider } from "./githubData.provider";
 import { symbolRegistry } from "./symbolRegistry.service";
-import {
-  exponentialBackoffMs,
-  classifyFeedLog,
-} from "../lib/feedResilience";
+import { pocketOptionBridgeService } from "./pocketOptionBridge.service";
+import { exponentialBackoffMs } from "../lib/feedResilience";
+import { restoredFeedStatus } from "../lib/feedStatus";
+import { feedStateReporter, FeedStateReport } from "../lib/feedStateLog";
 import { feedMetrics } from "../lib/feedMetrics";
+import { isForexMarketClosed } from "../lib/marketSchedule";
 
 export interface LiveMarketTick {
   symbol: string;
@@ -80,6 +81,15 @@ export class LiveTickIngestionService {
    * no status-event spam over the socket channel.
    */
   private streamDegraded: Map<string, boolean> = new Map();
+  /**
+   * PART 44 [496] — per-symbol OTC-PROXY broadcast latch. When the HTTP cascade
+   * recovers an OTC pair onto a NON-PO source (Frankfurter/ER-API/GitHub), the
+   * tape is alive on PROXY prices — that is DEGRADED, never ONLINE. This latch
+   * ensures the "PO offline (proxy prices)" DEGRADED broadcast fires at most
+   * once per incident, WITHOUT clearing `streamDegraded`, so the eventual
+   * genuine Pocket Option recovery still flips the engine back to ONLINE.
+   */
+  private streamDegradedProxy: Map<string, boolean> = new Map();
   private readonly MAX_CONSECUTIVE_ERRORS = 5;
   private readonly POLLING_INTERVAL_MS = 1000; // Real-time 1-second tick cadence
 /**
@@ -94,6 +104,29 @@ export class LiveTickIngestionService {
     * starved chart is exactly when recovery must be zero-timeout.
    */
   private readonly FORCE_POLL_AGE_MS = 3000;
+  /**
+   * In-flight guard. The cascade can take up to its full per-tier budget, and
+   * the 1s interval (plus the age-watchdog override) will happily start a second
+   * probe for the same symbol while the first is still waiting on sockets. Those
+   * overlapping probes compounded the upstream load that caused the outage, so
+   * one probe per symbol is enforced.
+   */
+  private inFlightPolls: Set<string> = new Set();
+  /** Last time a held (stale) real print was pended into the ring, per symbol. */
+  private heldStalePendedAt: Map<string, number> = new Map();
+
+  /**
+   * PART 42.1 [421] — REAL-pair weekly-close backoff. While the forex week is
+   * closed (Fri ~17:00 → Sun ~17:00 New York) the HTTP spot cascade is not
+   * retried at all; the 1 Hz loop only re-checks a cheap schedule and wakes a
+   * probe at most this often. Closure is a STATE, so it is logged once at INFO
+   * (never warn/error) and OTC/crypto never enter this set.
+   */
+  private readonly MARKET_CLOSED_POLL_MS = 5 * 60_000;
+  /** Per-symbol instant before which a closed-market re-probe is skipped. */
+  private marketClosedUntil: Map<string, number> = new Map();
+  /** Per-symbol INFO-log latch so closure is reported exactly once per window. */
+  private marketClosedLatched: Set<string> = new Set();
 
   /**
    * Per-symbol last assigned tick timestamp (epoch ms), floored to the 1-second
@@ -134,7 +167,11 @@ export class LiveTickIngestionService {
         this.wsService.broadcastLiveTick(tick);
 
         // Fold into high-frequency tick buffer
-        realtimeTickBuffer.append(norm, price, { bid, ask });
+        realtimeTickBuffer.append(norm, price, {
+          bid,
+          ask,
+          source: "github_data_provider",
+        });
 
         // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
         liveTickSignalDispatcher.enqueue(norm);
@@ -200,6 +237,7 @@ export class LiveTickIngestionService {
     this.streamConsecutiveErrors.set(norm, 0);
     this.nextAllowedPollAt.delete(norm);
     this.streamDegraded.delete(norm);
+    this.streamDegradedProxy.delete(norm);
 
     // Ensure the GitHub data provider is running (shared polling loop)
     this.ensureGitHubProviderRunning();
@@ -230,6 +268,10 @@ export class LiveTickIngestionService {
       this.streamConsecutiveErrors.delete(norm);
       this.nextAllowedPollAt.delete(norm);
       this.streamDegraded.delete(norm);
+      this.streamDegradedProxy.delete(norm);
+      this.heldStalePendedAt.delete(norm);
+      this.marketClosedUntil.delete(norm);
+      this.marketClosedLatched.delete(norm);
 
       logger.info("[TickIngestion] Stopped live tick stream", { symbol: norm });
     }
@@ -274,6 +316,24 @@ export class LiveTickIngestionService {
    * candle buffer from the authoritative PO tape.
    */
   private pollLiveTick(symbol: string): void {
+    // ── PART 42.1 [421] MARKET-CLOSED STATE (REAL pairs only) ──
+    // The forex week ends Fri ~17:00 NY and reopens Sun ~17:00 NY. There is no
+    // live print to fetch while closed, so the HTTP cascade is NEVER retried:
+    // the 1 Hz loop only re-checks the O(1) schedule and, once per 5 min,
+    // wakes to confirm the market is still closed. Closure is logged once at
+    // INFO. OTC/crypto are 24/7 and fall straight through this branch.
+    if (
+      symbolRegistry.getAssetSubType(symbol) === "forex" &&
+      isForexMarketClosed()
+    ) {
+      this.enterMarketClosedState(symbol);
+      return;
+    }
+    this.exitMarketClosedState(symbol);
+
+    // Never stack probes for one symbol: a slow cascade must not be joined by a
+    // second overlapping poll from the 1s interval or the age watchdog.
+    if (this.inFlightPolls.has(symbol)) return;
     // LINGER MODE: once a feed breaches the consecutive-error threshold, probes
     // are throttled by the exponential backoff ladder (never hammer a downed
     // API), but the STREAM LOOP ITSELF NEVER STOPS — recovery is zero-timeout.
@@ -283,10 +343,11 @@ export class LiveTickIngestionService {
       const nextAllowed = this.nextAllowedPollAt.get(symbol) ?? 0;
       if (now < nextAllowed) {
         // AGE WATCHDOG OVERRIDE — a starved chart must never wait out the
-        // linger throttle. If the real tick tape is older than this symbol's
-        // FORCE_POLL_AGE_MS, probe immediately.
-        const ageMs = realtimeTickBuffer.getLatestAgeMs(symbol);
-        if (!(ageMs != null && ageMs > this.FORCE_POLL_AGE_MS)) {
+        // linger throttle. Measured on the FRESH tape: a held print keeps the
+        // ring contiguous but must not mask a dead feed, so recovery stays
+        // zero-timeout exactly when it matters.
+        const freshAgeMs = realtimeTickBuffer.getLatestFreshAgeMs(symbol);
+        if (!(freshAgeMs == null || freshAgeMs > this.FORCE_POLL_AGE_MS)) {
           return;
         }
       }
@@ -298,33 +359,120 @@ export class LiveTickIngestionService {
     void this.pollOnce(symbol);
   }
 
+  /**
+   * PART 42.1 [421] — enter the closed-market backoff for a REAL symbol. The
+   * cascade is paused (not failed): the next probe is deferred ~5 min and the
+   * closure is logged ONCE at info. Never broadcasts DEGRADED — a closed market
+   * is not a feed outage.
+   */
+  private enterMarketClosedState(symbol: string): void {
+    const now = Date.now();
+    const until = this.marketClosedUntil.get(symbol) ?? 0;
+    if (now < until) return; // still inside the ~5 min backoff window
+    this.marketClosedUntil.set(symbol, now + this.MARKET_CLOSED_POLL_MS);
+    if (!this.marketClosedLatched.has(symbol)) {
+      this.marketClosedLatched.add(symbol);
+      logger.info("[TickIngestion] Market closed — pausing real-pair spot retries", {
+        symbol,
+        marketClosed: true,
+        reopen: "Sun 17:00 America/New_York",
+        nextProbeInMs: this.MARKET_CLOSED_POLL_MS,
+      });
+    }
+  }
+
+  /**
+   * PART 42.1 [421] — clear the closed-market latch when the market reopens so
+   * the feed resumes immediately (zero-timeout recovery) and the next closure
+   * logs its INFO line again.
+   */
+  private exitMarketClosedState(symbol: string): void {
+    const hadLatch = this.marketClosedLatched.delete(symbol);
+    const hadBackoff = this.marketClosedUntil.delete(symbol);
+    if (hadLatch || hadBackoff) {
+      logger.info("[TickIngestion] Market reopened — resuming real-pair spot retries", {
+        symbol,
+      });
+    }
+  }
+
+  /**
+   * PART 43.5 [473] — TRUE only while the Pocket Option bridge is genuinely
+   * LIVE and authoritative (relay connected + report status ONLINE, with its
+   * own 12s heartbeat watchdog having not degraded it).
+   *
+   * The PO-authority guards below use this INSTEAD OF a bare cached-price age
+   * check so a stale cached PO print can never suppress the HTTP fallback once
+   * the bridge has gone idle, is awaiting an SSID, or has degraded. While the
+   * bridge IS live the guards keep the exact divergence protection they were
+   * written for; the instant it is not, the fallback resumes authoring real
+   * ticks so no single-symbol consumer (the Pro Terminal) is left with a dead
+   * tape — the BUILDING HISTORY / EVALUATING HORIZON / "--" desync.
+   */
+  private isPocketOptionActivelyLive(): boolean {
+    return (
+      pocketOptionBridgeService.isConnected() &&
+      pocketOptionBridgeService.getStatus() === "ONLINE"
+    );
+  }
+
   private async pollOnce(symbol: string): Promise<void> {
+    this.inFlightPolls.add(symbol);
     try {
       // ════════════════════════════════════════════════════════════════
       // PO-AUTHORITY GUARD — skip HTTP polling entirely when the PO
-      // bridge is actively delivering real ticks for this symbol.
+      // bridge is ACTIVELY LIVE and delivering real ticks for this symbol.
       // This eliminates the root cause of price divergence: two sources
       // (PO socket vs Frankfurter/ER-API) writing different values for
       // the same symbol within the same 1-second window.
+      //
+      // PART 43.5 [473] — gated on ACTUAL bridge liveness (see
+      // isPocketOptionActivelyLive), NOT merely a cached PO price. A stale
+      // cached print whose bridge has since gone idle/awaiting_ssid/degraded
+      // must not suppress the fallback: doing so starved the Pro Terminal pair
+      // (no live_tick → /predict "awaiting live data" → BUILDING HISTORY /
+      // EVALUATING HORIZON / price "--") while the all-pairs market_quotes
+      // grid kept serving the buffer's last value.
       // ════════════════════════════════════════════════════════════════
-      if (forexDataService.isPocketOptionCovered(symbol, 20_000)) {
+      if (
+        this.isPocketOptionActivelyLive() &&
+        forexDataService.isPocketOptionCovered(symbol, 20_000)
+      ) {
         return;
-      }
-
-      // ── RING REFRESH: when the tick ring is starving during LINGER mode,
-      // try to push a held price so the 2000-tick buffer never empties. ──
-      const ringAgeMs = realtimeTickBuffer.getLatestAgeMs(symbol);
-      if (ringAgeMs != null && ringAgeMs > this.FORCE_POLL_AGE_MS) {
-        this.refreshTickRingFromHeldPrice(symbol);
       }
 
       const spot: ForexSpotResult =
         await forexDataService.getLiveSpotFresh(symbol);
 
+      // PART 42.1 [421] — market-closed is a state, not a feed failure: never
+      // count it as an error, never broadcast DEGRADED. The last close is
+      // already in the ring; pollLiveTick's schedule guard owns the backoff.
+      if (spot.marketClosed === true) {
+        return;
+      }
+
       if (!spot.success || spot.price == null || spot.price <= 0) {
         this.handleFeedFailure(
           symbol,
           spot.error || "Live feed returned null or invalid price rate",
+        );
+        return;
+      }
+
+      // ── HELD STALE PRINT (last known good): keep the tape alive WITHOUT
+      // claiming recovery. The value is a genuinely observed price, so it is
+      // pended into the ring/candle buffer for continuity, but it is NEVER
+      // broadcast as a live tick, never resets the failure counter, and never
+      // clears the DEGRADED latch. The ring entry is stamped stale so every
+      // live-freshness gate downstream refuses it.
+      if (spot.stale === true) {
+        this.holdTickFromStalePrint(symbol, spot);
+        // The feed has NOT recovered: a held print is continuity, not health.
+        // Account it as a failure so LINGER backoff, the DEGRADED broadcast and
+        // the retry metrics all stay truthful.
+        this.handleFeedFailure(
+          symbol,
+          `Holding last known good price (age ${Math.round((spot.ageMs ?? 0) / 1000)}s) — live sources exhausted`,
         );
         return;
       }
@@ -336,19 +484,50 @@ export class LiveTickIngestionService {
       // A successful probe after a DEGRADED latch flips the engine status back
       // so subscribers see the feed heal the instant it does. Also emits the
       // single info line that closes the incident (rate-limited log policy).
+      //
+      // PART 44 [496] — PROVENANCE-GATED RECOVERY: an OTC pair "recovered" onto
+      // a NON-PO source is NOT a recovery. It keeps the DEGRADED broadcast set
+      // (armed for the imminent genuine PO print → ONLINE) and, once per
+      // incident, broadcasts the precise reason: "DEGRADED · PO offline
+      // (proxy prices)". The old code flipped every successful probe to ONLINE
+      // regardless of source, telling the terminal a pair was live-fresh when
+      // its tape was a static ECB close.
       if (this.streamDegraded.get(symbol)) {
-        this.streamDegraded.set(symbol, false);
-        feedMetrics.countRecovery(symbol);
-        const recoveryLog = classifyFeedLog(0, true);
-        logger.info("[TickIngestion] Live market feed restored", {
-          symbol,
-          source: spot.source,
-          recoveryState: recoveryLog.isRecovery ? "recovered" : "online",
-        });
-        this.wsService.broadcastEngineStatus(
-          "ONLINE",
-          `Live tick stream restored for ${symbol}.`,
-        );
+        const restored = restoredFeedStatus(symbol, spot.source);
+        if (restored.status === "ONLINE") {
+          this.streamDegraded.set(symbol, false);
+          this.streamDegradedProxy.delete(symbol);
+          feedMetrics.countRecovery(symbol);
+          // PART 44 [497] — the state-change line (feed_error → online) is the
+          // single info line that closes the incident.
+          this.reportFeedState(
+            feedStateReporter.markOnline(
+              symbol,
+              `live feed restored via ${spot.source}`,
+              Date.now(),
+            ),
+            symbol,
+            { source: spot.source },
+          );
+          this.wsService.broadcastEngineStatus("ONLINE", restored.message);
+        } else if (!this.streamDegradedProxy.get(symbol)) {
+          // OTC proxy recovery: DEGRADED once per incident; `streamDegraded`
+          // stays SET so the imminent genuine PO print still broadcasts ONLINE.
+          // The reporter stays in po_offline (an expected state → INFO), never
+          // claiming ONLINE for a proxy feed.
+          this.streamDegradedProxy.set(symbol, true);
+          feedMetrics.countRecovery(symbol);
+          this.reportFeedState(
+            feedStateReporter.inspect(
+              symbol,
+              `PO offline (proxy prices) — feed restored via ${spot.source}`,
+              Date.now(),
+            ),
+            symbol,
+            { source: spot.source },
+          );
+          this.wsService.broadcastEngineStatus("DEGRADED", restored.message);
+        }
       }
 
       // ── PO-AUTHORITY GUARD ──
@@ -357,12 +536,21 @@ export class LiveTickIngestionService {
       // bridge), this fallback poll must NOT inject a divergent value into the
       // shared candle buffer — that would cause the exact misalignment the
       // parity overhaul is eliminating. We only author here when PO is not
-      // actively covering the pair.
+      // ACTIVELY LIVE and covering the pair.
+      //
+      // PART 43.5 [473] — the suppression is gated on bridge liveness. A
+      // cached PO print whose bridge has since gone offline is NOT
+      // authoritative; holding it back here was the second half of the
+      // Pro-Terminal starvation (the fallback had already been allowed past the
+      // first guard, then refused to write because a stale print still sat in
+      // the cache).
+      const poLive = this.isPocketOptionActivelyLive();
       const isPoSource =
         spot.source === "pocket_option_ssot" ||
         spot.source === "pocket_option_held";
-      const poAlreadyAuthored = forexDataService.isPocketOptionCovered(symbol, 15_000);
-      if (isPoSource || poAlreadyAuthored) {
+      const poAlreadyAuthored =
+        poLive && forexDataService.isPocketOptionCovered(symbol, 15_000);
+      if (poLive && (isPoSource || poAlreadyAuthored)) {
         // PO is authoritative — do not double-write. Skip mutation (broadcast
         // of TICKS is exclusively the bridge's job when it is live).
         return;
@@ -393,7 +581,11 @@ export class LiveTickIngestionService {
       this.wsService.broadcastLiveTick(tick);
 
       // Fold into the high-frequency real-tick ring (real arms only)
-      realtimeTickBuffer.append(symbol, liveMid, { bid: tick.bid, ask: tick.ask });
+      realtimeTickBuffer.append(symbol, liveMid, {
+        bid: tick.bid,
+        ask: tick.ask,
+        source: spot.source,
+      });
 
       // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
       liveTickSignalDispatcher.enqueue(symbol);
@@ -408,9 +600,28 @@ export class LiveTickIngestionService {
           error: bufErr instanceof Error ? bufErr.message : String(bufErr),
         });
       }
+
+      // PART 44 [497] — keep the state map truthful on the healthy path too: a
+      // transient hold leaves the reporter in holding_stale until a REAL live
+      // print proves the feed is back. Transition-gated → no spam. Skipped while
+      // a proxy-recovered OTC pair is still latched DEGRADED (state must stay
+      // po_offline until the genuine PO print arrives).
+      if (!this.streamDegraded.get(symbol)) {
+        this.reportFeedState(
+          feedStateReporter.markOnline(
+            symbol,
+            `live tick via ${spot.source}`,
+            Date.now(),
+          ),
+          symbol,
+          { source: spot.source },
+        );
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.handleFeedFailure(symbol, msg);
+    } finally {
+      this.inFlightPolls.delete(symbol);
     }
   }
 
@@ -456,39 +667,27 @@ export class LiveTickIngestionService {
     feedMetrics.setBackoffMs(symbol, lingerMs);
     feedMetrics.setMaxConsecutiveErrors(symbol, errCount);
 
-    // ── LOG RATE LIMIT (mission [3]) ──
-    // One warn on the first failure of an incident, one error per every 10th
-    // consecutive failure, and silence in between — no more warn-per-retry
-    // flooding. Recovery (a zero count while a DEGRADED latch is set) logs
-    // info exactly once (see anySuccessReset / the ONLINE branch below).
-    const logClass = classifyFeedLog(errCount, this.streamDegraded.get(symbol) ?? false);
-    if (logClass.level === "warn") {
-      logger.warn("[TickIngestion] Live market feed error", {
-        symbol,
-        consecutiveErrors: errCount,
-        error: errorDetail,
-        lingerMs,
-        recoveryMode: forexDataService.isRecoveryMode(),
-      });
-    } else if (logClass.level === "error") {
-      logger.error(
-        "[TickIngestion] Live market feed still failing (every 10th failure)",
-        {
-          symbol,
-          consecutiveErrors: errCount,
-          error: errorDetail,
-          lingerMs,
-          recoveryMode: forexDataService.isRecoveryMode(),
-        },
-      );
-    }
+    // ── PERV-SYMBOL STATE-CHANGE LOGGING (PART 44 [497]) ──
+    // One line per per-symbol STATE TRANSITION, nothing on the 1s repeats.
+    // Expected, recoverable conditions (PO offline / holding last known good /
+    // market closed) log INFO — they are operational conditions, not faults.
+    // Real failure states (feed_error / lingering) log ERROR so an unexpected
+    // outage still rings loudly. The old warn-on-first/error-every-10th cadence
+    // is gone; a compact 60s summary line (emitted by the same reporter) keeps
+    // every symbol's current state visible during a long outage.
+    this.reportFeedState(
+      feedStateReporter.inspect(symbol, errorDetail, Date.now(), {
+        // PART 44 [497] — an OTC pair may treat PO-offline/sources-exhausted as
+        // an expected proxy state (INFO); a REAL pair may not — a real pair
+        // whose sources are exhausted while the market is open is a genuine
+        // outage and must stay at ERROR.
+        isOtc: symbolRegistry.getAssetSubType(symbol) === "otc",
+      }),
+      symbol,
+      { consecutiveErrors: errCount, lingerMs },
+    );
 
     if (errCount >= this.MAX_CONSECUTIVE_ERRORS) {
-      logger.error(
-        "[TickIngestion] Live market feed dropped — entering LINGER mode (stream stays alive)",
-        { symbol, totalFailures: errCount, lastError: errorDetail },
-      );
-
       // Notify WebSocket clients of DEGRADED feed status exactly once per
       // incident — subsequent duplicate failures while still degraded stay
       // silent (no event spam over the socket channel).
@@ -507,35 +706,79 @@ export class LiveTickIngestionService {
   }
 
   /**
-   * RING REFRESH during LINGER mode — ensures the 2000-tick ring never
-   * empties when the PO bridge is down AND all HTTP APIs are temporarily
-   * exhausted. Pushes the latest held price (from forexDataService's
-   * stale-cache) into the ring so the backend's replay-on-join and the
-   * client's candle aggregator always have real ticks to work with.
-   *
-   * This is called from the poll loop when the ring is starving (latest
-   * tick older than FORCE_POLL_AGE_MS) — zero fabrication, only real
-   * previously-observed prices.
+   * PART 44 [497] — dispatch one per-symbol state line + the guarded 60s
+   * summary from a FeedStateReport. Expected states log INFO, real failure
+   * states log ERROR; the summary is rate-limited to once per 60s by the
+   * reporter itself.
    */
-  private refreshTickRingFromHeldPrice(symbol: string): void {
-    const ageMs = realtimeTickBuffer.getLatestAgeMs(symbol);
-    if (ageMs == null || ageMs <= this.FORCE_POLL_AGE_MS) return;
-
-    const spot = forexDataService.getLastKnownSpot(symbol);
-    if (spot.success && spot.price != null && spot.price > 0) {
-      realtimeTickBuffer.append(symbol, spot.price);
-      liveTickSignalDispatcher.enqueue(symbol);
-      try {
-        forexDataService.appendTick(symbol, spot.price);
-      } catch {
-        /* non-fatal */
-      }
-      logger.debug("[TickIngestion] Ring refresh from held price", {
+  private reportFeedState(
+    report: FeedStateReport,
+    symbol: string,
+    extra?: Record<string, unknown>,
+  ): void {
+    if (report.outcome) {
+      const meta = {
         symbol,
-        price: spot.price,
-        source: spot.source,
+        state: report.outcome.to,
+        from: report.outcome.from,
+        detail: report.outcome.detail,
+        ...(extra ?? {}),
+      };
+      if (report.outcome.logLevel === "error") {
+        logger.error("[TickIngestion] Live market feed state", meta);
+      } else {
+        logger.info("[TickIngestion] Live market feed state", meta);
+      }
+    }
+    if (report.summary) {
+      logger.info("[TickIngestion] Live feed state summary (60s)", {
+        interval_ms: report.summary.intervalMs,
+        per_symbol: report.summary.per_symbol,
       });
     }
+  }
+
+  /**
+   * LAST KNOWN GOOD CONTINUITY — the lightweight "keep the tape alive" path.
+   *
+   * When every live source is exhausted, `getLiveSpotFresh` returns the last
+   * genuinely observed price stamped `stale: true` + its real age. That print is
+   * pended into the ring and the candle buffer (at most once per
+   * FORCE_POLL_AGE_MS) so charts, replay-on-join and the 2000-tick ring never
+   * empty, and it is marked `stale` in the ring so every live-freshness gate
+   * downstream (live analysis, live signal broadcast, tick-signal scoring)
+   * refuses it. Nothing is broadcast as a live tick and the LINGER accounting is
+   * left untouched, so a cold feed is never presented as a healthy one. Beyond
+   * the service's STALE_HOLD_MAX_AGE_MS the service refuses the price outright.
+   */
+  private holdTickFromStalePrint(symbol: string, spot: ForexSpotResult): void {
+    const price = spot.price;
+    if (price == null || !Number.isFinite(price) || price <= 0) return;
+
+    const now = Date.now();
+    const lastPendedAt = this.heldStalePendedAt.get(symbol) ?? 0;
+    if (now - lastPendedAt < this.FORCE_POLL_AGE_MS) return;
+    this.heldStalePendedAt.set(symbol, now);
+
+    realtimeTickBuffer.append(symbol, price, { stale: true, source: spot.source });
+    try {
+      forexDataService.appendTick(symbol, price);
+    } catch (bufErr) {
+      logger.debug("[TickIngestion] Held-print candle append failed", {
+        symbol,
+        error: bufErr instanceof Error ? bufErr.message : String(bufErr),
+      });
+    }
+
+    // PART 44 [497] — holding last known good is an EXPECTED operational state
+    // (the feed degrade machinery is engaged), so this is INFO, not a warn.
+    logger.info("[TickIngestion] Holding last known good price (feed not recovered)", {
+      symbol,
+      price,
+      source: spot.source,
+      priceAgeMs: spot.ageMs ?? null,
+      consecutiveErrors: this.streamConsecutiveErrors.get(symbol) ?? 0,
+    });
   }
 
   /**
@@ -648,7 +891,7 @@ export class LiveTickIngestionService {
     // real order book, so we refuse to fabricate a zero-spread quote. The
     // bidAskPressure micro-factor therefore honestly reads neutral (no_book)
     // instead of pretending there is market depth we do not actually have.
-    realtimeTickBuffer.append(norm, price);
+    realtimeTickBuffer.append(norm, price, { source: tick.source });
 
     // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
     liveTickSignalDispatcher.enqueue(norm);

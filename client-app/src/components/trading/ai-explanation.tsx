@@ -21,16 +21,26 @@ import { cn } from "@/utils/cn";
 import { getPairLabel } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TierBadge } from "@/components/shared/tier-badge";
+import { BookAgreementDepthNote } from "@/components/shared/book-agreement-depth-note";
 import {
   sanitizeConfidence,
   formatNumber,
   formatPairPrice,
   formatLocalTime,
 } from "@/utils/format";
+import { QUOTE_PROVENANCE_STALE_MS } from "@/lib/quoteProvenance";
 
 // ============================================================
 // AI EXPLANATION WIDGET — Why the AI predicts CALL or PUT
 // ============================================================
+
+// ── PART 41 [401a] ──
+// A restored in-store verdict older than this (the engine's last-good TTL) is a
+// LEDGER ARTIFACT, not a call: the panel labels it SEEDED and holds it
+// NON-EXECUTABLE (neutral gray — no PREMIUM emerald/rose) until a fresh
+// evaluation lands on the active symbol. Faster must never mean actionable
+// stale data.
+const VERDICT_STALE_MS = 60_000;
 
 export const AIExplanation: React.FC = () => {
   // ── ALL HOOKS AT TOP LEVEL (before any early return) ──
@@ -43,6 +53,19 @@ export const AIExplanation: React.FC = () => {
   const engineError = useTradingStore((s) => s.error);
   /** Recoverable 503 / live-quote timeout — auto-re-polling in the store. */
   const quoteStreamWaiting = useTradingStore((s) => s.quoteStreamWaiting);
+  /** PART 41 [401a] — a fresh /predict is resolving over the seeded snapshot. */
+  const isLoading = useTradingStore((s) => s.isLoading);
+  /** The last live-tick instant — the "fresh tick" that re-arms executability. */
+  const lastPriceUpdate = useTradingStore((s) => s.lastPriceUpdate);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!predictionData) return;
+    // Tick once per second so the verdict age stays honest while displayed.
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+    // Key the ticker on verdict PRESENCE only — never restart it per eval.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(predictionData)]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -73,6 +96,13 @@ export const AIExplanation: React.FC = () => {
     [predictionData?.confidence],
   );
   const confidenceNum = parseFloat(confidenceStr);
+  // PART 19.2 [118] — the 0-100 number is STRATEGY BOOK AGREEMENT (confluence
+  // among the ten strategy books on the same tape), not a calibrated
+  // probability. PART 35.3 [359] — not order-book evidence either.
+  const booksA = predictionData?.book_agreement_detail?.aligned_count ?? null;
+  const booksN = predictionData?.book_agreement_detail?.active_count ?? null;
+  /** PART 35.3 [359][360] — carries the engine's order-book depth flag. */
+  const bookConfluence = predictionData?.book_confluence ?? null;
 
   // Generate reasoning text based on technical indicators
   const reasoning = useMemo(() => {
@@ -143,20 +173,28 @@ export const AIExplanation: React.FC = () => {
       reasons.push(`Volatility: ${volLevel} (ATR: ${atrDisplay})`);
     }
 
-    // Confidence level statement
+    // Book-agreement level statement (PART 19.2 — a confluence score, not a
+    // probability; PART 35.3 — "strategy books" so it cannot be read as the
+    // order book).
     if (confidenceNum >= 96.5)
-      reasons.push("High-confidence prediction — strong signal alignment");
+      reasons.push(
+        "Strong strategy book agreement — all strategy books aligned",
+      );
     else if (confidenceNum >= 80)
-      reasons.push("Moderate confidence — partial signal confirmation");
+      reasons.push(
+        "Partial strategy book agreement — most strategy books aligned",
+      );
     else
-      reasons.push("Low confidence — divergent indicators, trade with caution");
+      reasons.push(
+        "Weak strategy book agreement — divergent indicators, trade with caution",
+      );
 
     // ── GATED-DIRECTION NOTICE ──
     // When the engine emitted a raw BUY/SELL below the 96.5% gate, say so
     // explicitly instead of quietly showing nothing.
     if (signalView.gated && confidenceNum > 0) {
       reasons.push(
-        `Signal gate: confidence ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
+        `Signal gate: strategy book agreement ${confidenceStr}% < ${Math.round(SIGNAL_CONFIDENCE_THRESHOLD * 1000) / 10}% — no directional call`,
       );
     }
 
@@ -255,6 +293,30 @@ export const AIExplanation: React.FC = () => {
     );
   }
 
+  // ── PART 41 [401a] — SEEDED VERDICT: SHOWN WITH AGE, NON-EXECUTABLE ──
+  // The panel may be painting an in-store snapshot (restored from
+  // `predictionBySymbol` on symbol switch, or the last live 1Hz verdict) while
+  // a fresh evaluation resolves. Surface the VERDICT AGE and hold it
+  // NON-EXECUTABLE until a fresh tick (lastPriceUpdate) re-arms it.
+  const verdictTsMs = (() => {
+    const raw = Number(predictionData.timestamp ?? 0);
+    if (Number.isFinite(raw) && raw > 0) {
+      return raw < 1_000_000_000_000 ? raw * 1000 : raw;
+    }
+    const parsed = new Date(String(predictionData.timestamp ?? "")).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  })();
+  const verdictAgeMs = verdictTsMs > 0 ? Math.max(0, now - verdictTsMs) : 0;
+  const tickAgeMs = lastPriceUpdate
+    ? Math.max(0, now - new Date(lastPriceUpdate).getTime())
+    : Number.POSITIVE_INFINITY;
+  const awaitingFreshTick = tickAgeMs > QUOTE_PROVENANCE_STALE_MS;
+  const staleVerdict = verdictAgeMs > VERDICT_STALE_MS;
+  const seeded = isLoading || awaitingFreshTick || staleVerdict;
+  const seededAgeSec = Math.max(1, Math.round(verdictAgeMs / 1000));
+  const executableSign =
+    !seeded && (signal === "BUY" || signal === "SELL");
+
   return (
     <div className="bg-obsidian-900/60 border border-slate-800/80 rounded-2xl p-5 backdrop-blur-sm">
       {/* ── Header ── */}
@@ -268,11 +330,11 @@ export const AIExplanation: React.FC = () => {
         <span
           className={cn(
             "text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
-            signal === "BUY"
-              ? "bg-emerald-500/20 text-emerald-400"
-              : signal === "SELL"
-                ? "bg-rose-500/20 text-rose-400"
-                : "bg-slate-500/20 text-slate-300",
+            executableSign
+              ? signal === "BUY"
+                ? "bg-emerald-500/20 text-emerald-400"
+                : "bg-rose-500/20 text-rose-400"
+              : "bg-slate-500/20 text-slate-300",
           )}
         >
           {signal === "BUY"
@@ -288,14 +350,26 @@ export const AIExplanation: React.FC = () => {
           tier={predictionData.tier}
           confidence={confidenceNum}
           size="sm"
+          degraded={seeded}
         />
+        {/* ── PART 41 [401a] — SEEDED (non-executable) marker with verdict age ── */}
+        {seeded && verdictTsMs > 0 && (
+          <span
+            data-testid="ai-verdict-seed-marker"
+            title="In-store snapshot — non-executable until a fresh evaluation lands"
+            className="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/40"
+          >
+            <Clock className="w-3 h-3" />
+            Seeded · {seededAgeSec}s
+          </span>
+        )}
       </div>
 
-      {/* ── Signal + Confidence Bar ── */}
+      {/* ── Signal + Strategy Book Agreement Bar ── */}
       <div className="mb-4">
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
-            Signal Confidence
+            Strategy Book Agreement
           </span>
           <span
             className={cn(
@@ -306,6 +380,7 @@ export const AIExplanation: React.FC = () => {
             )}
           >
             {confidenceStr}%
+            {booksN && booksN > 0 ? ` (${booksA}/${booksN})` : ""}
           </span>
         </div>
         <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
@@ -318,6 +393,10 @@ export const AIExplanation: React.FC = () => {
             )}
             style={{ width: `${confidenceNum}%` }}
           />
+        </div>
+        {/* PART 35.3 [359][360] — visible provenance of the number above. */}
+        <div className="mt-1.5">
+          <BookAgreementDepthNote bookConfluence={bookConfluence} />
         </div>
       </div>
 
@@ -369,10 +448,10 @@ export const AIExplanation: React.FC = () => {
         />
         <MetricItem
           icon={<Shield className="w-3 h-3" />}
-          label="Accuracy"
+          label="RF Holdout Acc"
           value={
-            predictionData.model_accuracy != null
-              ? `${(predictionData.model_accuracy * 100).toFixed(1)}%`
+            predictionData.rf_holdout_accuracy != null
+              ? `${(predictionData.rf_holdout_accuracy * 100).toFixed(1)}%`
               : "—"
           }
         />
@@ -436,6 +515,9 @@ export const AIExplanation: React.FC = () => {
           </span>
           <span>
             {predictionData.timeframe} ·{" "}
+            {seeded && verdictTsMs > 0
+              ? `seeded ${seededAgeSec}s ago · `
+              : ""}
             {formatLocalTime(predictionData.timestamp)}
           </span>
         </div>

@@ -46,6 +46,7 @@ import {
   HISTORY_WINDOW_MINUTES,
   HISTORY_BUCKET_MS,
 } from "../../services/historyCollector.service";
+import { logger } from "../../utils/logger";
 
 const MIN = 60_000;
 
@@ -108,6 +109,37 @@ describe("buildMinuteBars", () => {
     expect(bars).toHaveLength(1);
     expect(bars[0].tick_count).toBe(1);
   });
+
+  // PART 44 [494] — PROVENANCE: each bar names the newest stamped source.
+  it("stamps the newest contributing tick's source as the bar provenance", () => {
+    const bars = buildMinuteBars([
+      { price: 1.1, tsMs: 1_000, source: "pocket_option" },
+      { price: 1.12, tsMs: 2_000 },
+      { price: 1.15, tsMs: 3_000, source: "pocket_option" },
+    ]);
+    expect(bars[0].source).toBe("pocket_option");
+  });
+
+  it("an unstamped tick never erases a known provenance", () => {
+    const bars = buildMinuteBars([
+      { price: 1.1, tsMs: 1_000, source: "pocket_option" },
+      { price: 1.15, tsMs: 2_000 },
+    ]);
+    expect(bars[0].source).toBe("pocket_option");
+  });
+
+  it("a non-PO tick reassigns the bar's provenance", () => {
+    const bars = buildMinuteBars([
+      { price: 1.1, tsMs: 1_000, source: "pocket_option" },
+      { price: 1.16, tsMs: 2_000, source: "frankfurter" },
+    ]);
+    expect(bars[0].source).toBe("frankfurter");
+  });
+
+  it("legacy unstamped bars carry null provenance (flagged by the [495] audit)", () => {
+    const bars = buildMinuteBars([{ price: 1.0, tsMs: 5 }]);
+    expect(bars[0].source).toBeNull();
+  });
 });
 
 describe("historyCollector.collectForSymbol", () => {
@@ -115,6 +147,11 @@ describe("historyCollector.collectForSymbol", () => {
     mocks.upsert.mockReset();
     mocks.createMany.mockReset();
     mocks.tickFindMany.mockReset();
+    // A SUCCESSFUL Prisma upsert always resolves to the row. Without this the
+    // mock resolves undefined, which the collector cannot distinguish from a
+    // degraded (unreachable-DB) write — so a bar that really was persisted
+    // would be reported as 0. Faithful default: resolve the row.
+    mocks.upsert.mockResolvedValue({ id: "x" });
     mocks.tickFindMany.mockResolvedValue([]);
     mocks.createMany.mockResolvedValue({ count: 3 });
   });
@@ -187,6 +224,116 @@ describe("historyCollector.collectForSymbol", () => {
     expect(res).toEqual({ bars: 0, ticksInserted: 0, barsFound: 0, ticksInWindow: 0 });
     expect(mocks.upsert).not.toHaveBeenCalled();
     expect(mocks.createMany).not.toHaveBeenCalled();
+  });
+
+  // PART 44 [494] — OTC PROVENANCE GATE: an OTC instrument is bullish ONLY on
+  // the Pocket Option tape. Proxy prints and held continuity prints must never
+  // author an OTC bar; a bar of proxy prices persisted as PO history would be
+  // indistinguishable from the real dataset to every downstream reader.
+  it("refuses OTC bars from non-PO (proxy) ticks — provenance gate", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([
+      { price: 1.1, tsMs: now - 5 * MIN, source: "frankfurter" },
+      { price: 1.2, tsMs: now - 5 * MIN + 500 },
+    ]);
+    mocks.createMany.mockResolvedValue({ count: 1 });
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+    expect(res.ticksInWindow).toBe(1); // the frankfurter print is refused
+    expect(res.bars).toBe(1);
+    expect(res.ticksInserted).toBe(1);
+    const createMany = mocks.createMany.mock.calls[0][0];
+    expect(createMany.data).toHaveLength(1);
+    expect(createMany.data[0].price).toBe(1.2);
+  });
+
+  it("refuses OTC bars from held (stale) prints re-pended for continuity", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([
+      { price: 1.1, tsMs: now - 5 * MIN, stale: true },
+      { price: 1.3, tsMs: now - 5 * MIN + 500, source: "pocket_option" },
+    ]);
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+    expect(res.ticksInWindow).toBe(1);
+    expect(res.bars).toBe(1);
+  });
+
+  it("NEVER CREATES an OTC bar when the window holds only proxy/held ticks", async () => {
+    // A window with zero PO prints must yield zero bars and zero tick inserts —
+    // no proxy (frankfurter) or held (stale) print may author OTC history.
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([
+      { price: 1.1, tsMs: now - 5 * MIN, source: "frankfurter" },
+      { price: 1.2, tsMs: now - 5 * MIN + 500, source: "frankfurter" },
+      { price: 1.15, tsMs: now - 4 * MIN, stale: true },
+      { price: 1.18, tsMs: now - 4 * MIN + 500, stale: true, source: "held_stale_real" },
+    ]);
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+    expect(res).toEqual({ bars: 0, ticksInserted: 0, barsFound: 0, ticksInWindow: 0 });
+    expect(mocks.upsert).not.toHaveBeenCalled();
+    expect(mocks.createMany).not.toHaveBeenCalled();
+  });
+
+  it("NEVER MODIFIES an OTC bar with a proxy tick (OHLC stays PO-only)", async () => {
+    // The same minute holds one real PO print and several proxy prints. The
+    // persisted bar must be built from the PO print ALONE: its OHLC can never
+    // carry a proxy-shaped high/low/close (1.9 proxy print is dropped).
+    const now = Date.now();
+    const bucket = now - 5 * MIN;
+    mocks.getRecentWindow.mockReturnValue([
+      { price: 1.10, tsMs: bucket, source: "pocket_option" },
+      { price: 1.90, tsMs: bucket + 100, source: "frankfurter" },
+      { price: 0.50, tsMs: bucket + 200, source: "frankfurter" },
+      { price: 1.12, tsMs: bucket + 300, source: "pocket_option" },
+    ]);
+    mocks.createMany.mockResolvedValue({ count: 2 });
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+    expect(res.bars).toBe(1);
+    const record = mocks.upsert.mock.calls[0][0].create;
+    expect(record.open).toBe(1.10);
+    expect(record.high).toBe(1.12); // NOT the proxy 1.90
+    expect(record.low).toBe(1.10); // NOT the proxy 0.50
+    expect(record.close).toBe(1.12);
+    expect(record.tickCount).toBe(2); // only the two PO prints
+    expect(record.source).toBe("pocket_option");
+  });
+
+  it("keeps PO-sourced prints for OTC symbols (genuine tape survives)", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([
+      { price: 1.1, tsMs: now - 5 * MIN, source: "pocket_option" },
+      { price: 1.11, tsMs: now - 5 * MIN + 500, source: "pocket_option:ssid" },
+    ]);
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+    expect(res.ticksInWindow).toBe(2);
+    expect(res.bars).toBe(1);
+  });
+
+  it("keeps legacy unstamped OTC prints (pre-provenance tape persists honestly)", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([{ price: 1.1, tsMs: now - 5 * MIN }]);
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+    expect(res.ticksInWindow).toBe(1);
+    expect(res.bars).toBe(1);
+  });
+
+  it("does NOT gate NON-OTC symbols (standard forex/crypto may use proxy tape)", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([
+      { price: 1.1, tsMs: now - 5 * MIN, source: "frankfurter" },
+      { price: 1.2, tsMs: now - 5 * MIN + 500, source: "frankfurter" },
+    ]);
+    const res = await historyCollector.collectForSymbol("EUR/SEK", now);
+    expect(res.ticksInWindow).toBe(2);
+    expect(res.bars).toBe(1);
+  });
+
+  it("persists bar provenance into AssetHistory (null for legacy tape)", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([{ price: 1.1, tsMs: now - 5 * MIN }]);
+    await historyCollector.collectForSymbol("EURUSD", now);
+    const firstUpsert = mocks.upsert.mock.calls[0][0];
+    expect(firstUpsert.create.source).toBeNull();
+    expect(firstUpsert.update.source).toBeNull();
   });
 });
 
@@ -282,5 +429,154 @@ describe("historyCollector.upsertBars (Alpha.5 Pro, Part 6.3 ingest)", () => {
     expect(await historyCollector.upsertBars("EURUSD", "1m", [])).toBe(0);
     expect(await historyCollector.upsertBars("", "1m", [{ bucketStartMs: 1, open: 1, high: 1, low: 1, close: 1 }])).toBe(0);
     expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  // PART 44 [494] — the ingest tier labels its own observations explicitly.
+  it("carries an explicit source stamp through the ingest upsert", async () => {
+    const bucket = minuteBucket(Date.now());
+    const n = await historyCollector.upsertBars("EUR/USD", "1m", [
+      {
+        bucketStartMs: bucket,
+        open: 1.085,
+        high: 1.085,
+        low: 1.085,
+        close: 1.085,
+        source: "ai_engine",
+      },
+    ]);
+    expect(n).toBe(1);
+    const call = mocks.upsert.mock.calls[0][0];
+    expect(call.create.source).toBe("ai_engine");
+    expect(call.update.source).toBe("ai_engine");
+  });
+
+  it("stamps null when the ingested bar carries no source", async () => {
+    const bucket = minuteBucket(Date.now());
+    await historyCollector.upsertBars("EUR/USD", "1m", [
+      { bucketStartMs: bucket, open: 1.085, high: 1.085, low: 1.085, close: 1.085 },
+    ]);
+    const call = mocks.upsert.mock.calls[0][0];
+    expect(call.create.source).toBeNull();
+  });
+});
+
+/**
+ * DATABASE OUTAGE RESILIENCE.
+ *
+ * The collector is a background layer, so an unreachable Postgres must degrade
+ * to HONEST EMPTY history instead of throwing. These tests pin both halves of
+ * that contract:
+ *
+ *   - connectivity failures (P1001/P1000/P2024/...) are absorbed, and
+ *   - everything else is RE-THROWN, so a real query/schema bug can never hide
+ *     behind a silently empty chart.
+ */
+describe("historyCollector — database outage resilience", () => {
+  const P1001 = Object.assign(new Error("Can't reach database server"), { code: "P1001" });
+  const P1000 = Object.assign(new Error("Authentication failed"), { code: "P1000" });
+
+  beforeEach(() => {
+    mocks.getRecentWindow.mockReset();
+    mocks.findMany.mockReset();
+    mocks.upsert.mockReset();
+    mocks.count.mockReset();
+    mocks.upsert.mockResolvedValue({ id: "x" });
+    mocks.findMany.mockResolvedValue([]);
+    mocks.count.mockResolvedValue(0);
+  });
+
+  it("collectForSymbol reports 0 bars instead of throwing when Postgres is unreachable", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([{ price: 1.0, tsMs: now - 5 * MIN }]);
+    mocks.upsert.mockRejectedValue(P1001);
+
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+
+    expect(res.bars).toBe(0); // NOT 1 — nothing was actually persisted
+    expect(res.barsFound).toBe(1);
+  });
+
+  it("collectForSymbol skips tick inserts when the dedupe read fails (no blind writes)", async () => {
+    const now = Date.now();
+    mocks.getRecentWindow.mockReturnValue([{ price: 1.0, tsMs: now - 5 * MIN }]);
+    mocks.tickFindMany.mockReset();
+    mocks.tickFindMany.mockRejectedValue(P1001);
+    mocks.createMany.mockReset();
+
+    const res = await historyCollector.collectForSymbol("EURUSD", now);
+
+    // We cannot know what is already persisted, so inserting blind would risk
+    // duplicate (symbol, tsMs) rows. The pass must skip instead.
+    expect(mocks.createMany).not.toHaveBeenCalled();
+    expect(res.ticksInserted).toBe(0);
+  });
+
+  it("getAssetHistoryBars returns [] rather than rejecting (routes get 200, not 500)", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await expect(historyCollector.getAssetHistoryBars("EURUSD", 30)).resolves.toEqual([]);
+  });
+
+  it("getRecentBars returns [] rather than rejecting (boot backfill stays safe)", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await expect(historyCollector.getRecentBars("EURUSD", 100)).resolves.toEqual([]);
+  });
+
+  it("getHistoryHealth degrades to an honest empty report, never throws", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    const health = await historyCollector.getHistoryHealth("EURUSD");
+
+    expect(health.bars_30m).toBe(0);
+    expect(health.window_complete).toBe(false);
+  });
+
+  it("RE-THROWS P1000 auth failure — credential drift must never look like empty data", async () => {
+    // This is the bug that motivated removing P1000 from the absorbed set: a
+    // stale password served silently EMPTY charts while Postgres logged FATAL
+    // auth failures, indistinguishable from "no ticks yet".
+    mocks.findMany.mockRejectedValue(P1000);
+    await expect(historyCollector.getAssetHistoryBars("EURUSD", 30)).rejects.toMatchObject({
+      code: "P1000",
+    });
+  });
+
+  it("RE-THROWS P1003 missing database", async () => {
+    const noDb = Object.assign(new Error('database "trading_radar" does not exist'), {
+      code: "P1003",
+    });
+    mocks.findMany.mockRejectedValue(noDb);
+    await expect(historyCollector.getRecentBars("EURUSD", 50)).rejects.toMatchObject({
+      code: "P1003",
+    });
+  });
+
+  it("RE-THROWS non-connectivity errors so real bugs stay visible", async () => {
+    const realBug = Object.assign(new Error("column does not exist"), { code: "P2022" });
+    mocks.findMany.mockRejectedValue(realBug);
+
+    await expect(historyCollector.getAssetHistoryBars("EURUSD", 30)).rejects.toThrow(
+      /column does not exist/,
+    );
+  });
+
+  it("logs ONE error per outage, not one per symbol (44 symbols would be 44 traces)", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await historyCollector.getAssetHistoryBars("A", 30);
+    await historyCollector.getAssetHistoryBars("B", 30);
+    await historyCollector.getAssetHistoryBars("C", 30);
+
+    expect((logger.error as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it("recovers: a success clears the outage counter", async () => {
+    mocks.findMany.mockRejectedValue(P1001);
+    await historyCollector.getAssetHistoryBars("A", 30);
+    expect(historyCollector.dbStatus().reachable).toBe(false);
+    expect(historyCollector.dbStatus().consecutiveFailures).toBeGreaterThan(0);
+
+    mocks.findMany.mockResolvedValue([]);
+    await historyCollector.getAssetHistoryBars("A", 30);
+
+    expect(historyCollector.dbStatus().reachable).toBe(true);
+    expect(historyCollector.dbStatus().consecutiveFailures).toBe(0);
   });
 });
