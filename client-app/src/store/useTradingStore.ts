@@ -536,6 +536,13 @@ export interface TradingState {
   countdownSeconds: number;
   /** Whether a trade is currently active/executing */
   isTradeActive: boolean;
+  /**
+   * PART 45 [510] — epoch ms the live trade was dispatched. In TIMER mode the
+   * entry is the click instant and the expiry is `entry + expirationSeconds`.
+   * Recorded here (not in the panel) so the chart's entry/expiry window and the
+   * panel's countdown read the SAME clock. Null whenever no trade is in flight.
+   */
+  tradeEntryEpochMs: number | null;
   /** Last trade result notification */
   lastTradeResult: string | null;
   /** Trade history */
@@ -972,6 +979,7 @@ const lastRealtimePublish = new Map<string, number>();
     selectedHorizonMinutes: 5,
     countdownSeconds: 0,
     isTradeActive: false,
+    tradeEntryEpochMs: null,
     lastTradeResult: null,
     tradeHistory: [],
 
@@ -1857,13 +1865,23 @@ const lastRealtimePublish = new Map<string, number>();
         );
       }
 
-      set({ isTradeActive: true, countdownSeconds: expirationSeconds });
+      // PART 45 [510] — TIMER mode: the entry instant is the click, captured
+      // once here so the chart window and the panel countdown share one clock.
+      set({
+        isTradeActive: true,
+        countdownSeconds: expirationSeconds,
+        tradeEntryEpochMs: Date.now(),
+      });
 
       const countdownInterval = setInterval(() => {
         const remaining = get().countdownSeconds;
         if (remaining <= 1) {
           clearInterval(countdownInterval);
-          set({ countdownSeconds: 0, isTradeActive: false });
+          set({
+            countdownSeconds: 0,
+            isTradeActive: false,
+            tradeEntryEpochMs: null,
+          });
         } else {
           set({ countdownSeconds: remaining - 1 });
         }
@@ -1878,11 +1896,20 @@ const lastRealtimePublish = new Map<string, number>();
         });
 
         const trade = execution.result;
+        // PART 44.1 [504] — surfacing dry-run honestly: the backend evaluated and
+        // audited the decision but sent NOTHING. Do not record it as a trade and
+        // label it plainly so the operator is never misled into thinking a real
+        // position was opened.
+        const isDryRun = execution.status === "dry_run";
         set((state) => ({
-          tradeHistory: trade
-            ? [trade, ...state.tradeHistory].slice(0, 50)
-            : state.tradeHistory,
-          lastTradeResult: `${direction} signal on ${activeSymbol} — ${trade ? trade.status : execution.status}`,
+          tradeHistory:
+            trade && !isDryRun
+              ? [trade, ...state.tradeHistory].slice(0, 50)
+              : state.tradeHistory,
+          lastTradeResult: isDryRun
+            ? `DRY RUN — nothing was sent (${direction} on ${activeSymbol})`
+            : `${direction} signal on ${activeSymbol} — ${trade ? trade.status : execution.status}`,
+          tradeEntryEpochMs: isDryRun ? null : state.tradeEntryEpochMs,
         }));
       } catch (err: unknown) {
         clearInterval(countdownInterval);
@@ -1923,6 +1950,7 @@ const lastRealtimePublish = new Map<string, number>();
           set({
             isTradeActive: false,
             countdownSeconds: 0,
+            tradeEntryEpochMs: null,
             lastTradeResult: `⛔ ${data?.message ?? "Kill switch engaged — trading locked."}`,
           });
           return;
@@ -1933,6 +1961,7 @@ const lastRealtimePublish = new Map<string, number>();
         set({
           isTradeActive: false,
           countdownSeconds: 0,
+          tradeEntryEpochMs: null,
           lastTradeResult: `❌ ${message}`,
         });
       }

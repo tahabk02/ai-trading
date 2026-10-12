@@ -366,3 +366,89 @@ def test_real_gate_is_the_same_conjunctive_veto():
     assert green_real["passes"] is True, green_real
     surface = _surface(confidence_pct=99.0, class_gate=green_real, asset_class="REAL")
     assert surface["executable"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. [506] MUTATION CHECK — the regime check is load-bearing, not decorative.
+# ═══════════════════════════════════════════════════════════════════════════
+# The keystone above only means something if the test would FAIL when the
+# regime hold-back is removed. These tests force the HF/MTF gate to always PASS
+# and use a tape regime_detector genuinely classifies as random_walk, then show
+# that (a) the composed verdict is still non-tradable, and (b) it is the regime
+# demotion ALONE that blocks it — remove that step and the same setup releases.
+
+def _always_pass_gate() -> dict:
+    """A forced-green HF/MTF class-gate verdict (the gate can ask for no more)."""
+    return {
+        "passes": True,
+        "reason": None,
+        "score": 1.0,
+        "factors": {f: 1 for f in ("micro_momentum", "order_flow", "volatility", "mean_reversion")},
+        "metrics": {},
+    }
+
+
+def _random_walk_tape(n: int = 120, seed: int = 0) -> list:
+    """Deterministic tape classify_regime labels `random_walk`.
+
+    Geometry matters: `n` is sized to clear REGIME_MIN_CLOSES (100) so a real
+    classification exists, and stay BELOW REGIME_GATE_BYPASS_CLOSES (160) so the
+    LIVE-TEST long-history bypass does NOT apply — the window is genuinely
+    scored-only. seed=0 is pinned so the classification is stable across runs.
+    """
+    import random
+
+    rng = random.Random(seed)
+    price = 1.10
+    out = []
+    for _ in range(n):
+        price *= 1.0 + rng.gauss(0.0, 0.0009)
+        out.append(price)
+    return out
+
+
+def test_forced_green_hf_mtf_gate_cannot_release_a_random_walk_symbol():
+    """Force the gate green; a random_walk symbol is STILL non-tradable."""
+    from app.api.v1 import signals as signals_mod
+
+    tape = _random_walk_tape()
+    gate = signals_mod._surface_regime_gate(tape)
+    assert gate["regime"] == "random_walk", gate
+    assert gate["regime_gate"] == REGIME_GATE_SCORED_ONLY, gate
+
+    # Gate forced green AND confidence far above the strict bar.
+    released = _surface(confidence_pct=99.9, class_gate=_always_pass_gate())
+    assert released["executable"] is True, "the forced-green gate alone does release"
+
+    held = apply_regime_gate(released, gate["regime_gate"])
+    assert held["executable"] is False, "random_walk was released despite the hold-back"
+    assert held["regime_gate"] == REGIME_GATE_SCORED_ONLY
+    assert held["tier"] == SUPPRESSED_TIER
+
+
+def test_the_regime_demotion_is_load_bearing_mutation_check(monkeypatch):
+    """MUTATION: neuter `apply_regime_gate` (the regime check) and watch the
+    invariant break. If this test did NOT show the release, the keystone test
+    would be passing for reasons unrelated to the regime check (vacuous)."""
+    import app.services.signal_gatekeeper as gk
+    from app.api.v1 import signals as signals_mod
+
+    tape = _random_walk_tape()
+    assert signals_mod._surface_regime_gate(tape)["regime"] == "random_walk"
+
+    # Sanity: with the real regime gate the forced-green surface is held back.
+    surface = _surface(confidence_pct=99.9, class_gate=_always_pass_gate())
+    assert gk.apply_regime_gate(surface, REGIME_GATE_SCORED_ONLY)["executable"] is False
+
+    # Mutate: remove the demotion. The SAME inputs now release — proving the
+    # regime check (not the HF/MTF gate) is what enforces the invariant.
+    monkeypatch.setattr(
+        gk,
+        "apply_regime_gate",
+        lambda result, regime_gate: dict(result),
+    )
+    mutated = gk.apply_regime_gate(surface, REGIME_GATE_SCORED_ONLY)
+    assert mutated["executable"] is True, (
+        "removing the regime demotion did not flip the verdict — the invariant "
+        "test above proves nothing about the regime check"
+    )

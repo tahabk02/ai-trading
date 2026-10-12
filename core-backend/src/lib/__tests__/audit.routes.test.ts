@@ -10,6 +10,7 @@ import {
   clearExecutionAuditForTests,
 } from "../../lib/auditLogger";
 import auditRouter from "../../routes/audit.routes";
+import { requireAdminKey } from "../../middlewares/internalAuth.middleware";
 
 type JsonBody = Record<string, unknown>;
 
@@ -40,7 +41,10 @@ function routeHandler(path: string) {
     (l) => l.route && l.route.path === path && l.route.methods?.get === true,
   );
   expect(layer).toBeDefined();
-  return layer!.route!.stack[0].handle as (
+  // PART 44.1 [503] — the admin-key guard is mounted FIRST; the controller is
+  // the last handler in the route stack.
+  expect((layer!.route!.stack[0].handle as unknown)).toBe(requireAdminKey);
+  return layer!.route!.stack[layer!.route!.stack.length - 1].handle as (
     req: Request,
     res: Response,
     next: () => void,

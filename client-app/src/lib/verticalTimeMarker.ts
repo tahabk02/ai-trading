@@ -1,4 +1,4 @@
-import {
+﻿import {
   type IChartApiBase,
   type ISeriesPrimitive,
   type ISeriesPrimitivePaneRenderer,
@@ -9,7 +9,7 @@ import {
 } from "lightweight-charts";
 
 /**
- * verticalTimeMarker.ts — PART 37 [313]-[318]: the vertical EXPIRY boundary.
+ * verticalTimeMarker.ts ÔÇö PART 37 [313]-[318]: the vertical EXPIRY boundary.
  *
  * A lightweight-charts SERIES PRIMITIVE, not a DOM overlay and not a second
  * price scale. `createPriceLine` only draws HORIZONTAL lines, and a vertical
@@ -21,14 +21,14 @@ import {
  * WHY Z-ORDER "bottom":
  * the marker is a full-height boundary. Painted above the series it would cut
  * through candle bodies and wicks and obscure the OHLC read, which is the one
- * thing this chart exists to show. Below the series it reads as what it is — a
- * time boundary in the same visual layer as `grid.vertLines` — while the
+ * thing this chart exists to show. Below the series it reads as what it is ÔÇö a
+ * time boundary in the same visual layer as `grid.vertLines` ÔÇö while the
  * horizontal price lines (TGT / ANC / STOP / LIVE) keep the layer above and the
  * price axis to themselves. Time information sits in the grid layer; price
  * information sits in the line layer.
  *
  * WHERE THE X COMES FROM: `ExpiryTimeMarker.set()` receives an absolute bucket
- * in seconds, computed by `expiryMarkerBucketSec` (realtimeCandleAggregator) —
+ * in seconds, computed by `expiryMarkerBucketSec` (realtimeCandleAggregator) ÔÇö
  * the SAME `targetSlots`/`targetIntervalsFor` pair that positions the target
  * candles. This file never computes a time itself; if it did, the marker and the
  * projection would be two clocks, which is the exact defect class PART 9/19/21
@@ -39,7 +39,7 @@ import {
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
 /**
- * PART 37 [317] — the honesty clause. The marker states when a PROJECTION is
+ * PART 37 [317] ÔÇö the honesty clause. The marker states when a PROJECTION is
  * claimed to expire; it is not a confirmed event, and a bare `EXPIRY HH:MM:SS`
  * on a chart of predictions reads as a scheduled fact. Carried ON the marker
  * itself because the existing legend badge (`Target = projection, not a
@@ -104,7 +104,7 @@ export class ExpiryTimeMarker implements ISeriesPrimitive<Time> {
   }
 
   /**
-   * Reposition the marker. `bucketSec <= 0` HIDES it — the one honest way to
+   * Reposition the marker. `bucketSec <= 0` HIDES it ÔÇö the one honest way to
    * express "there is no expiry boundary to draw" (no live tip to anchor to, or
    * a non-positive expiry). Callers pass `expiryMarkerBucketSec`'s output, never
    * a locally-derived time.
@@ -203,7 +203,7 @@ class ExpiryRenderer implements ISeriesPrimitivePaneRenderer {
 
       ctx.save();
 
-      // ── the boundary itself ──
+      // ÔöÇÔöÇ the boundary itself ÔöÇÔöÇ
       ctx.beginPath();
       ctx.setLineDash([4, 4]);
       ctx.lineWidth = 1;
@@ -213,7 +213,7 @@ class ExpiryRenderer implements ISeriesPrimitivePaneRenderer {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // ── label block: EXPIRY HH:MM:SS over the honesty clause ──
+      // ÔöÇÔöÇ label block: EXPIRY HH:MM:SS over the honesty clause ÔöÇÔöÇ
       const title = `EXPIRY ${label}`;
       ctx.font = `700 10px ${MONO}`;
       const titleW = ctx.measureText(title).width;
