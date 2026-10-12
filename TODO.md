@@ -921,3 +921,84 @@ re-stamped every second painted exactly like a PO tick.
   827 passed.
 - Live bridge unfakeable without an SSID: [472]'s `/health/ticks` dump is the
   operator-side proof.
+
+## TRACKED FOLLOW-UP - pocket-bridge `test_asset_resolution.py` blocks ~75-105s in `_ensure_connected` (pre-existing; do NOT fold into PART 44)
+
+### Finding (reproduced 2026-10-11)
+
+`..\.venv-1\Scripts\python.exe -m pytest tests/test_asset_resolution.py -v`:
+9/10 pass, then **`test_subscribe_invalid_asset_skips_without_connection_error`**
+(test line 139) blocks - no failure, no output, so the full suite appears to hang.
+
+Root cause: that test sets `bridge.status = "connected"` and injects a
+`FakeSubscribeErrorClient` whose `is_connected()` returns `True`, but never sets
+`bridge._assets_ready`. `run_reader` -> `_ensure_connected`
+(`bridge.py:833-851`) sees `is_connected` true + `_assets_ready` false and enters
+`while not self._assets_ready:` (0.25s sleeps), which only breaks at
+`connect_deadline = max(connect_timeout=60.0, po_init_timeout) + 15.0`
+(`CONNECT_DEADLINE_GRACE`) ~ 75-105s. The test does finish eventually, but it
+stalls the suite for over a minute.
+
+This is a TEST-SHAPE fault, not a product bug: a real PO client marks ready via
+`_mark_ready` (`bridge.py:372-374`) before a reader reaches this branch.
+
+### Scope (not now)
+
+- Seed `bridge._assets_ready = True` in the test (or have the fake client call
+  `_mark_ready`) so #10 runs in milliseconds like its siblings.
+- Re-run the full `pocket-bridge` suite afterward - this is the only observed
+  full-suite blocker.
+
+### Files
+
+`pocket-bridge/tests/test_asset_resolution.py:139-149`,
+`pocket-bridge/pocket_bridge/bridge.py:833-851`.
+
+## TRACKED FOLLOW-UP - [491] prove the po-auth guard from OUTSIDE the process (queued; do NOT fold into PART 44)
+
+[486] shipped the fail-closed hosted po-auth guard with an IN-PROCESS test
+(`healthRoot.routes.test.ts:412` - "real HTTP (trust proxy=1): XFF remote cannot
+reach hosted routes without a key, loopback 404s, and the key unlocks both").
+That proves the Express layer in isolation. It does NOT prove the same contract
+end-to-end through the real edge: a request arriving from outside the container,
+crossing the reverse proxy / DevTunnel, and reaching a hosted mutating route
+(no key -> 404; wrong key -> 401/403; correct key -> unlocked). The guard's
+value is at the trust boundary; `clientIp()` and the `X-PO-Admin-Key` check
+depend on how the proxy rewrites `X-Forwarded-For`, which an in-process test
+cannot exercise.
+
+### Scope (not now)
+
+- Add a guard probe that runs against the composed stack (bring it up, hit the
+  host-published port from the host, assert 404/401/200 across the three key
+  states) - opt-in like the other live tests.
+- Pair it with [492] (trusted-hop count) so the probe pins the hop count too.
+
+### Files
+
+`core-backend/src/routes/health.routes.ts` (guard),
+`core-backend/src/index.ts:115-121` (`trust proxy`), `docker-compose*.yml`.
+
+## TRACKED FOLLOW-UP - [492] `trust proxy` is hard-coded to 1 (queued; do NOT fold into PART 44)
+
+`core-backend/src/index.ts:121` calls `app.set("trust proxy", 1)`
+unconditionally, so `req.ip` resolves to the real tunnel client and the per-IP
+rate limiter / request logs do not collapse into one shared bucket. Correct for
+the current single-hop topology (DevTunnels terminates TLS and forwards to
+localhost), but hard-coded:
+
+- a deployment behind two proxies (CDN + LB) would still trust only one hop and
+  mis-attribute `req.ip`;
+- when the process is reachable directly (no proxy in front), trusting 1 hop
+  lets any client spoof `X-Forwarded-For` and poison the rate-limit bucket.
+
+### Scope (not now)
+
+- Make the trusted-hop count (or an explicit trust list) configurable via env,
+  defaulting to 1 to preserve today's behaviour.
+- Reconcile with [491]'s external guard probe.
+
+### Files
+
+`core-backend/src/index.ts:115-121`,
+`core-backend/src/lib/__tests__/healthRoot.routes.test.ts:412`.
