@@ -53,7 +53,21 @@ function readSecretFile(
 }
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
-const IS_TEST = process.env.NODE_ENV === "test";
+
+/**
+ * PART 48 [env-hardening] — the single, explicit opt-out from strict boot
+ * validation.
+ *
+ * The posture is SECURE BY DEFAULT: `assertRequiredConfig()` below is fatal in
+ * EVERY environment, including local development, unless this is exactly
+ * "true". Nothing infers an insecure posture from a free-text label such as
+ * NODE_ENV, because a deploy that forgets to set NODE_ENV previously received
+ * the development posture — a SQLite `file:` database and a public fallback
+ * signing key — while looking healthy. Local tooling and the test suite set
+ * this flag deliberately; production never does.
+ */
+const ALLOW_INSECURE_DEFAULTS =
+  (process.env.ALLOW_INSECURE_DEV_DEFAULTS || "").trim().toLowerCase() === "true";
 
 /** Parse a boolean env flag ("1"/"true"/"yes"/"on" → true), with a default. */
 function boolFlag(raw: string | undefined, dflt: boolean): boolean {
@@ -70,11 +84,13 @@ function boolFlag(raw: string | undefined, dflt: boolean): boolean {
  * fixing a deploy discovered the next missing variable only after the next
  * crash. Values are never included in the message — only names and remedies.
  *
- * Hard failure is production-only. In development the service must still boot
- * with zero setup (that is the point of the local defaults), so problems are
- * logged as warnings. `test` is treated as production for DATABASE_URL
- * specifically, because a SQLite fallback in tests is exactly what let the
- * parent-`.env` shadowing bug hide.
+ * SECURE BY DEFAULT: this is fatal in EVERY environment. The previous guard was
+ * keyed on `NODE_ENV === "production"`, so a service that forgot to set
+ * NODE_ENV silently got the development posture (a SQLite fallback database and
+ * a public fallback signing key) and booted looking healthy. There is now
+ * exactly ONE escape hatch — `ALLOW_INSECURE_DEV_DEFAULTS=true` — which local
+ * tooling and tests set deliberately and which production never sets. In that
+ * opt-out mode the problems are logged as warnings instead of thrown.
  */
 function assertRequiredConfig(): void {
   const problems: string[] = [];
@@ -118,8 +134,13 @@ function assertRequiredConfig(): void {
     "silently later — a SQLite fallback serves an empty schema while looking " +
     "healthy, and a default signing key makes every token forgeable.";
 
-  if (IS_PRODUCTION || IS_TEST) throw new Error(header);
-  console.warn(header.replace("[FATAL]", "[config]"));
+  // The single, explicit opt-out. Production must never set it; even if it did,
+  // an actual production posture still refuses to boot.
+  if (ALLOW_INSECURE_DEFAULTS && !IS_PRODUCTION) {
+    console.warn(header.replace("[FATAL]", "[config]"));
+    return;
+  }
+  throw new Error(header);
 }
 
 // Validate BEFORE building the object so a bad deploy fails once, loudly,
@@ -135,10 +156,11 @@ export const secrets = {
   CORS_ORIGIN: process.env.CORS_ORIGIN || "",
 
   // ── JWT ──
-  // Validated at the top of this module: in production (and in tests) a
-  // missing, placeholder, or under-length secret is fatal. The development
-  // fallback keeps `npm run dev` working with zero setup, and is clearly
-  // marked so it can never be mistaken for a real value.
+  // Validated at the top of this module: a missing, placeholder, or
+  // under-length secret is FATAL in every environment unless
+  // ALLOW_INSECURE_DEV_DEFAULTS=true. The development fallback therefore stays
+  // reachable only under that explicit opt-out, and is clearly marked so it can
+  // never be mistaken for a real value.
   JWT_SECRET:
     (process.env.JWT_SECRET || "").trim() || "insecure-development-only-secret-do-not-use",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || "24h",
@@ -154,8 +176,9 @@ export const secrets = {
   // The previous fallback "file:./dev.db" meant a production deploy with a
   // missing DATABASE_URL silently started a local SQLite file — no rows, no
   // error, every query "worked" against an empty database. Missing/invalid is
-  // now fatal in production and in tests (assertRequiredConfig above); the
-  // SQLite value survives only as an explicit development convenience.
+  // now FATAL in every environment (assertRequiredConfig above) unless the
+  // explicit ALLOW_INSECURE_DEV_DEFAULTS opt-out is set; the SQLite value
+  // survives only as that explicit development convenience.
   DATABASE_URL: (process.env.DATABASE_URL || "").trim() || "file:./dev.db",
 
   // ── Rate Limiting ──
@@ -171,9 +194,9 @@ export const secrets = {
   // Service-to-service key. The previous literal "INTERNAL_SECRET_AI_ENGINE"
   // was a PUBLIC constant: anyone reading the repo or the image knew the value
   // the backend presents to the engine, so it authenticated nothing. It is
-  // required in production (assertRequiredConfig) and generated per-process in
-  // development, where both services run on one trusted host and a shared
-  // constant buys no security anyway.
+  // FATAL to omit in every environment (assertRequiredConfig) unless
+  // ALLOW_INSECURE_DEV_DEFAULTS=true; the fallback below is reachable only
+  // under that explicit opt-out, where both services run on one trusted host.
   AI_ENGINE_API_KEY: (process.env.AI_ENGINE_API_KEY || "").trim() || "dev-internal-service-key",
   AI_ENGINE_URL: process.env.AI_ENGINE_URL || "http://ai-engine:8000",
   // Request timeout (ms) for AI Engine predictions. Set generous enough to

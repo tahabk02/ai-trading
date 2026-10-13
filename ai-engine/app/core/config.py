@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
@@ -117,9 +118,18 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     # Shared secret for core-backend -> ai-engine service-to-service calls.
     # MUST match core-backend's AI_ENGINE_API_KEY. Empty by default (never a
-    # hardcoded constant) so an unconfigured engine FAILS CLOSED in production
-    # instead of accepting a public, repository-known key.
+    # hardcoded constant) so an unconfigured engine FAILS CLOSED instead of
+    # accepting a public, repository-known key.
     AI_ENGINE_API_KEY: Optional[str] = None
+
+    # PART 48 [env-hardening] — the single, explicit opt-out from the strict
+    # boot guard below. Secure by default: the engine REFUSES TO BOOT with a
+    # missing/placeholder AI_ENGINE_API_KEY in EVERY environment unless this is
+    # exactly true. Local dev tooling and the test suite set it deliberately;
+    # production never does. It replaces the old posture that keyed security on
+    # the free-text ENVIRONMENT label, which a typo or an unset value silently
+    # turned into "trust anyone".
+    ALLOW_INSECURE_DEV_DEFAULTS: bool = False
     
     # تم تغيير localhost إلى اسم الخدمة في Docker Network لتجنب مشاكل الاتصال في السيرفر
     BACKEND_API_URL: str = "http://core-backend:4000/api/v1"
@@ -164,3 +174,58 @@ class Settings(BaseSettings):
         return f"redis://{password}{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
 settings = Settings()
+
+
+# PART 48 [env-hardening] — the strict, boot-time configuration check.
+#
+# Mirrors core-backend's `assertRequiredConfig`: it runs at import (so the
+# process DIES at boot, not on the first service call) and reports EVERY problem
+# at once. Values are never printed, only names and remedies.
+#
+# The engine previously had NO boot assertion at all: `app/api/deps.py` trusted
+# any caller whenever `ENVIRONMENT != "production"`, so an unset or misspelled
+# ENVIRONMENT silently disabled service auth. Now the posture is secure by
+# default and the only escape hatch is the explicit ALLOW_INSECURE_DEV_DEFAULTS
+# flag — never a free-text label.
+_PLACEHOLDER = re.compile(
+    r"^(change[-_ ]?me|your[-_ ]|placeholder|example|dummy|test[-_ ]?only|xxx+|todo)",
+    re.IGNORECASE,
+)
+
+
+def _assert_required_config() -> None:
+    problems: list[str] = []
+
+    key = (settings.AI_ENGINE_API_KEY or "").strip()
+    if not key or _PLACEHOLDER.match(key):
+        problems.append(
+            "  - AI_ENGINE_API_KEY is missing or still a placeholder. "
+            "Set it to the same value core-backend presents (never a public constant)."
+        )
+
+    if not problems:
+        return
+
+    sources = (
+        ", ".join(p.name for p in AI_ENGINE_ROOT_ENV)
+        if AI_ENGINE_ROOT_ENV
+        else "(none — relying on the real environment)"
+    )
+    header = (
+        f"[FATAL] {len(problems)} required environment variable(s) are not usable "
+        f"(sources: {sources}):\n" + "\n".join(problems) + "\n"
+        "Refusing to start. A misconfigured engine that boots anyway fails "
+        "silently later — an engine with no service key would accept requests it "
+        "cannot authenticate."
+    )
+
+    # The single, explicit opt-out. A production posture refuses to boot even if
+    # the flag is set by mistake.
+    if settings.ALLOW_INSECURE_DEV_DEFAULTS and settings.ENVIRONMENT != "production":
+        logger.warning(header.replace("[FATAL]", "[config]"))
+        return
+
+    raise RuntimeError(header)
+
+
+_assert_required_config()

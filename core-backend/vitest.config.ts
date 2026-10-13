@@ -4,6 +4,13 @@ export default defineConfig({
   test: {
     include: ["src/lib/__tests__/**/*.test.ts"],
     environment: "node",
+    // The unit suite is the explicit "mock/test" posture: it must run without a
+    // real deployment secret, so the strict boot guard
+    // (`assertRequiredConfig` in src/config/secrets.ts) is opted out here via
+    // its one escape hatch. `failFast.test.ts` still exercises the strict path
+    // because it boots `secrets.ts` in CHILD processes with a controlled
+    // environment that deliberately omits this flag.
+    env: { ALLOW_INSECURE_DEV_DEFAULTS: "true" },
     // `failFast.test.ts` boots the real config in ~4.5s of child processes, and
     // the prediction suites already sit near the 5s default. Running files
     // sequentially keeps a loaded machine from pushing those over the limit —

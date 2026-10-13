@@ -60,7 +60,15 @@ services:
       REDIS_HOST: redis
       LOG_FORMAT: JSON
       CONFIDENCE_THRESHOLD: 0.98
-      ENVIRONMENT: production
+      # PART 48 [env-hardening] — the dev stack is DEVELOPMENT, and the engine's
+      # boot guard no longer keys security on this label. The old value
+      # ("production") made the auth path answer 503 for every service call
+      # because no key was provided; a free-text posture must never decide
+      # auth, so auth is now gated by the explicit flag and the key below.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Required: the engine refuses to boot without it (config.py boot guard),
+      # and it MUST match core-backend's AI_ENGINE_API_KEY.
+      AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:?AI_ENGINE_API_KEY must be set (repo-root .env or environment) and must match core-backend}
       TZ: UTC
       # P1-2026-09-24 — non-blocking interactive inference budget (ms): if a
       # cold-cache RandomForest train cannot finish within it, /predict ships
@@ -85,12 +93,24 @@ services:
       REDIS_HOST: redis
       REDIS_URL: redis://radar_bus:6379
       PORT: 4000
+      # PART 48 [env-hardening] — make the posture explicit instead of inferred.
+      # core-backend's boot guard is now fatal in EVERY environment (see
+      # secrets.ts), so the previously "unset NODE_ENV ⇒ dev posture" hole is
+      # closed regardless; this just states the intent plainly.
+      NODE_ENV: ${NODE_ENV:-development}
       # Container-to-container path on the radar_network. A host-loopback
       # default (127.0.0.1:8000) silently 503s every /predict inside Docker —
       # that was the recurring EADDRINUSE-era live-503 root cause. Override
       # from the repo-root .env if the engine is exposed elsewhere.
       AI_ENGINE_URL: ${AI_ENGINE_URL:-http://ai-engine:8000}
-      JWT_SECRET: ${JWT_SECRET:-ultra-secure-secret-key}
+      # Required, and it MUST equal the engine's AI_ENGINE_API_KEY. Omitted
+      # before, so the strict boot guard would FATAL; a silent fallback here
+      # would authenticate nothing.
+      AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:?AI_ENGINE_API_KEY must be set (repo-root .env or environment)}
+      # `:?` replaces the old `${JWT_SECRET:-ultra-secure-secret-key}` silent
+      # weak default — a known-constant signing key made every issued token
+      # forgeable and, with no NODE_ENV above, the old guard never tripped.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (repo-root .env or environment)}
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: 8788
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
