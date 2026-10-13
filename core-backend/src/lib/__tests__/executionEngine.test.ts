@@ -63,4 +63,33 @@ describe("PART 44 [455] executionEngine — unified response contract", () => {
     if (before === undefined) delete process.env.EXECUTION_DRY_RUN;
     else process.env.EXECUTION_DRY_RUN = before;
   });
+
+  it("PART 46.2 [514] — dry-run is FAIL-CLOSED: unset / empty / unknown = true", () => {
+    const before = process.env.EXECUTION_DRY_RUN;
+    delete process.env.EXECUTION_DRY_RUN;
+    expect(executionDryRunEnabled()).toBe(true); // UNSET => dry-run
+
+    process.env.EXECUTION_DRY_RUN = "";
+    expect(executionDryRunEnabled()).toBe(true); // empty => dry-run
+
+    process.env.EXECUTION_DRY_RUN = "maybe";
+    expect(executionDryRunEnabled()).toBe(true); // unrecognised => dry-run
+
+    if (before === undefined) delete process.env.EXECUTION_DRY_RUN;
+    else process.env.EXECUTION_DRY_RUN = before;
+  });
+
+  it("PART 46.2 [514] — only an explicit negation enables the live path", () => {
+    const before = process.env.EXECUTION_DRY_RUN;
+    for (const truthy of ["1", "true", "yes", "on", "TRUE", "On"]) {
+      process.env.EXECUTION_DRY_RUN = truthy;
+      expect(executionDryRunEnabled()).toBe(true);
+    }
+    for (const falsy of ["0", "false", "no", "off", "FALSE", "off "]) {
+      process.env.EXECUTION_DRY_RUN = falsy;
+      expect(executionDryRunEnabled()).toBe(false);
+    }
+    if (before === undefined) delete process.env.EXECUTION_DRY_RUN;
+    else process.env.EXECUTION_DRY_RUN = before;
+  });
 });

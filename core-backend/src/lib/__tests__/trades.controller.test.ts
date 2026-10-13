@@ -73,6 +73,10 @@ async function post(body: JsonBody): Promise<{ code: number; body: JsonBody }> {
 
 beforeEach(() => {
   clearExecutionAuditForTests();
+  // PART 46.2 [514] — dry-run is now the FAIL-CLOSED default. The live-path
+  // cases below exercise `status:"executed"`, so they must EXPLICITLY opt out,
+  // exactly as a deployment would. The dedicated unset case lives at the end.
+  process.env.EXECUTION_DRY_RUN = "false";
   mocks.isValidSymbolSync.mockReset().mockReturnValue(true);
   mocks.findBySymbol.mockReset().mockResolvedValue({ payout: 92 });
   mocks.getLiveSpot
@@ -198,5 +202,29 @@ describe("POST /trades ([455] envelope + [456] audit)", () => {
     expect(body.status).toBe("failed");
     expect(body.error).toBe("Internal Server Error");
     expect(queryExecutionLogs().logs[0].status).toBe("failed");
+  });
+
+  it("PART 46.2 [514] — UNSET env fails closed: 200 dry_run, nothing persisted, nothing sent", async () => {
+    const before = process.env.EXECUTION_DRY_RUN;
+    delete process.env.EXECUTION_DRY_RUN;
+    try {
+      const { code, body } = await post(VALID);
+      expect(code).toBe(200);
+      expect(body.status).toBe("dry_run");
+      expect(body.result).toBeTruthy();
+      expect(queryExecutionLogs().logs[0].decision).toBe("skipped");
+      expect(queryExecutionLogs().logs[0].riskRules.dryRun).toBe(true);
+    } finally {
+      if (before === undefined) delete process.env.EXECUTION_DRY_RUN;
+      else process.env.EXECUTION_DRY_RUN = before;
+    }
+  });
+
+  it("PART 46.2 [514] — explicit false is the only way to the live path", async () => {
+    process.env.EXECUTION_DRY_RUN = "false";
+    const { code, body } = await post(VALID);
+    expect(code).toBe(201);
+    expect(body.status).toBe("executed");
+    expect(queryExecutionLogs().logs[0].decision).toBe("executed");
   });
 });

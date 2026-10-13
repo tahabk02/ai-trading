@@ -88,9 +88,20 @@ export function provenanceFromPriceSource(
   return EXECUTION_PROVENANCE.PROXY_FALLBACK;
 }
 
-/** True when the operator has switched the execution engine into dry-run mode. */
+/**
+ * True when the execution engine must NOT send anything (dry-run).
+ *
+ * FAIL-CLOSED (PART 46.2 [514]): dry-run is the DEFAULT. The engine only goes
+ * live when the operator has explicitly opted out with one of the negations
+ * `0|false|no|off`. An UNSET variable, an empty string, or any unrecognised
+ * value keeps dry-run ON — so a missing/mistyped env var can never silently
+ * enable real execution. No broker is wired yet, so the live path is a
+ * deliberate, explicit choice, never an accident.
+ */
 export function executionDryRunEnabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(String(process.env.EXECUTION_DRY_RUN ?? ""));
+  const raw = String(process.env.EXECUTION_DRY_RUN ?? "").trim();
+  if (raw === "") return true;
+  return !/^(0|false|no|off)$/i.test(raw);
 }
 
 /** Build the unified envelope. Pure — the caller owns HTTP status + audit. */
