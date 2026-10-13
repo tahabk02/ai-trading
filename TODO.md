@@ -1002,3 +1002,61 @@ localhost), but hard-coded:
 
 `core-backend/src/index.ts:115-121`,
 `core-backend/src/lib/__tests__/healthRoot.routes.test.ts:412`.
+
+## TRACKED FOLLOW-UP - [517] chart ENTRY marker/band + "withheld" readout (queued; DEFERRED from PART 46)
+
+### What was asked
+
+An ENTRY boundary on the Pro price chart: a vertical marker plus a shaded trade
+window band from the real entry instant to expiry, an `ENTER NOW -Ns` /
+`TOO LATE TO ACT` readout, and an explicit withheld-reason line when no entry
+exists. It must anchor to the trade's real entry time (`tradeEntryEpochMs`), not
+a locally-derived clock.
+
+### Why deferred (explicit, not a silent drop)
+
+- **No PART 46 spec text exists in the repo.** Only
+  `docs/verification/STATUS-NOTE-2026-10-13.md` references the item number.
+  Implementing a chart interaction against a paraphrase risks shipping the wrong
+  behaviour, which is the exact failure PART 46.2 exists to correct.
+- **The chart is occlusion-sensitive and tested.** `financial-chart.tsx` is
+  ~2098 lines with a DOM layout-contract test
+  (`client-app/src/app/(dashboard)/dashboard/pro/__tests__/layout-contract.dom.test.tsx`)
+  that already pins an earlier z-order bug (the `TOO LATE TO ACT` badge was once
+  occluded). An unverified chart change cannot be claimed as done.
+- **The offline harness cannot see it.** `npm run verify:e2e` (PART 47 [525])
+  reports DOM chart parity as `N/A` (check C14), so a chart-only change would
+  carry no verification evidence in this PR.
+
+### What already exists (the work is additive, not a rebuild)
+
+- Entry time is already tracked: `tradeEntryEpochMs` type
+  `client-app/src/store/useTradingStore.ts:545`, init `:982`, set on dispatch
+  `:1873`, cleared on expiry / dry-run / abort `:1883` `:1912` `:1953` `:1964`.
+- The vertical boundary primitive already exists: `ExpiryTimeMarker`
+  `client-app/src/lib/verticalTimeMarker.ts:74`, attached at
+  `client-app/src/components/trading/financial-chart.tsx:1318`, synced (never
+  locally timed) through `syncExpiryMarker` `:870`.
+- "Too late" copy already exists elsewhere: `pro-expiry-bar.tsx:327`,
+  `lib/signalRender.ts:46,210`, chart HUD `financial-chart.tsx:1975`.
+
+### Scope (when scheduled)
+
+- Add a `TradeWindowBand` series primitive next to `ExpiryTimeMarker` in
+  `client-app/src/lib/verticalTimeMarker.ts`.
+- Thread `tradeEntryEpochMs` into `FinancialChart` (new prop passed at
+  `client-app/src/app/(dashboard)/dashboard/pro/page.tsx:577-595`).
+- Sync the band `[entryInstant, entryInstant + expirationSeconds]` with the SAME
+  slot math (`targetSlots` / `expiryMarkerBucketSec`) used by target candles and
+  the expiry marker - never a local clock.
+- HUD: `ENTER NOW -Ns` inside the window, `TOO LATE TO ACT` past it, and the
+  withheld-reason text when no entry exists (dry-run / no dispatch).
+- Tests: extend the chart DOM contract test; assert the band anchors to
+  `tradeEntryEpochMs` and hides when it is `null`.
+
+### Files
+
+`client-app/src/lib/verticalTimeMarker.ts`,
+`client-app/src/components/trading/financial-chart.tsx`,
+`client-app/src/app/(dashboard)/dashboard/pro/page.tsx:577-595`,
+`client-app/src/store/useTradingStore.ts:545,982,1873,1883,1912,1953,1964`.

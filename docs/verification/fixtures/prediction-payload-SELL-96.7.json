@@ -1,0 +1,15 @@
+{
+  "symbol": "EUR/USD",
+  "signal": "SELL",
+  "confidence": 96.7,
+  "book_agreement": 96.7,
+  "book_agreement_detail": {
+    "convergence_index": 0.914,
+    "alignment": 0.3333,
+    "magnitude": 0.7125,
+    "aligned_count": 2,
+    "active_count": 6,
+    "label": "2/6 books aligned"
+  },
+  "market_waiting": false
+}

@@ -6,9 +6,24 @@ performed: the `verify-e2e` harness did not exist at the time, replay
 fixtures were never captured from a live feed, and no mutation battery was
 executed. Nothing here should be cited as evidence of correctness.
 
-A real verification report will be produced by
-`npm run verify:e2e` (see PART 47 [525]) once the offline replay + oracle +
-11-mutation harness is built.
+A real verification report has since been produced: `npm run verify:e2e` (PART 47
+[525]) now runs the offline replay + independent candle oracle + 11-mutation
+harness and writes `docs/verification/E2E-REPORT-<sha>.md` (+ `.json`). The report
+for the harness commit is `E2E-REPORT-cfc9595.md` — verdict **OK** (11 pass,
+4 N/A, 0 fail; 11/11 mutations caught). That file, not this note, is the evidence.
+
+## Update (2026-10-13, same day)
+
+- PART 47 [525] offline harness **built and green**: `npm run verify:e2e` →
+  `E2E-REPORT-cfc9595.md` / `.json`.
+- PART 46 [517] (chart ENTRY marker/band + withheld readout) **deferred** with a
+  precise entry in `TODO.md` (no PART 46 spec text exists in the repo; not
+  implemented blind).
+- PART 46 [512] annotated payload: `docs/verification/SELL-96.7-EXPLAINED.md`
+  (constructed, not captured) + `docs/verification/fixtures/`.
+- PART 46 [524] policy: `docs/DATA-PROVENANCE-POLICY.md` — corrects the earlier
+  "2,941 non-PO OTC bars" framing (`otc_proxy_faults=0`; those bars are
+  non-OTC) and records filter-never-delete.
 
 ## What was actually run (in-place, no harness)
 

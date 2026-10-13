@@ -1,0 +1,208 @@
+{
+  "sha": "cfc9595",
+  "branch": "part46-47-verification",
+  "generatedAt": "2026-10-13T09:42:23.988Z",
+  "verdict": "OK",
+  "fixtureSource": "disk",
+  "fixtureSummary": "8 symbols (otc=4, real=2, crypto=2), 32 min each, 15368 ticks total",
+  "brokerNowMs": 1788222720000,
+  "checks": [
+    {
+      "id": "C1",
+      "name": "Candle exactness (server vs independent oracle, all 16 TFs)",
+      "status": "PASS",
+      "message": "all 128 (symbol,timeframe) cells match bar-for-bar (timestamps + OHLCV)",
+      "detail": "128 cells"
+    },
+    {
+      "id": "C2",
+      "name": "OHLC invariants (finite, high>=max(o,c), low<=min(o,c))",
+      "status": "PASS",
+      "message": "all 6704 bars structurally valid",
+      "detail": "6704 bars"
+    },
+    {
+      "id": "C3",
+      "name": "Slot geometry (strictly increasing, unique, grid-aligned)",
+      "status": "PASS",
+      "message": "every series is monotonic, unique and grid-aligned"
+    },
+    {
+      "id": "C4",
+      "name": "Rollup (M5 == strict fold of M1)",
+      "status": "PASS",
+      "message": "M5 reproduces the strict M1 fold for EUR/USD (6 closed bars)"
+    },
+    {
+      "id": "C5",
+      "name": "OTC source purity (no proxy tick in an OTC book)",
+      "status": "PASS",
+      "message": "all 7684 OTC ticks carry pocket_option_ws provenance"
+    },
+    {
+      "id": "C6",
+      "name": "Time anchoring (product expiry == last ceil-projection slot)",
+      "status": "PASS",
+      "message": "all 20 product expiry slots match the oracle's last projection slot"
+    },
+    {
+      "id": "C7",
+      "name": "Clock coherence (slots anchored to broker clock, not Date.now)",
+      "status": "PASS",
+      "message": "every series' newest closed bucket is anchored to brokerNow=1788222720000"
+    },
+    {
+      "id": "C8",
+      "name": "Target geometry (product ladder == oracle, contiguous, first=tip+tf)",
+      "status": "PASS",
+      "message": "all 20 product ladders match the oracle slot-for-slot"
+    },
+    {
+      "id": "C9",
+      "name": "Timer entry/expiry (product expiry == entry + duration)",
+      "status": "PASS",
+      "message": "all 4 TIMER durations map entry->expiry exactly"
+    },
+    {
+      "id": "C10",
+      "name": "Price linkage + freshness (grid == rail == chart, quote fresh)",
+      "status": "PASS",
+      "message": "live ticker/grid/rail all report 1.11879; last closed S5 close (1.1188) matches the folded tick stream; quote age=0ms"
+    },
+    {
+      "id": "C11",
+      "name": "Settlement logging (post-expiry outcome logged per expiry)",
+      "status": "PASS",
+      "message": "settlement logged for EUR/USD expiry=1788222660 (entry=1.11622 exit=1.1188 -> WIN)"
+    },
+    {
+      "id": "C12",
+      "name": "Live PO session replay (broker websocket)",
+      "status": "N/A",
+      "reason": "requires live Pocket Option credentials + the broker websocket; the harness replays captured ticks instead of connecting",
+      "message": "not exercised offline"
+    },
+    {
+      "id": "C13",
+      "name": "/history HTTP surface (real bars endpoint)",
+      "status": "N/A",
+      "reason": "requires a running core-backend with a database and a live PO session; not available offline",
+      "message": "not exercised offline"
+    },
+    {
+      "id": "C14",
+      "name": "DOM-rendered chart series parity",
+      "status": "N/A",
+      "reason": "requires a browser + live streamed data; the harness compares the aggregation layer, not the React-rendered series",
+      "message": "not exercised offline"
+    },
+    {
+      "id": "C15",
+      "name": "SignalOutcome Postgres persistence",
+      "status": "N/A",
+      "reason": "requires a Postgres instance and Prisma client; the harness validates the pure settlement derivation only (C11)",
+      "message": "not exercised offline"
+    }
+  ],
+  "mutations": [
+    {
+      "id": "M1",
+      "name": "Perturb one closed S5 close by +0.0001",
+      "targets": "C1",
+      "caught": true,
+      "message": "candle mismatch in 1/128 cells: EUR/USD S5: bar[192] close: server=1.09665 oracle=1.09655 (ts=1788221760000)"
+    },
+    {
+      "id": "M2",
+      "name": "Set an M1 high below its close (OHLC violation)",
+      "targets": "C2",
+      "caught": true,
+      "message": "OHLC violated at EUR/USD M1 ts=1788221100000: o=1.08846 h=0.08579000000000003 l=1.0855 c=1.08579"
+    },
+    {
+      "id": "M3",
+      "name": "Duplicate one S5 slot (breaks monotonic/unique)",
+      "targets": "C3",
+      "caught": true,
+      "message": "EUR/USD S5: non-monotonic timestamps 1788220900000 -> 1788220900000"
+    },
+    {
+      "id": "M4",
+      "name": "Roll M1->M5 using MEAN high instead of max high",
+      "targets": "C4",
+      "caught": true,
+      "message": "M5 rollup mismatch for EUR/USD: bar[0] high: server=1.0878799999999997 oracle=1.09054 (ts=1788220800000)"
+    },
+    {
+      "id": "M5",
+      "name": "Inject a proxy-sourced tick into an OTC book",
+      "targets": "C5",
+      "caught": true,
+      "message": "proxy tick in OTC book EUR/USD at ts=1788222719000: source=github_repo_cached"
+    },
+    {
+      "id": "M6",
+      "name": "Shift the product expiry slot by one timeframe (off-by-one)",
+      "targets": "C6",
+      "caught": true,
+      "message": "product expiry wrong for 5s/60s: got=1788222785 expect=1788222780 (ceil=1788222780)"
+    },
+    {
+      "id": "M7",
+      "name": "Anchor slots to wall clock (Date.now) instead of broker clock",
+      "targets": "C7",
+      "caught": true,
+      "message": "EUR/USD S5: newest closed bucket ts=1788222715000 != broker-anchored 1790814715000"
+    },
+    {
+      "id": "M8",
+      "name": "Insert a gap in a product target ladder",
+      "targets": "C8",
+      "caught": true,
+      "message": "product slot[1] wrong for 60s: got=1788222735 expect=1788222730"
+    },
+    {
+      "id": "M9",
+      "name": "Shift a TIMER entry bucket (expiry != entry + duration)",
+      "targets": "C9",
+      "caught": true,
+      "message": "product timer expiry wrong for dur=60s: entry=1788222600 expiry=1788222720 expect=1788222660"
+    },
+    {
+      "id": "M10",
+      "name": "Drift the last closed chart close away from the tick stream",
+      "targets": "C10",
+      "caught": true,
+      "message": "chart close 1.119 != folded tick close 1.1188 for EUR/USD"
+    },
+    {
+      "id": "M11",
+      "name": "Drop the post-expiry settlement record",
+      "targets": "C11",
+      "caught": true,
+      "message": "no settlement record for EUR/USD at expiry bucket 1788222660"
+    }
+  ],
+  "naCells": [
+    {
+      "id": "C12",
+      "check": "Live PO session replay (broker websocket)",
+      "reason": "requires live Pocket Option credentials + the broker websocket; the harness replays captured ticks instead of connecting"
+    },
+    {
+      "id": "C13",
+      "check": "/history HTTP surface (real bars endpoint)",
+      "reason": "requires a running core-backend with a database and a live PO session; not available offline"
+    },
+    {
+      "id": "C14",
+      "check": "DOM-rendered chart series parity",
+      "reason": "requires a browser + live streamed data; the harness compares the aggregation layer, not the React-rendered series"
+    },
+    {
+      "id": "C15",
+      "check": "SignalOutcome Postgres persistence",
+      "reason": "requires a Postgres instance and Prisma client; the harness validates the pure settlement derivation only (C11)"
+    }
+  ]
+}
