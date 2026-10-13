@@ -293,6 +293,10 @@ services:
       # ── RATE LIMITING ──
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      # ── EXECUTION ENGINE (PART 44.1 [504]) ──
+      # PILOT DEFAULT: dry-run ON. POST /trades validates + audits but records /
+      # executes nothing (envelope status="dry_run"). No broker is wired yet.
+      EXECUTION_DRY_RUN: ${EXECUTION_DRY_RUN:-true}
       # ── MARKET DATA (no hardcoded fallbacks) ──
       ALPACA_API_KEY_ID: ${ALPACA_API_KEY_ID:-}
       ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
@@ -440,9 +444,14 @@ services:
       - path: ./pocket-bridge/.env
         required: false
     volumes:
-      # Captured browser session (read-only). The bridge authenticates with the
-      # stored `ssid` cookie; the backend never reads this file.
-      - ./pocket-bridge/session:/app/session:ro
+      # Captured browser session, READ-WRITE. The bridge authenticates with the
+      # stored `ssid` cookie AND refresh_ssid.py atomically rotates
+      # po_session.json here on every successful refresh. It MUST be writable:
+      # a read-only mount makes the rotation fail silently, so only the
+      # ephemeral /app/.env would carry the fresh token and the rotated session
+      # would be lost on the next container recreate (reverting to the stale
+      # boot token). The backend never reads this file.
+      - ./pocket-bridge/session:/app/session
     # Internal only. 8789 (relay_port + 1) is additionally bound to loopback
     # so an operator/monitoring agent can scrape /health without exposing the
     # relay itself.

@@ -163,10 +163,11 @@ services:
     env_file:
       - ./pocket-bridge/.env
     volumes:
-      # Captured browser session (read-only): the bridge authenticates with the
-      # stored `ssid` cookie and hot-reloads it; refresh runs INSIDE the
-      # container against this same file.
-      - ./pocket-bridge/session:/app/session:ro
+      # Captured browser session, READ-WRITE: the bridge authenticates with the
+      # stored `ssid` cookie and hot-reloads it, while refresh_ssid.py (run
+      # INSIDE the container against this same file) atomically rotates
+      # po_session.json so the refreshed token survives container restarts.
+      - ./pocket-bridge/session:/app/session
     ports:
       - "8788:8788"
       - "8789:8789"   # /health endpoint (relay_port + 1)

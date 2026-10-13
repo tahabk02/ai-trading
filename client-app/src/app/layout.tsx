@@ -90,7 +90,10 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: THEME_PREPAINT_SCRIPT }} />
         <script dangerouslySetInnerHTML={{ __html: LANG_PREPAINT_SCRIPT }} />
       </head>
-      <body className="bg-obsidian dark:bg-obsidian text-slate-100 selection:bg-emerald-500/30 antialiased">
+      <body
+        suppressHydrationWarning={true}
+        className="bg-obsidian dark:bg-obsidian text-slate-100 selection:bg-emerald-500/30 antialiased"
+      >
         <ThemeProvider>
           <LanguageProvider>
             <SocketProvider>
