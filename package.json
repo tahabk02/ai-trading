@@ -10,7 +10,8 @@
     "dev:pocket-bridge": "cd pocket-bridge && ..\\.venv-1\\Scripts\\python -m pocket_bridge.main",
     "dev:client": "concurrently -n client,lint -c green,yellow \"cd client-app && npm run dev\" \"cd client-app && npx next lint --quiet 2>nul\"",
     "install:all": "npm install && cd core-backend && npm install && cd ../client-app && npm install && cd ../ai-engine && if (-not (Test-Path venv)) { python -m venv venv } && .\\venv\\Scripts\\pip install -r requirements.txt",
-    "build": "cd core-backend && npm run build && cd ../client-app && npm run build"
+    "build": "cd core-backend && npm run build && cd ../client-app && npm run build",
+    "verify:e2e": "cd core-backend && npm run verify:e2e"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
