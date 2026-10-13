@@ -1060,3 +1060,39 @@ a locally-derived clock.
 `client-app/src/components/trading/financial-chart.tsx`,
 `client-app/src/app/(dashboard)/dashboard/pro/page.tsx:577-595`,
 `client-app/src/store/useTradingStore.ts:545,982,1873,1883,1912,1953,1964`.
+
+## TRACKED FOLLOW-UP - [516] clean-checkout test env dependency (queued)
+
+### What was found
+
+From a pristine checkout (committed tree only, no `core-backend/.env`), the
+core-backend vitest run is **not** self-provisioning: 48 files / 462 tests pass
+but 4 files fail —
+
+- `src/lib/__tests__/envIsolation.test.ts` (4 assertions) asserts against a real
+  service-local `.env`;
+- `src/lib/__tests__/audit.routes.test.ts`,
+  `src/lib/__tests__/flushSafety.live.test.ts`,
+  `src/lib/__tests__/quickfix.test.ts` fail to start because the boot guard
+  refuses without `DATABASE_URL` / a signing key.
+
+`core-backend/.env` is gitignored (only `.env.example` / `.env.prod.example` are
+tracked), so this is **pre-existing** and unrelated to branch
+`part46-47-verification`. In-place (with `.env`) the suite is 52 files / 474 pass.
+Evidence: `docs/verification/STATUS-NOTE-2026-10-13.md` (PART 47 [516]).
+
+### Scope (when scheduled)
+
+- Give the boot-guard suites a self-provisioned env (vitest `setupFiles` or a
+  committed test fixture) so they run without a developer `.env`.
+- Give `envIsolation.test.ts` a temp-dir fixture instead of asserting against the
+  real `.env`.
+- Goal: `npm test` green with zero manual env setup.
+
+### Files
+
+`core-backend/src/lib/__tests__/envIsolation.test.ts`,
+`core-backend/src/lib/__tests__/audit.routes.test.ts`,
+`core-backend/src/lib/__tests__/flushSafety.live.test.ts`,
+`core-backend/src/lib/__tests__/quickfix.test.ts`,
+`core-backend/vitest.config.*`.
