@@ -66,8 +66,10 @@ export const SERVICE_ROOT = path.resolve(__dirname, "..", "..");
 export const SERVICE_NAME = path.basename(SERVICE_ROOT);
 
 /** Names of the files this service is allowed to read, in precedence order. */
-function candidateFiles(): { file: string; exists: boolean }[] {
-  const nodeEnv = process.env.NODE_ENV || "development";
+export function candidateEnvFiles(
+  root: string,
+  nodeEnv: string,
+): { file: string; exists: boolean }[] {
   const names = [
     // Highest priority first. `.env.local` is developer-only and gitignored.
     ".env.local",
@@ -77,9 +79,48 @@ function candidateFiles(): { file: string; exists: boolean }[] {
     ".env",
   ];
   return names.map((n) => {
-    const file = path.join(SERVICE_ROOT, n);
+    const file = path.join(root, n);
     return { file, exists: fs.existsSync(file) };
   });
+}
+
+export interface LoadEnvOptions {
+  /** NODE_ENV used to pick `.env.<NODE_ENV>`; defaults to the target's own. */
+  nodeEnv?: string;
+  /** Where parsed values are written; defaults to `process.env`. */
+  processEnv?: NodeJS.ProcessEnv;
+}
+
+/**
+ * PART 49 [516] — the pure core of the loader, extracted so the env-isolation
+ * invariants can be exercised against an in-memory FIXTURE tree with NO real
+ * `.env` on disk. Reads the candidate files under `root`, highest-priority
+ * first, with `override: false`, so a key already present in `processEnv` (a
+ * real injected variable, or an earlier higher-priority file) always wins.
+ *
+ * @returns the absolute paths of the files actually loaded, in load order.
+ */
+export function loadEnvFromRoot(
+  root: string,
+  opts: LoadEnvOptions = {},
+): string[] {
+  const target = opts.processEnv ?? process.env;
+  const nodeEnv = opts.nodeEnv ?? target.NODE_ENV ?? "development";
+  const loadedFiles: string[] = [];
+  for (const { file, exists } of candidateEnvFiles(root, nodeEnv)) {
+    if (!exists) continue;
+    dotenv.config({
+      path: file,
+      override: false,
+      quiet: true,
+      // dotenv's `processEnv` is typed for a fully-string record; the real
+      // `process.env` allows `undefined`. The loader only ever WRITES absent
+      // keys, so the cast is safe and never introduces an undefined value.
+      processEnv: target as Record<string, string>,
+    });
+    loadedFiles.push(file);
+  }
+  return loadedFiles;
 }
 
 let loaded = false;
@@ -153,12 +194,7 @@ export function loadServiceEnv(): string[] {
 
   warnAboutParentDotenv();
 
-  for (const { file, exists } of candidateFiles()) {
-    if (!exists) continue;
-    // `override: false` is the whole precedence mechanism — see the header.
-    dotenv.config({ path: file, override: false, quiet: true });
-    loadedEnvFiles.push(file);
-  }
+  loadedEnvFiles.push(...loadEnvFromRoot(SERVICE_ROOT));
   return [...loadedEnvFiles];
 }
 

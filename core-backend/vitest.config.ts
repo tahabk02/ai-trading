@@ -4,6 +4,10 @@ export default defineConfig({
   test: {
     include: ["src/lib/__tests__/**/*.test.ts"],
     environment: "node",
+    // PART 49 [516] — hermetic environment: the suite must run with NO `.env`
+    // on disk and no ambient system variables. This setup file injects in-memory
+    // fallback config BEFORE any test module import.
+    setupFiles: ["./vitest.setup.ts"],
     // The unit suite is the explicit "mock/test" posture: it must run without a
     // real deployment secret, so the strict boot guard
     // (`assertRequiredConfig` in src/config/secrets.ts) is opted out here via

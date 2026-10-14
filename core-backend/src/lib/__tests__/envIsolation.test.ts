@@ -12,73 +12,93 @@
  * These tests assert the three properties that make that impossible to
  * reintroduce: no parent leakage, no cwd dependence, and real-environment
  * precedence.
+ *
+ * PART 49 [516] — HERMETIC: this suite no longer requires a real
+ * `core-backend/.env` or repo-root `.env` on disk. It builds its OWN fixture
+ * tree under the OS temp dir and drives the loader's pure core
+ * (`loadEnvFromRoot`) into an in-memory object, so it runs identically in a
+ * clean checkout and on a fully-configured developer machine.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
+import {
+  SERVICE_ROOT,
+  candidateEnvFiles,
+  loadEnvFromRoot,
+  isConfigured,
+  describeEnvSources,
+} from "../../config/env";
 
-/** Keys this suite mutates — the loader rewrites them via dotenv. */
-const TOUCHED = ["DATABASE_URL", "JWT_SECRET", "AI_ENGINE_API_KEY"] as const;
+// ── the hermetic fixture tree ───────────────────────────────────────────────
+// Structure mirrors the real repo: <tmp>/.env  (parent) and
+// <tmp>/core-backend/.env (the service that must win).
+let TMP_ROOT = "";
+let SERVICE_DIR = "";
+let PARENT_FILE = "";
+let SERVICE_FILE = "";
 
-// This file lives at <service>/src/lib/__tests__/ — three levels down.
-const SERVICE_ROOT = path.resolve(__dirname, "../../..");
-const REPO_ROOT = path.resolve(SERVICE_ROOT, "..");
-const PARENT_ENV = path.join(REPO_ROOT, ".env");
+const SERVICE_VALUES = {
+  DATABASE_URL: "postgresql://svc:pw@localhost:5433/service_db",
+  JWT_SECRET: "service-jwt-secret-00000000000000000000000000000000",
+  AI_ENGINE_API_KEY: "service-ai-engine-key-000000000000000000000000000",
+};
 
-/** Read one key from a dotenv file. Returns undefined when absent. */
-function readKey(file: string, key: string): string | undefined {
-  if (!fs.existsSync(file)) return undefined;
-  const re = new RegExp(`^\\s*${key}\\s*=\\s*["']?(.*?)["']?\\s*$`);
-  return fs
-    .readFileSync(file, "utf8")
-    .split(/\r?\n/)
-    .map((l) => l.match(re))
-    .find(Boolean)?.[1];
+const PARENT_VALUES = {
+  DATABASE_URL: "file:./dev.db", // the exact shadowing value from the bug
+  JWT_SECRET: "parent-jwt-secret-111111111111111111111111111111111",
+  AI_ENGINE_API_KEY: "parent-ai-engine-key-1111111111111111111111111111",
+};
+
+function writeEnv(file: string, values: Record<string, string>): void {
+  const body = Object.entries(values)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
+  fs.writeFileSync(file, body + "\n", "utf8");
 }
 
-/** Fresh, un-run module instance so each test gets its own loader state. */
-async function freshEnvModule() {
-  vi.resetModules();
-  return import("../../config/env");
-}
-
-/**
- * The loader mutates `process.env` in place, so every test that calls it must
- * leave the environment exactly as it found it — otherwise a sibling test file
- * observes a half-loaded environment.
- */
-const envSnapshot = new Map<string, string | undefined>();
-beforeEach(() => {
-  for (const k of TOUCHED) envSnapshot.set(k, process.env[k]);
+beforeAll(() => {
+  TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "h516-env-isolation-"));
+  SERVICE_DIR = path.join(TMP_ROOT, "core-backend");
+  fs.mkdirSync(SERVICE_DIR, { recursive: true });
+  PARENT_FILE = path.join(TMP_ROOT, ".env");
+  SERVICE_FILE = path.join(SERVICE_DIR, ".env");
+  writeEnv(PARENT_FILE, PARENT_VALUES);
+  writeEnv(SERVICE_FILE, SERVICE_VALUES);
 });
-afterEach(() => {
-  for (const k of TOUCHED) {
-    const v = envSnapshot.get(k);
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+
+afterAll(() => {
+  fs.rmSync(TMP_ROOT, { recursive: true, force: true });
 });
 
 describe("env isolation: service root resolution", () => {
   it("resolves the service root from the module, not the cwd", () => {
+    // `SERVICE_ROOT` is derived from `__dirname` inside env.ts. Here `__dirname`
+    // is `<service>/src/lib/__tests__`, so three levels up is the service root,
+    // and its basename must be `core-backend` — independent of where the test
+    // process was launched from.
+    expect(SERVICE_ROOT).toBe(path.resolve(__dirname, "../../.."));
     expect(path.basename(SERVICE_ROOT)).toBe("core-backend");
-    expect(fs.existsSync(path.join(SERVICE_ROOT, ".env"))).toBe(true);
+    expect(fs.existsSync(path.join(SERVICE_ROOT, "src", "config", "env.ts"))).toBe(
+      true,
+    );
   });
 
-  it("loads service-local files only, and never the repository-root .env", async () => {
-    const { SERVICE_ROOT: root, loadServiceEnv } = await freshEnvModule();
+  it("loads service-local files only, and never the repository-root .env", () => {
+    const scratch: NodeJS.ProcessEnv = {};
+    const loaded = loadEnvFromRoot(SERVICE_DIR, { processEnv: scratch });
 
-    // The parent file genuinely exists — that is what made the original bug
-    // dangerous rather than theoretical.
-    expect(fs.existsSync(PARENT_ENV)).toBe(true);
+    // The parent file genuinely exists in the fixture — that is what made the
+    // original bug dangerous rather than theoretical.
+    expect(fs.existsSync(PARENT_FILE)).toBe(true);
 
-    const loaded = loadServiceEnv();
     expect(loaded.length).toBeGreaterThan(0);
-    expect(loaded).not.toContain(PARENT_ENV);
+    expect(loaded).not.toContain(PARENT_FILE);
 
     for (const f of loaded) {
-      const rel = path.relative(root, f);
+      const rel = path.relative(SERVICE_DIR, f);
       // A leading ".." would mean we read a parent's file.
       expect(rel.startsWith("..")).toBe(false);
       expect(path.isAbsolute(rel)).toBe(false);
@@ -86,88 +106,76 @@ describe("env isolation: service root resolution", () => {
     }
   });
 
-  it("is idempotent", async () => {
-    const { loadServiceEnv } = await freshEnvModule();
-    const first = loadServiceEnv();
-    expect(loadServiceEnv()).toEqual(first);
+  it("is idempotent", () => {
+    const scratch: NodeJS.ProcessEnv = {};
+    const first = loadEnvFromRoot(SERVICE_DIR, { processEnv: scratch });
+    const second = loadEnvFromRoot(SERVICE_DIR, { processEnv: scratch });
+    expect(second).toEqual(first);
+    // override:false — a second load never rewrites the already-set values.
+    expect(scratch.DATABASE_URL).toBe(SERVICE_VALUES.DATABASE_URL);
   });
 });
 
 describe("env isolation: the parent cannot override service config", () => {
-  it("takes DATABASE_URL from core-backend, not the root .env", async () => {
-    const serviceValue = readKey(path.join(SERVICE_ROOT, ".env"), "DATABASE_URL");
-    const parentValue = readKey(PARENT_ENV, "DATABASE_URL");
-
+  it("takes DATABASE_URL from core-backend, not the root .env", () => {
     // Guard the guard: if the fixtures change, the test must not pass vacuously.
-    expect(parentValue).toBeTruthy();
-    expect(serviceValue).toBeTruthy();
-    expect(parentValue).not.toBe(serviceValue);
-    expect(parentValue).toMatch(/^file:/);
+    expect(PARENT_VALUES.DATABASE_URL).toMatch(/^file:/);
+    expect(SERVICE_VALUES.DATABASE_URL).not.toBe(PARENT_VALUES.DATABASE_URL);
 
-    vi.resetModules();
-    const { loadServiceEnv } = await import("../../config/env");
-    for (const k of TOUCHED) delete process.env[k];
-    loadServiceEnv();
+    const scratch: NodeJS.ProcessEnv = {};
+    loadEnvFromRoot(SERVICE_DIR, { processEnv: scratch });
 
-    expect(process.env.DATABASE_URL).toBe(serviceValue);
-    expect(process.env.DATABASE_URL).not.toBe(parentValue);
-    expect(process.env.DATABASE_URL).toMatch(/^postgres(ql)?:\/\//i);
+    expect(scratch.DATABASE_URL).toBe(SERVICE_VALUES.DATABASE_URL);
+    expect(scratch.DATABASE_URL).not.toBe(PARENT_VALUES.DATABASE_URL);
+    expect(scratch.DATABASE_URL).toMatch(/^postgres(ql)?:\/\//i);
   });
 
-  it("never lets the parent's JWT_SECRET or AI_ENGINE_API_KEY through", async () => {
-    for (const key of ["JWT_SECRET", "AI_ENGINE_API_KEY"]) {
-      const parent = readKey(PARENT_ENV, key);
-      const service = readKey(path.join(SERVICE_ROOT, ".env"), key);
-      if (!parent || !service || parent === service) continue;
-
-      vi.resetModules();
-      delete process.env[key];
-      const { loadServiceEnv } = await import("../../config/env");
-      loadServiceEnv();
-      expect(process.env[key]).toBe(service);
-      expect(process.env[key]).not.toBe(parent);    }
+  it("never lets the parent's JWT_SECRET or AI_ENGINE_API_KEY through", () => {
+    for (const key of ["JWT_SECRET", "AI_ENGINE_API_KEY"] as const) {
+      const scratch: NodeJS.ProcessEnv = {};
+      loadEnvFromRoot(SERVICE_DIR, { processEnv: scratch });
+      expect(scratch[key]).toBe(SERVICE_VALUES[key]);
+      expect(scratch[key]).not.toBe(PARENT_VALUES[key]);
+    }
   });
 });
 
 describe("env isolation: real environment wins over files", () => {
-  it("does not overwrite an injected value", async () => {
+  it("does not overwrite an injected value", () => {
     const injected = "postgresql://injected:pw@db.internal:5432/prod";
-    process.env.DATABASE_URL = injected;
+    const scratch: NodeJS.ProcessEnv = { DATABASE_URL: injected };
 
-    vi.resetModules();
-    const { loadServiceEnv } = await import("../../config/env");
-    loadServiceEnv();
+    loadEnvFromRoot(SERVICE_DIR, { processEnv: scratch });
 
     // This is what makes Docker/compose/CI authoritative.
-    expect(process.env.DATABASE_URL).toBe(injected);
+    expect(scratch.DATABASE_URL).toBe(injected);
   });
 });
 
 describe("env isolation: cwd independence", () => {
   /**
    * The original defect was invisible from one directory and fatal from
-   * another, so the loader must not consult `process.cwd()` at all. Moving the
-   * process and re-importing proves that directly, in-process, without paying
-   * the several-hundred-ms cost of bundling a child entrypoint (which starved
-   * the slower tests in this suite of CPU and made them exceed their timeout).
+   * another, so the loader must not consult `process.cwd()` at all. Loading the
+   * same fixture from two different working directories must produce identical
+   * results.
    */
-  it("resolves identically after the working directory changes", async () => {
-    const before = await freshEnvModule();
-    const rootBefore = before.SERVICE_ROOT;
-    const filesBefore = before.loadServiceEnv();
+  it("resolves identically after the working directory changes", () => {
+    const rootBefore = SERVICE_ROOT;
+    const filesBefore = loadEnvFromRoot(SERVICE_DIR, {
+      processEnv: {} as NodeJS.ProcessEnv,
+    });
 
     const originalCwd = process.cwd();
     try {
-      process.chdir(REPO_ROOT);
-      expect(process.cwd()).not.toBe(SERVICE_ROOT);
+      process.chdir(TMP_ROOT);
+      expect(process.cwd()).not.toBe(SERVICE_DIR);
 
-      vi.resetModules();
-      const after = await import("../../config/env");
-      expect(after.SERVICE_ROOT).toBe(rootBefore);
-      expect(after.loadServiceEnv()).toEqual(filesBefore);
-      expect(after.loadedEnvFiles).not.toContain(PARENT_ENV);
-      // The value still comes from the service, not the cwd-adjacent root.
-      expect(process.env.DATABASE_URL).toMatch(/^postgres(ql)?:\/\//i);
+      expect(SERVICE_ROOT).toBe(rootBefore);
+      const after = loadEnvFromRoot(SERVICE_DIR, {
+        processEnv: {} as NodeJS.ProcessEnv,
+      });
+      expect(after).toEqual(filesBefore);
+      expect(after).not.toContain(PARENT_FILE);
     } finally {
       process.chdir(originalCwd);
     }
@@ -185,22 +193,41 @@ describe("env isolation: cwd independence", () => {
     expect(code).not.toMatch(/process\.cwd\(\)/);
     expect(code).toMatch(/__dirname/);
   });
+
+  it("candidate file order is highest-priority-first and root-scoped", () => {
+    const files = candidateEnvFiles(SERVICE_DIR, "test");
+    expect(files.map((f) => path.basename(f.file))).toEqual([
+      ".env.local",
+      ".env.test",
+      ".env",
+    ]);
+    for (const f of files) {
+      expect(path.dirname(f.file)).toBe(SERVICE_DIR);
+    }
+  });
 });
 
 describe("isConfigured", () => {
-  it("rejects empty, placeholder, and SQLite-fallback values", async () => {
-    const { isConfigured } = await freshEnvModule();
+  it("rejects empty, placeholder, and SQLite-fallback values", () => {
     for (const v of [
-      undefined, "", "   ", "change-me", "CHANGE_ME_IN_PRODUCTION",
-      "your-secret-here", "placeholder", "example", "dummy", "xxx", "todo",
+      undefined,
+      "",
+      "   ",
+      "change-me",
+      "CHANGE_ME_IN_PRODUCTION",
+      "your-secret-here",
+      "placeholder",
+      "example",
+      "dummy",
+      "xxx",
+      "todo",
       "file:./dev.db",
     ]) {
       expect(isConfigured(v), `should reject ${JSON.stringify(v)}`).toBe(false);
     }
   });
 
-  it("accepts real values", async () => {
-    const { isConfigured } = await freshEnvModule();
+  it("accepts real values", () => {
     for (const v of [
       "postgresql://user:pw@localhost:5433/db",
       "postgres://localhost/db",
@@ -215,8 +242,7 @@ describe("isConfigured", () => {
 });
 
 describe("describeEnvSources", () => {
-  it("names files without revealing values or credentials", async () => {
-    const { describeEnvSources } = await freshEnvModule();
+  it("names files without revealing values or credentials", () => {
     const s = describeEnvSources();
     expect(s).not.toMatch(/=/);
     expect(s).not.toMatch(/:\/\/[^/\s]*:[^@\s]*@/);
