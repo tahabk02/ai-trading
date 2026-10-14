@@ -39,6 +39,7 @@ import { resolve, join } from "path";
 import WebSocket from "ws";
 import { logger } from "../utils/logger";
 import { secrets } from "../config/secrets";
+import { resolvePoSsid, applySsidToEnv } from "../config/poSsid";
 import { tickIngestionService } from "./tickIngestion.service";
 import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { forexDataService } from "./forexData.service";
@@ -127,6 +128,13 @@ function toFiniteNumber(value: unknown): number | null {
 /** Circuit breaker states: CLOSED = normal, OPEN = failing, HALF_OPEN = probing */
 type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
+/**
+ * PART 50 [HEADLESS-PO-FEED] — a genuine base/quote pair (or nothing). PO's
+ * authoritative asset dump also carries non-forex junk (indices, equities,
+ * penny names); the autonomous arm must only ever subscribe real pairs.
+ */
+const PAIR_RE = /^[A-Z0-9]{2,5}\/[A-Z]{2,5}$/;
+
 export class PocketOptionBridgeService {
   private static instance: PocketOptionBridgeService;
   private ws: WebSocket | null = null;
@@ -153,6 +161,17 @@ export class PocketOptionBridgeService {
    *  Re-pushed on every relay (re)connect so the handshake survives transport
    *  drops without waiting for the next browser subscribe event. */
   private poArmedByClient: Set<string> = new Set();
+
+  /**
+   * PART 50 [HEADLESS-PO-FEED] — symbols the SERVER owns for the whole process
+   * lifetime, armed autonomously from the bridge's authoritative asset list
+   * (the PO-listed universe) the moment its `ready` frame lands. Unlike
+   * `poArmedByClient`, these are NEVER released by a client unsubscribe or
+   * disconnect, so the live tape and its server-aggregated candles keep flowing
+   * with ZERO browsers attached — the headless-feed guarantee that the chart
+   * cannot stall behind a closed browser. Re-pushed on every relay (re)connect.
+   */
+  private poAutonomous: Set<string> = new Set();
 
   /** True only once the relay has broadcast its `ready` frame — meaning the PO
    *  client is authenticated AND the authoritative asset list is loaded. Until
@@ -238,15 +257,72 @@ export class PocketOptionBridgeService {
       );
       return;
     }
+    // Already server-owned (autonomously armed) — no client staging needed; the
+    // stream is already live and browser-independent.
+    if (this.poAutonomous.has(normalized)) return;
     this.poArmedByClient.add(normalized);
     // Gate on the relay's `ready` frame (assets initialised) — do NOT race
     // Python's startup: flushStagedSubscriptions only sends once assetsReady.
     this.flushStagedSubscriptions();
   }
 
+  /**
+   * PART 50 [HEADLESS-PO-FEED] — arm SERVER-OWNED streams for the given symbols.
+   *
+   * Called with the bridge's authoritative PO-listed asset universe the moment
+   * its `ready` frame arrives, BEFORE and INDEPENDENT of any browser. Every
+   * symbol armed here streams for the whole process lifetime and is never
+   * released by `requestSymbolUnsubscription`, so the feed and the
+   * server-aggregated candles keep flowing with zero clients attached. Only
+   * genuine base/quote pairs are armed (PO's asset dump carries non-forex junk).
+   *
+   * Staging only — the readiness handshake sends the frames via
+   * `flushStagedSubscriptions()`, exactly like a client subscribe. Idempotent.
+   *
+   * @returns the number of NEWLY armed symbols.
+   */
+  public armAutonomousSubscriptions(symbols: unknown[]): number {
+    if (!Array.isArray(symbols)) return 0;
+    let armed = 0;
+    for (const raw of symbols) {
+      const candidate =
+        typeof raw === "string"
+          ? raw
+          : (raw as { symbol?: unknown } | null)?.symbol;
+      if (typeof candidate !== "string" || !candidate.trim()) continue;
+      const normalized = forexDataService.toCanonicalSymbol(candidate);
+      if (!normalized || !PAIR_RE.test(normalized)) continue;
+      if (!this.poAutonomous.has(normalized)) armed += 1;
+      this.poAutonomous.add(normalized);
+    }
+    if (armed > 0) {
+      logger.info(
+        "[PO Bridge] Autonomous (server-owned) subscriptions armed — feed runs headless",
+        { newlyArmed: armed, total: this.poAutonomous.size },
+      );
+    }
+    return armed;
+  }
+
+  /** Snapshot of the server-owned (autonomously armed) symbol set. */
+  public getAutonomousSymbols(): string[] {
+    return [...this.poAutonomous];
+  }
+
   public requestSymbolUnsubscription(symbol: string): void {
     const normalized = forexDataService.toCanonicalSymbol(symbol || "");
     if (!normalized) return;
+    // PART 50 [HEADLESS-PO-FEED] — a SERVER-OWNED stream is never released by a
+    // browser leaving. Only genuinely client-owned staging is torn down, so the
+    // live tape (and its server-aggregated candles) survives every client
+    // disconnect — the "PO OFFLINE / frozen chart when no browser is open" fix.
+    if (this.poAutonomous.has(normalized)) {
+      logger.debug(
+        "[PO Bridge] Ignoring client unsubscribe for server-owned symbol",
+        { symbol: normalized },
+      );
+      return;
+    }
     this.poArmedByClient.delete(normalized);
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(
@@ -256,10 +332,14 @@ export class PocketOptionBridgeService {
 
   /** Push every staged symbol to the relay — but ONLY once the bridge is ready
    *  (assets loaded), so an early subscribe can never hit the "Uninitialized"
-   *  active_assets() error on the Python side. */
+   *  active_assets() error on the Python side. Sends BOTH the client-requested
+   *  and the server-owned (autonomous) sets. */
   private flushStagedSubscriptions(): void {
     if (!this.assetsReady) return;
     for (const symbol of this.poArmedByClient) {
+      this.sendSubscribeFrame(symbol);
+    }
+    for (const symbol of this.poAutonomous) {
       this.sendSubscribeFrame(symbol);
     }
   }
@@ -455,6 +535,20 @@ export class PocketOptionBridgeService {
       module: BRIDGE_PYTHON_MODULE,
     });
 
+    // PART 50 [HEADLESS-PO-FEED] — resolve the SSID from the CENTRAL sources so
+    // the operator never has to copy it into core-backend/.env as well.
+    // Precedence: real process env → pocket-bridge/.env → captured
+    // po_session.json. Never log the value, only the source.
+    const resolvedSsid = resolvePoSsid({
+      envValue: secrets.POCKET_OPTION_SSID,
+      bridgeEnvPath: join(bridgeDir, ".env"),
+      sessionPath: join(bridgeDir, "session", "po_session.json"),
+    });
+    logger.info("[PO Bridge] SSID resolved from central config", {
+      source: resolvedSsid.source,
+      present: resolvedSsid.value.length > 0,
+    });
+
     try {
       this.bridgeProcess = spawn(
         this.bridgePythonPath,
@@ -462,24 +556,23 @@ export class PocketOptionBridgeService {
         {
           cwd: bridgeDir,
           stdio: ["ignore", "pipe", "pipe"],
-          env: {
-            // PART 43.6 [480]: the bridge gets the parent env with every PO
-            // credential var STRIPPED. Only refresh_ssid.py receives the
-            // credential — a process that plays no part in login must never be
-            // able to read an email/password from its environment.
-            ...poAuthManager.withoutPoCredentials(),
-            PYTHONUNBUFFERED: "1",
-            // Force the spawned bridge to bind the EXACT relay socket the WS
-            // client connects to — otherwise a user override of
-            // POCKET_BRIDGE_HOST/PORT would silently desync the two sides and
-            // re-trigger ECONNREFUSED against a bridge bound to the default.
-            POCKET_BRIDGE_HOST: secrets.POCKET_BRIDGE_HOST,
-            POCKET_BRIDGE_PORT: String(secrets.POCKET_BRIDGE_PORT),
-            // Forward the live session cookie so a bridge spawned by the
-            // backend goes live immediately (not stuck in awaiting_ssid) when
-            // the SSID is configured at the backend layer.
-            POCKET_OPTION_SSID: secrets.POCKET_OPTION_SSID || "",
-          },
+          env: applySsidToEnv(
+            {
+              // PART 43.6 [480]: the bridge gets the parent env with every PO
+              // credential var STRIPPED. Only refresh_ssid.py receives the
+              // credential — a process that plays no part in login must never be
+              // able to read an email/password from its environment.
+              ...poAuthManager.withoutPoCredentials(),
+              PYTHONUNBUFFERED: "1",
+              // Force the spawned bridge to bind the EXACT relay socket the WS
+              // client connects to — otherwise a user override of
+              // POCKET_BRIDGE_HOST/PORT would silently desync the two sides and
+              // re-trigger ECONNREFUSED against a bridge bound to the default.
+              POCKET_BRIDGE_HOST: secrets.POCKET_BRIDGE_HOST,
+              POCKET_BRIDGE_PORT: String(secrets.POCKET_BRIDGE_PORT),
+            },
+            resolvedSsid,
+          ),
         },
       );
     } catch (err) {
@@ -957,8 +1050,15 @@ export class PocketOptionBridgeService {
       logger.info(
         "[PO Bridge] Relay ready (assets initialised) — flushing staged subscribes",
       );
-      this.flushStagedSubscriptions();
     }
+    // PART 50 [HEADLESS-PO-FEED] — arm the FULL PO-listed universe as
+    // SERVER-OWNED streams before any browser connects, so the feed never
+    // depends on a client session. Idempotent: a re-`ready` (reconnect) arms
+    // only what is not already staged.
+    if (Array.isArray(payload?.assets) && payload.assets.length > 0) {
+      this.armAutonomousSubscriptions(payload.assets);
+    }
+    this.flushStagedSubscriptions();
   }
 
   private handleStatus(payload: { status?: string; error?: string }): void {

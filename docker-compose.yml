@@ -113,6 +113,10 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (repo-root .env or environment)}
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: 8788
+      # PART 50 [HEADLESS-PO-FEED] — the bridge is its OWN container (below), so
+      # the backend must NOT auto-spawn a second Python bridge inside itself.
+      # Host-run `npm run dev` (no .env override) keeps the default "true".
+      POCKET_BRIDGE_AUTO_SPAWN: "false"
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}

@@ -263,6 +263,11 @@ services:
       # this container IS the backend itself, so the bridge was never reached.
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: "8788"
+      # PART 50 [HEADLESS-PO-FEED] — the bridge is its OWN container here, so the
+      # backend must NOT try to auto-spawn a second Python bridge inside itself
+      # (it has no pocket-bridge module/interpreter, producing only spawn-error
+      # noise). Default would otherwise be "true".
+      POCKET_BRIDGE_AUTO_SPAWN: "false"
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
