@@ -26,24 +26,36 @@ logger = logging.getLogger(__name__)
 # credentials.
 AI_ENGINE_ROOT = Path(__file__).resolve().parents[2]
 
-def _ai_engine_env_files() -> tuple[Path, ...]:
-    """
-    ai-engine-local env files in PRECEDENCE ORDER (highest first).
+def _current_environment() -> str:
+    return os.environ.get("ENVIRONMENT") or os.environ.get("NODE_ENV") or "development"
 
-    1. `.env.local`      gitignored developer override
-    2. `.env.<ENVIRONMENT>`  per-environment, only when it exists
-    3. `.env`            the base file
+
+def env_files_for_root(root: Path, environment: str) -> tuple[Path, ...]:
+    """
+    ai-engine-local env files under `root`, in PRECEDENCE ORDER (highest first).
+
+    1. `.env.local`          gitignored developer override
+    2. `.env.<environment>`  per-environment, only when it exists
+    3. `.env`                the base file
+
+    PART 49 [516] — extracted as a PURE function of (root, environment) so the
+    env-isolation invariants can be exercised against an in-memory FIXTURE tree
+    (OS temp dir) with NO real `.env` on disk. `AI_ENGINE_ROOT_ENV` is simply
+    this applied to the module-derived root.
 
     pydantic-settings merges the tuple left-to-right with LATER entries losing,
     so the highest-priority file is placed first. A real environment variable
     always beats every file, which is what makes Docker/compose/CI injection
     authoritative.
     """
-    environment = os.environ.get("ENVIRONMENT") or os.environ.get("NODE_ENV") or "development"
-    candidates = [AI_ENGINE_ROOT / ".env.local", AI_ENGINE_ROOT / f".env.{environment}", AI_ENGINE_ROOT / ".env"]
+    candidates = [
+        root / ".env.local",
+        root / f".env.{environment}",
+        root / ".env",
+    ]
     return tuple(p for p in candidates if p.is_file())
 
-AI_ENGINE_ROOT_ENV = _ai_engine_env_files()
+AI_ENGINE_ROOT_ENV = env_files_for_root(AI_ENGINE_ROOT, _current_environment())
 
 _PARENT_DOTENV = AI_ENGINE_ROOT.parent / ".env"
 if _PARENT_DOTENV.is_file() and os.environ.get("AI_ENGINE_ALLOW_PARENT_DOTENV") != "true":

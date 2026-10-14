@@ -13,15 +13,16 @@ real environment always wins.
 """
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 AI_ENGINE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = AI_ENGINE_ROOT.parent
-PARENT_DOTENV = REPO_ROOT / ".env"
 CONFIG_PY = AI_ENGINE_ROOT / "app" / "core" / "config.py"
 
 
@@ -34,20 +35,6 @@ def strip_comments(source: str) -> str:
             continue
         lines.append(line.split("  #")[0])
     return "\n".join(lines)
-
-
-def read_key(file: Path, key: str):
-    """Read one key from a dotenv file. Returns None when absent."""
-    if not file.is_file():
-        return None
-    import re
-
-    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*[\"']?(.*?)[\"']?\s*$")
-    for line in file.read_text(encoding="utf-8", errors="replace").splitlines():
-        m = pattern.match(line)
-        if m:
-            return m.group(1)
-    return None
 
 
 def run_config_probe(cwd: Path) -> dict:
@@ -101,24 +88,57 @@ class TestEnvFileIsolation:
         assert not (from_repo["databaseUrl"] or "").startswith("file:")
 
     def test_never_loads_repository_root_dotenv(self):
-        result = run_config_probe(REPO_ROOT)
-        assert ".env" in result["files"]
-        for name in result["files"]:
-            assert (AI_ENGINE_ROOT / name).resolve().parent == AI_ENGINE_ROOT.resolve()
+        """PART 49 [516] — HERMETIC: uses an in-memory fixture tree, so the test
+        is meaningful with NO real `.env` on disk (a clean checkout).
+
+        Only files inside the SERVICE root may ever be returned; the repo-root
+        `.env` must never appear.
+        """
+        from app.core.config import env_files_for_root, AI_ENGINE_ROOT, AI_ENGINE_ROOT_ENV
+
+        tmp = Path(tempfile.mkdtemp(prefix="h516-ai-env-"))
+        try:
+            service = tmp / "ai-engine"
+            service.mkdir(parents=True, exist_ok=True)
+            # The parent file genuinely exists — that is what made the original
+            # bug dangerous rather than theoretical.
+            (tmp / ".env").write_text("AI_ENGINE_API_KEY=parent-key\n", encoding="utf-8")
+            (service / ".env").write_text("AI_ENGINE_API_KEY=service-key\n", encoding="utf-8")
+
+            files = env_files_for_root(service, "test")
+            assert ".env" in {p.name for p in files}
+            for p in files:
+                assert p.resolve().parent == service.resolve()
+                assert p.resolve() != (tmp / ".env").resolve()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # The module's own list is root-scoped too (vacuously true when empty).
+        for p in AI_ENGINE_ROOT_ENV:
+            assert p.resolve().parent == AI_ENGINE_ROOT.resolve()
 
     def test_parent_dotenv_is_not_consulted(self):
-        """The parent file exists but must not influence the engine's config."""
-        assert PARENT_DOTENV.is_file(), (
-            "this regression test is only meaningful while the repo-root .env exists"
-        )
-        result = run_config_probe(AI_ENGINE_ROOT)
-        for key in ("AI_ENGINE_API_KEY", "JWT_SECRET", "DATABASE_URL"):
-            parent = read_key(PARENT_DOTENV, key)
-            own = read_key(AI_ENGINE_ROOT / ".env", key)
-            if parent and own and parent != own:
-                assert result.get(
-                    "apiKey" if key == "AI_ENGINE_API_KEY" else "jwt" if key == "JWT_SECRET" else "databaseUrl"
-                ) == own, f"{key} came from the parent .env"
+        """PART 49 [516] — HERMETIC: a parent `.env` exists in the fixture but
+        must never be a candidate for the service root."""
+        from app.core.config import env_files_for_root
+
+        tmp = Path(tempfile.mkdtemp(prefix="h516-ai-env-"))
+        try:
+            service = tmp / "ai-engine"
+            service.mkdir(parents=True, exist_ok=True)
+            (tmp / ".env").write_text(
+                "AI_ENGINE_API_KEY=parent-key\nJWT_SECRET=parent\nDATABASE_URL=file:./dev.db\n",
+                encoding="utf-8",
+            )
+            (service / ".env").write_text("AI_ENGINE_API_KEY=service-key\n", encoding="utf-8")
+            assert (tmp / ".env").is_file()
+
+            files = env_files_for_root(service, "test")
+            assert (tmp / ".env").resolve() not in {p.resolve() for p in files}
+            for p in files:
+                assert p.resolve().parent == service.resolve()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_real_environment_wins_over_files(self):
         injected = "injected-from-the-real-environment"
