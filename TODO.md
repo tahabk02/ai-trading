@@ -1061,7 +1061,15 @@ a locally-derived clock.
 `client-app/src/app/(dashboard)/dashboard/pro/page.tsx:577-595`,
 `client-app/src/store/useTradingStore.ts:545,982,1873,1883,1912,1953,1964`.
 
-## TRACKED FOLLOW-UP - [516] clean-checkout test env dependency (queued)
+## TRACKED FOLLOW-UP - [516] clean-checkout test env dependency (RESOLVED PART 49)
+
+> **RESOLVED (PART 49).** Both halves are hermetic now: core-backend
+> (`4b46ef8`, `vitest.setup.ts` HERMETIC_FALLBACKS + `envIsolation.test.ts`
+> rewritten to an OS-temp fixture tree) and ai-engine (`a76d276`,
+> `env_files_for_root` refactor + hermetic `test_env_isolation.py`). Verified
+> from a fresh clone with NO `.env`: core-backend 475/52, client-app 827/62,
+> ai-engine 575 passed / 1 xfailed / 0 failed. Historical write-up retained
+> below for the record.
 
 ### What was found
 
@@ -1096,3 +1104,187 @@ Evidence: `docs/verification/STATUS-NOTE-2026-10-13.md` (PART 47 [516]).
 `core-backend/src/lib/__tests__/flushSafety.live.test.ts`,
 `core-backend/src/lib/__tests__/quickfix.test.ts`,
 `core-backend/vitest.config.*`.
+
+## PART 50 [HEADLESS-PO-FEED] - server-owned PO subscriptions + prod single-bridge (DONE)
+
+### What was found
+
+The headless PO feed provider + server-side candle engine already exist and are
+correct (Python `pocket-bridge` static readers; Node `realtimeCandleAggregator`
+with zero-client accumulation; PO OFFLINE is data-driven, fail-closed honesty).
+Two real gaps were hardening targets:
+
+1. **Prod double-spawn.** `POCKET_BRIDGE_AUTO_SPAWN` was unset in both compose
+   files while `pocket-bridge` is its OWN container there, so the backend also
+   tried to spawn a second Python bridge inside itself (spawn-error noise).
+   Default at `core-backend/src/config/secrets.ts:341` is `"true"`.
+2. **Client-coupled arming.** The backend staged PO subscribes (`poArmedByClient`)
+   ONLY from browser `subscribe` events, and a client `unsubscribe`/disconnect
+   deleted them — so with no browser open the live tape could stall ("PO OFFLINE /
+   frozen chart").
+
+### What was done
+
+- `docker-compose.prod.yml` + `docker-compose.yml`: set
+  `POCKET_BRIDGE_AUTO_SPAWN: "false"` on core-backend (host-run `npm run dev`
+  keeps the `"true"` default).
+- `core-backend/src/services/pocketOptionBridge.service.ts`: new SERVER-OWNED
+  `poAutonomous` set + `armAutonomousSubscriptions(symbols)` (canonicalises,
+  keeps only genuine base/quote pairs via `PAIR_RE`, idempotent) + public
+  `getAutonomousSymbols()`. `handleReady` now arms the FULL PO-listed universe
+  from the relay's authoritative `ready` assets BEFORE any browser connects.
+  `flushStagedSubscriptions` sends both the client-requested AND autonomous sets.
+  `requestSymbolUnsubscription` NEVER releases a server-owned symbol (client
+  disconnect cannot stall the tape); `requestSymbolSubscription` no-ops for an
+  already server-owned symbol.
+- `core-backend/src/lib/__tests__/poAutonomousArming.test.ts` (7 tests): pair
+  filtering/canonicalisation, idempotence, non-array tolerance, unsubscribe
+  resilience, ready-handshake arming, reconnect idempotence.
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npx vitest run` → **53 files / 482 passed** (was 475; +7 new).
+- New file alone → 7/7.
+
+### Files
+
+`core-backend/src/services/pocketOptionBridge.service.ts`,
+`core-backend/src/lib/__tests__/poAutonomousArming.test.ts`,
+`docker-compose.yml`, `docker-compose.prod.yml`.
+
+### Not done (out of chosen scope)
+
+- Optional: drive the Python static symbol set from `symbolRegistry` instead of
+  `BridgeSettings.symbols` (`pocket-bridge/pocket_bridge/config.py:716-730`).
+  The Node autonomous arm already covers the PO-listed universe, so the Python
+  static set is complementary, not a gap.
+
+## PART 50 [HEADLESS-PO-FEED] - central SSID auto-resolve + no .env duplication (DONE)
+
+### What was found
+
+The SSID lives canonically in the BRIDGE's own config (`pocket-bridge/.env`) and
+in the captured `po_session.json`. Each service reads ONLY its own `.env`
+(`config/env.ts`; the pocket-bridge loader ignores a parent/root `.env`), so the
+SSID had to be hand-copied into `core-backend/.env` as well just so the backend
+could forward it. Worse, the auto-spawn passed
+`POCKET_OPTION_SSID: secrets.POCKET_OPTION_SSID || ""` — an EMPTY STRING is a
+PRESENT key, and `python-dotenv` `override=False` never fills an already-present
+key, so an unset backend value actively SHADOWED `pocket-bridge/.env` and left
+the bridge stuck `awaiting_ssid` despite a valid SSID sitting on disk.
+
+Proven offline: with `os.environ['POCKET_OPTION_SSID']=''`,
+`load_settings().has_ssid` is **False** (len 0); with the key absent it is
+**True** (len 131).
+
+### What was done
+
+- NEW `core-backend/src/config/poSsid.ts` — CENTRAL resolver
+  `resolvePoSsid({envValue, bridgeEnvPath, sessionPath})` with precedence
+  `env → pocket-bridge/.env → po_session.json` (plus `readSsidFromEnvFile`,
+  `readSsidFromSessionFile`, `unwrapQuotes`, and `applySsidToEnv` which DELETES
+  the child-env key when the resolution is empty — the shadowing fix). Never logs
+  the value, only the source.
+- `core-backend/src/services/pocketOptionBridge.service.ts` `spawnBridgeProcess`:
+  resolves the SSID from the central sources and applies it to the child env via
+  `applySsidToEnv`, so a backend with an UNSET `POCKET_OPTION_SSID` still spawns a
+  live bridge, and an empty value can no longer shadow `pocket-bridge/.env`.
+- NEW `core-backend/src/lib/__tests__/poSsidResolution.test.ts` (12 tests,
+  hermetic OS-temp fixture tree): env precedence, .env read/unwrap, session-cookie
+  read, encrypted/missing handling, and the DELETE-on-empty shadowing fix.
+- `core-backend/.env.example`: documented that `POCKET_OPTION_SSID` may stay
+  empty (backend auto-resolves from the central sources) + the
+  `POCKET_BRIDGE_AUTO_SPAWN=false` container note.
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npx vitest run` → **54 files / 494 passed** (was 53/482; +1 file/+12).
+- Offline E2E: with NO `POCKET_OPTION_SSID` in the process env, the real resolver
+  returned `source=bridge_env, present=true, length=131`; the bridge's own
+  `load_settings().has_ssid` is True from `pocket-bridge/.env` with the env key
+  absent.
+- LIVE check (restart the real bridge, confirm quotes start streaming): NOT
+  performed here — no live PO session / network driver in this environment →
+  OK-withheld + reason, never a pass.
+
+### Files
+
+`core-backend/src/config/poSsid.ts`,
+`core-backend/src/services/pocketOptionBridge.service.ts`,
+`core-backend/src/lib/__tests__/poSsidResolution.test.ts`,
+`core-backend/.env.example`.
+
+## PART 51 [HEADLESS-PO-FEED] - optional proxy tunnel + browser-fingerprint headers (DONE)
+
+### What was found
+
+- `General error: Connection initialization timed out` is a TRANSPORT failure: a
+  blocked / geo-sharded regional handshake exhausting the budget, NOT a dead SSID.
+  The bridge already classifies it as `connection_error` (retrying) and rotates
+  regional endpoints, but it had no way to route the socket through a proxy and
+  never presented the browser fingerprint the SSID was minted with.
+- The SDK (`BinaryOptionsToolsV2==0.2.14`) `Config` ALREADY exposes native knobs
+  — `proxy`, `user_agent`, `origin`, `sec_websocket_extensions`,
+  `tls_cipher_suites`, `tls_alpn` — but the bridge's `_import_client` only ever
+  set the timeouts (`connection_initialization_timeout_secs` / `timeout_secs` /
+  `reconnect_time`) + `urls`. The capabilities were there; nothing wired them.
+- The OFFLINE → LIVE transition requested in (3) ALREADY exists and is
+  data-driven — no code change was needed, only verification: the relay's
+  `open` / `status: connected` / `heartbeat` frames set the backend bridge to
+  `ONLINE`, `tickIngestionService.isPocketOptionActivelyLive()` then treats PO
+  ticks as the authoring feed, and `quoteProvenance.isPoOfflineOtc()` clears the
+  instant a genuine `pocket_option*` tick flows (client cards re-label to
+  "PO LIVE"). A browser tab was never part of this path.
+
+### What was done
+
+- `pocket-bridge/pocket_bridge/config.py` — new `BridgeSettings` fields `proxy`
+  (`PO_BRIDGE_PROXY`), `proxy_list` (`PO_BRIDGE_PROXY_LIST`), `user_agent`
+  (`PO_BRIDGE_USER_AGENT`), `origin` (`PO_BRIDGE_ORIGIN`, default
+  `https://pocketoption.com`), `sec_websocket_extensions`, `tls_cipher_suites`,
+  `tls_alpn`; helpers `proxies`, `proxy_for_rotation(rotation)`, `masked_proxy`;
+  module helpers `_split_env_list`, `mask_proxy` (strips `user:pass@`),
+  `proxy_warning` (reports a bad/missing scheme), `PROXY_SCHEMES`.
+- `pocket-bridge/pocket_bridge/bridge.py` `_import_client` — injects the proxy
+  (rotated by `_endpoint_rotation`) and the fingerprint headers into the SDK
+  config: `user_agent` = env override else the CAPTURED session's own `userAgent`
+  (the tab that minted the SSID), `origin` default PO web origin, plus optional
+  ws-extensions / TLS knobs; emits a credential-free `handshake_fingerprint` log
+  line (`proxy` shown masked). Absent knobs are NEVER sent (an empty `proxy`
+  string would make the SDK tunnel through "").
+- `pocket-bridge/pocket_bridge/bridge.py` `_ensure_connected` — the rotation
+  counter now advances on a multi-entry PROXY pool too (`len(proxies) > 1`), not
+  only multi-URL, so a blocked proxy is bypassed on the next attempt.
+- `pocket-bridge/.env.example` — documented `PO_BRIDGE_PROXY` /
+  `PO_BRIDGE_PROXY_LIST` + the browser-fingerprint knobs (all optional, empty =
+  SDK default; credentials never logged).
+
+### Verification
+
+- `pytest pocket-bridge/tests` — NEW `tests/test_proxy_headers.py` (**15 passed**:
+  proxy forward/absent/precedence, pool rotation across attempts, UA
+  session-fallback + env-override, origin default, optional-header on/off,
+  credential masking in the log, pure helpers). Full offline suite **137 passed**;
+  the 3 in `tests/test_auth_live.py` are the real-network live probe (it runs
+  because a real SSID exists) → N/A + reason: no Pocket Option egress in this
+  environment.
+- `core-backend` — NEW `src/lib/__tests__/pocketOptionBridge.status.test.ts`
+  (**5 tests**) pinning the transition trigger (`status: connected` &
+  `heartbeat status: connected` → `ONLINE` + `feed_status: live`; `awaiting_ssid`
+  → awaiting_ssid; `connection_error`/`stalled`/`disconnected`/`session_expired`
+  → DEGRADED). `npx tsc --noEmit` → **0**; `npx vitest run` → **55 files / 499
+  passed** (was 54/494; +1 file/+5).
+- LIVE check (real proxy + real PO handshake → genuine ticks): NOT performed here
+  — no egress to Pocket Option and no operator-supplied proxy in this environment
+  → OK-withheld + reason, never a pass. The wiring is unit-verified end to end.
+
+### Files
+
+`pocket-bridge/pocket_bridge/config.py`,
+`pocket-bridge/pocket_bridge/bridge.py`,
+`pocket-bridge/tests/test_proxy_headers.py`,
+`pocket-bridge/.env.example`,
+`core-backend/src/lib/__tests__/pocketOptionBridge.status.test.ts`.
+

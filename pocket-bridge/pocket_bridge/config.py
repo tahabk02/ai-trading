@@ -260,6 +260,62 @@ def mask_uid(value) -> str:
     return s[:3] + "*" * max(1, len(s) - 3)
 
 
+# ════════════════════════════════════════════════════════════════════
+# OPTIONAL UPSTREAM PROXY (HTTP/SOCKS5 tunnel)
+# ════════════════════════════════════════════════════════════════════
+#: Proxy schemes the SDK's native core can tunnel through.
+PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+
+
+def _split_env_list(name: str) -> List[str]:
+    """Comma-separated env var -> trimmed, non-empty list (order preserved)."""
+    return [
+        item.strip()
+        for item in (os.getenv(name, "") or "").split(",")
+        if item.strip()
+    ]
+
+
+def mask_proxy(url: str) -> str:
+    """Never log proxy credentials — blank the ``user:pass@`` userinfo.
+
+    ``http://user:pass@host:3128`` -> ``http://***@host:3128``; a
+    credential-less URL is returned unchanged.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    scheme, sep, rest = raw.partition("://")
+    if sep and "@" in rest:
+        return f"{scheme}://***@{rest.rsplit('@', 1)[-1]}"
+    if "@" in raw:  # scheme-less ``user:pass@host:port`` (defensive)
+        return "***@" + raw.rsplit("@", 1)[-1]
+    return raw
+
+
+def proxy_warning(url: Optional[str]) -> Optional[str]:
+    """Human warning when a proxy URL is malformed or uses an exotic scheme.
+
+    Returns ``None`` for a well-formed http(s)/socks5 URL; the caller logs the
+    string otherwise. The value is still handed to the SDK — the tunnel is the
+    SDK's job — but the operator is told the scheme looks unexpected.
+    """
+    if not url:
+        return None
+    if "://" not in url:
+        return (
+            "PO_BRIDGE_PROXY is missing a scheme "
+            "(expected http:// or socks5://); passing through unchanged"
+        )
+    scheme = url.split("://", 1)[0].strip().lower()
+    if scheme not in PROXY_SCHEMES:
+        return (
+            f"proxy scheme '{scheme}' is not one of "
+            f"{', '.join(PROXY_SCHEMES)}; passing through to the SDK"
+        )
+    return None
+
+
 def _fernet():
     """Optional Fernet ring (PO_SESSION_KEY) for encrypting the session file."""
     key = os.getenv("PO_SESSION_KEY", "").strip()
@@ -747,6 +803,54 @@ class BridgeSettings:
         u for u in os.getenv("POCKET_OPTION_WS_URLS", "").split(",") if u.strip()
     ])
 
+    # ── Optional upstream network path (proxy tunnel + browser fingerprint) ──
+    #: Optional upstream proxy the PO handshake + stream tunnel through. Empty
+    #: = direct (the SDK's own default). Accepts an HTTP(S) or SOCKS5 URL, e.g.
+    #: ``http://user:pass@host:3128`` or ``socks5://host:1080``. Embedded
+    #: credentials are NEVER logged (see :func:`mask_proxy`).
+    proxy: str = field(
+        default_factory=lambda: (os.getenv("PO_BRIDGE_PROXY", "") or "").strip()
+    )
+
+    #: Optional comma-separated proxy POOL. When set, each connect attempt
+    #: rotates to the next entry in step with the regional-endpoint rotation, so
+    #: a blocked proxy is bypassed on the next attempt instead of costing the
+    #: full handshake budget every time. Takes precedence over ``proxy``.
+    proxy_list: List[str] = field(
+        default_factory=lambda: _split_env_list("PO_BRIDGE_PROXY_LIST")
+    )
+
+    #: Browser ``User-Agent`` presented on the PO WebSocket handshake. Empty
+    #: falls back to the captured session's ``userAgent`` so the headless socket
+    #: carries the SAME fingerprint that minted the SSID — the handshake then
+    #: succeeds with NO browser tab open.
+    user_agent: str = field(
+        default_factory=lambda: (os.getenv("PO_BRIDGE_USER_AGENT", "") or "").strip()
+    )
+
+    #: ``Origin`` header presented on the PO WebSocket handshake (defaults to
+    #: the Pocket Option web origin the SSID was minted at).
+    origin: str = field(
+        default_factory=lambda: (
+            os.getenv("PO_BRIDGE_ORIGIN", "") or "https://pocketoption.com"
+        ).strip()
+    )
+
+    #: Optional ``Sec-WebSocket-Extensions`` header (unset = SDK default).
+    sec_websocket_extensions: str = field(
+        default_factory=lambda: (
+            os.getenv("PO_BRIDGE_SEC_WEBSOCKET_EXTENSIONS", "") or ""
+        ).strip()
+    )
+
+    #: Optional TLS fingerprint knobs (comma-separated). Unset = SDK default.
+    tls_cipher_suites: List[str] = field(
+        default_factory=lambda: _split_env_list("PO_BRIDGE_TLS_CIPHER_SUITES")
+    )
+    tls_alpn: List[str] = field(
+        default_factory=lambda: _split_env_list("PO_BRIDGE_TLS_ALPN")
+    )
+
     #: Native SDK handshake budget (seconds). The Rust core raises
     #: "General error: Connection initialization timed out" when the whole
     #: endpoint rotation has not authenticated inside this window; its default
@@ -886,6 +990,24 @@ class BridgeSettings:
         if self.session_path and self.session_path.strip():
             return Path(self.session_path).expanduser().resolve()
         return Path(PO_SESSION_PATH).expanduser().resolve()
+
+    @property
+    def proxies(self) -> List[str]:
+        """Active proxy pool: the explicit list, else the single ``proxy``."""
+        if self.proxy_list:
+            return list(self.proxy_list)
+        return [self.proxy] if self.proxy else []
+
+    def proxy_for_rotation(self, rotation: int = 0) -> Optional[str]:
+        """Proxy for a given rotation index, or ``None`` for a direct dial."""
+        pool = self.proxies
+        if not pool:
+            return None
+        return pool[rotation % len(pool)]
+
+    def masked_proxy(self, rotation: int = 0) -> str:
+        """Credential-free proxy string for logs (``(direct)`` when unset)."""
+        return mask_proxy(self.proxy_for_rotation(rotation)) or "(direct)"
 
     def assets(self) -> Dict[str, str]:
         """Return `{backend_symbol: po_asset}` mapping for all symbols."""

@@ -36,6 +36,7 @@ from .config import (
     mask_secret,
     mask_uid,
     parse_ssid,
+    proxy_warning,
     read_env_ssid,
     session_reload_needed,
 )
@@ -408,6 +409,37 @@ class PocketOptionBridge:
                 cut = self._endpoint_rotation % len(urls)
                 urls = urls[cut:] + urls[:cut]
             sdk_config["urls"] = urls
+        # ── Optional upstream proxy tunnel (PO_BRIDGE_PROXY / _LIST) ──
+        # Rotated in step with the endpoint order so a blocked proxy is bypassed
+        # on the next attempt instead of costing the full handshake budget every
+        # time. Credentials in the URL are never logged (mask_proxy).
+        proxy = self.settings.proxy_for_rotation(self._endpoint_rotation)
+        if proxy:
+            sdk_config["proxy"] = proxy
+            warn = proxy_warning(proxy)
+            if warn:
+                logger.warning("proxy_config %s", warn)
+        # ── Browser-fingerprint headers (headless auth, no browser tab) ──
+        # The SSID was minted by a real browser tab. Presenting the SAME
+        # User-Agent + Origin on the headless socket is what lets the handshake
+        # succeed with no tab open. An explicit env override wins; otherwise the
+        # captured session's own ``userAgent`` is reused. The SDK default is left
+        # untouched for any header we have nothing to say about.
+        user_agent = (
+            self.settings.user_agent or (self.session.user_agent or "").strip()
+        )
+        if user_agent:
+            sdk_config["user_agent"] = user_agent
+        if self.settings.origin:
+            sdk_config["origin"] = self.settings.origin
+        if self.settings.sec_websocket_extensions:
+            sdk_config["sec_websocket_extensions"] = (
+                self.settings.sec_websocket_extensions
+            )
+        if self.settings.tls_cipher_suites:
+            sdk_config["tls_cipher_suites"] = list(self.settings.tls_cipher_suites)
+        if self.settings.tls_alpn:
+            sdk_config["tls_alpn"] = list(self.settings.tls_alpn)
         kwargs: Dict[str, object] = {"config": sdk_config}
         payload = self._auth_payload()
         if self.settings.has_ssid:
@@ -423,6 +455,13 @@ class PocketOptionBridge:
             urls or "(sdk default regional list)",
             sdk_config["connection_initialization_timeout_secs"],
             self._endpoint_rotation,
+        )
+        logger.info(
+            "handshake_fingerprint ua=%s origin=%s ws_ext=%s proxy=%s",
+            mask_secret(user_agent) if user_agent else "(sdk default)",
+            self.settings.origin or "(sdk default)",
+            self.settings.sec_websocket_extensions or "(sdk default)",
+            self.settings.masked_proxy(self._endpoint_rotation),
         )
         logger.info(
             "auth_payload_sent via=%s session_len=%d uid=%s isDemo=%s isOptimized=%s",
@@ -908,11 +947,10 @@ class PocketOptionBridge:
                 # Rotate the endpoint order so the next attempt starts on a
                 # different regional host — a handshake block is bypassed in
                 # one attempt instead of costing the full budget every time.
-                self._endpoint_rotation = (
-                    self._endpoint_rotation + 1
-                    if len(self.settings.urls) > 1
-                    else self._endpoint_rotation
-                )
+                # A multi-entry proxy pool rotates on the same counter, so a
+                # blocked proxy is also bypassed on the next attempt.
+                if len(self.settings.urls) > 1 or len(self.settings.proxies) > 1:
+                    self._endpoint_rotation = self._endpoint_rotation + 1
                 try:
                     await client.disconnect()
                 except Exception:  # noqa: BLE001 - best-effort teardown
