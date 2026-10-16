@@ -1,6 +1,11 @@
 import { Request, Response } from "express";
 import { logger } from "../utils/logger";
-import { riskStateService } from "../services/riskState.service";
+import {
+  riskStateService,
+  DEFAULT_MAX_DAILY_DRAWDOWN_PCT,
+} from "../services/riskState.service";
+import type { RiskStateSnapshot } from "../services/riskState.service";
+import { isDbUnavailable } from "../lib/dbHealth";
 
 // ════════════════════════════════════════════════════════════════════
 // SHORT-TTL IN-MEMORY GET CACHE — /risk-state HTTP ERROR ELIMINATION
@@ -40,6 +45,33 @@ function bustRiskStateCache(userId: string): void {
 }
 
 /**
+ * PHASE 5 RESILIENCE — neutral snapshot served when the database is
+ * unreachable. The risk-state poller runs on every terminal page; a 500 here
+ * paints a false alarm and (worse) can leave the kill-switch UI in an unknown
+ * state. A NEUTRAL snapshot (no equity, no drawdown, kill switch UNLOCKED)
+ * keeps the surface honest: it asserts nothing the backend cannot verify. The
+ * client treats `startingEquity: 0` as "not yet initialized", never as a
+ * locked account.
+ */
+function neutralRiskStateSnapshot(): RiskStateSnapshot {
+  return {
+    dayKey: new Date().toISOString().slice(0, 10),
+    startingEquity: 0,
+    realizedPnl: 0,
+    equity: 0,
+    peakEquity: 0,
+    drawdownPct: 0,
+    maxDailyDrawdownPct: DEFAULT_MAX_DAILY_DRAWDOWN_PCT,
+    tradesToday: 0,
+    winsToday: 0,
+    lossesToday: 0,
+    killSwitchLocked: false,
+    lockedReason: null,
+    lockedAt: null,
+  };
+}
+
+/**
  * GET /risk-state
  * Returns the caller's live daily-risk snapshot: equity curve, drawdown %,
  * trade counters, and kill-switch status. Served from a short-TTL cache.
@@ -62,6 +94,15 @@ export const getRiskState = async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", `private, max-age=${RISK_STATE_TTL_MS / 1000}`);
     return res.json(snapshot);
   } catch (error) {
+    if (isDbUnavailable(error)) {
+      // Do NOT cache the neutral snapshot — a transient outage must not pin a
+      // zeroed equity curve for the TTL window after the DB recovers.
+      logger.warn(
+        "[riskState.controller] Database unavailable — serving neutral snapshot",
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return res.json(neutralRiskStateSnapshot());
+    }
     logger.error("[riskState.controller] Failed to load risk state", {
       error,
     });

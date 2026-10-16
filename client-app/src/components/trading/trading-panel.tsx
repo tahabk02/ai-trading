@@ -38,6 +38,7 @@ import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
 import { isPoOfflineOtc } from "@/lib/quoteProvenance";
 import { resolveDepartureLine } from "@/lib/departureLine";
 import { TradeJournalPanel } from "./trade-journal-panel";
+import { StandaloneBadge } from "./standalone-badge";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
 // Mirrors the backend PO expiration whitelist exactly (seconds). The chart
@@ -335,6 +336,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           <span className="text-[9px] sm:text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 min-w-0">
             <span className="truncate">{getPairLabel(activeSymbol)}</span>
             <AssetClassBadge symbol={activeSymbol} />
+            <StandaloneBadge />
           </span>
         </div>
         <div className="mt-1.5 sm:mt-2 flex items-center justify-between">

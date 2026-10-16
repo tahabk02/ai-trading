@@ -16,6 +16,7 @@ import {
 import { clampMinTierToEngineSet, readMinTier } from "../lib/signalTiers";
 import type { SignalTier } from "../lib/signalTiers";
 import { isAlertEligible } from "../lib/alertGate";
+import { isDbUnavailable, isCacheUnavailable } from "../lib/dbHealth";
 
 const prisma = new PrismaClient();
 
@@ -709,48 +710,6 @@ function maybeBroadcastHighConfidence(prediction: {
 }
 
 // ── Signal CRUD ──
-/**
- * Distinguish "the database is unreachable" from "the query failed". A DB
- * outage is a RECOVERABLE infrastructure condition (503 + retry), not a bug in
- * the request (500). Prisma surfaces it as a known error code, an
- * initialization error, or a connection-level message — all of which mean the
- * caller should retry, never that the API is broken.
- */
-function isDbUnavailable(error: unknown): boolean {
-  const code = (error as { code?: string } | null)?.code;
-  if (code && ["P1001", "P1008", "P1017", "P2024"].includes(code)) return true;
-  const name = (error as { name?: string } | null)?.name;
-  if (name === "PrismaClientInitializationError") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /can'?t reach database server|connection (pool|refused)|Timed out fetching a new connection|ECONNREFUSED (?:127\.0\.0\.1|localhost|::1):5433/i.test(
-    message,
-  );
-}
-
-/**
- * Redis/cache outages are a SEPARATE recoverable condition from a DB outage.
- * ioredis surfaces them as `MaxRetriesPerRequestError` / `ReplyError`, an
- * `NR_CLOSED` code, or a connection message naming Redis — all of which mean
- * "cache unavailable", never "database unavailable". Checked BEFORE the DB
- * classifier because a refused Redis connection carries a bare ECONNREFUSED.
- */
-function isCacheUnavailable(error: unknown): boolean {
-  const name = (error as { name?: string } | null)?.name ?? "";
-  if (
-    /redis/i.test(name) ||
-    name === "MaxRetriesPerRequestError" ||
-    name === "ReplyError"
-  ) {
-    return true;
-  }
-  const code = (error as { code?: string } | null)?.code;
-  if (code === "NR_CLOSED") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /redis|MaxRetriesPerRequest|Stream isn'?t writeable|ECONNREFUSED .*:6379/i.test(
-    message,
-  );
-}
-
 export const getSignals = async (req: Request, res: Response) => {
   const t0 = Date.now();
   try {
@@ -764,19 +723,23 @@ export const getSignals = async (req: Request, res: Response) => {
     return res.json(signals);
   } catch (error) {
     const latencyMs = Date.now() - t0;
+    // PHASE 5 RESILIENCE — the signal feed is a NON-CRITICAL read surface. A
+    // cold database or cache must empty the feed, never 503 the terminal: the
+    // client types `getSignals` as a bare array and a 503 turns a harmless
+    // empty list into a fetch error banner. Serve `[]` with a 200.
     if (isCacheUnavailable(error)) {
-      logger.error(
-        `[signals] status=503 cache_unavailable latency_ms=${latencyMs}`,
+      logger.warn(
+        `[signals] status=200 cache_unavailable empty_fallback latency_ms=${latencyMs}`,
         { error: error instanceof Error ? error.message : String(error) },
       );
-      return res.status(503).json({ error: "cache_unavailable" });
+      return res.json([]);
     }
     if (isDbUnavailable(error)) {
-      logger.error(
-        `[signals] status=503 db_unavailable latency_ms=${latencyMs}`,
+      logger.warn(
+        `[signals] status=200 db_unavailable empty_fallback latency_ms=${latencyMs}`,
         { error: error instanceof Error ? error.message : String(error) },
       );
-      return res.status(503).json({ error: "db_unavailable" });
+      return res.json([]);
     }
     logger.error(`[signals] status=500 latency_ms=${latencyMs}`, { error });
     return res.status(500).json({ error: "Internal Server Error" });

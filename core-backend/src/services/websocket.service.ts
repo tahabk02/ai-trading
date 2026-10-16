@@ -45,12 +45,23 @@ export interface FeedStatusPayload {
     | "disconnected"
     | "awaiting_ssid"
     | "auth_failed"
-    | "degraded";
+    | "degraded"
+    | "standalone";
   symbols: { symbol: string; name: string; type: string }[];
   last_tick_ts?: string;
   lastHeartbeatTs?: number;
   heartbeatAgeMs: number;
   timestamp: string;
+  /**
+   * STANDALONE SaaS MODE — present only when `status === "standalone"`.
+   * `feedMode` distinguishes a real-proxy tape from a synthetic OTC tape so the
+   * client can label it honestly ("STANDALONE · PUBLIC PROXY" vs "SIMULATED").
+   */
+  feedMode?: "standalone_proxy" | "standalone_synthetic" | "mixed";
+  /** Count of non-OTC pairs served from a REAL public proxy this beat. */
+  proxyPairs?: number;
+  /** Count of OTC pairs served from the labeled synthetic generator. */
+  syntheticPairs?: number;
 }
 
 /**
@@ -240,6 +251,14 @@ export class WebSocketService {
     bid?: number;
     ask?: number;
     volume?: number;
+    /**
+     * STANDALONE SaaS MODE provenance. `source` names the authoring feed
+     * (`standalone:<tier>` for a real public proxy, `standalone_synthetic` for
+     * the labeled OTC walk). `synthetic` is true ONLY for a fabricated price —
+     * clients MUST disclose it and never present it as a live PO tick.
+     */
+    source?: string;
+    synthetic?: boolean;
   }) {
     // ── SINGLE CANONICAL KEY PER SYMBOL ──
     // Canonicalize the tick symbol ONCE at the broadcast boundary, then drive
@@ -320,14 +339,26 @@ export class WebSocketService {
       | "disconnected"
       | "awaiting_ssid"
       | "auth_failed"
-      | "degraded",
-    detail?: { lastHeartbeatTs?: number; heartbeatAgeMs?: number },
+      | "degraded"
+      | "standalone",
+    detail?: {
+      lastHeartbeatTs?: number;
+      heartbeatAgeMs?: number;
+      feedMode?: "standalone_proxy" | "standalone_synthetic" | "mixed";
+      proxyPairs?: number;
+      syntheticPairs?: number;
+    },
   ) {
     if (!this.io) return;
     this.io.emit("feed_status", {
       status,
       lastHeartbeatTs: detail?.lastHeartbeatTs ?? Date.now(),
       heartbeatAgeMs: detail?.heartbeatAgeMs ?? 0,
+      ...(detail?.feedMode ? { feedMode: detail.feedMode } : {}),
+      ...(detail?.proxyPairs != null ? { proxyPairs: detail.proxyPairs } : {}),
+      ...(detail?.syntheticPairs != null
+        ? { syntheticPairs: detail.syntheticPairs }
+        : {}),
       timestamp: new Date().toISOString(),
     });
   }
@@ -485,6 +516,7 @@ export class WebSocketService {
       signalType: "BUY" | "SELL" | null;
       signal: "BUY" | "SELL" | null;
       confidence: number;
+      confidence_score?: number;
       current_price?: number;
       target_price?: number;
       timeframe: string;
@@ -495,6 +527,29 @@ export class WebSocketService {
       dataSource?: string;
       aiEngine?: unknown;
       timestamp?: string;
+      /**
+       * PHASE 5 — n8n external ingress. `source` tags the origin ("n8n"), the
+       * horizon carries the departure contract (strike/entry window) so the
+       * chart can render DEPART/ENTRY markers, and `n8n_timestamp` records the
+       * workflow's own clock alongside the server receipt clock.
+       */
+      source?: string;
+      n8n_timestamp?: string | null;
+      recommended_expiry_seconds?: number;
+      horizon?: {
+        departure?: {
+          available: boolean;
+          status: string;
+          reason: string | null;
+          side: "CALL" | "PUT" | null;
+          strike_price: number | null;
+          target_price: number | null;
+          entry_window_start_ms: number | null;
+          entry_window_end_ms: number | null;
+          max_allowed_slippage: number | null;
+          slippage: number | null;
+        } | null;
+      } | null;
       /**
        * HONEST EXECUTION SURFACE (PART 38.1 [377]) — the engine's T1..T5 band
        * and its executable/scored-only state travel WITH the verdict. The

@@ -2,6 +2,7 @@
 
 import React, { memo } from "react";
 import { ProControlBar } from "@/components/pro/pro-control-bar";
+import { StandaloneBadge } from "@/components/trading/standalone-badge";
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════
@@ -83,6 +84,9 @@ function ProTerminalHeaderImpl({
               </span>
             </span>
           </div>
+          {/* STANDALONE SaaS MODE disclosure — visible whenever the fallback
+              feed is serving (real public proxy / labeled synthetic OTC). */}
+          <StandaloneBadge />
         </div>
 
         <div className="flex items-center gap-2 sm:gap-4">

@@ -5,6 +5,7 @@ import {
   JournalValidationError,
   JOURNAL_SIDES,
 } from "../services/journal.service";
+import { isDbUnavailable } from "../lib/dbHealth";
 
 /**
  * journal.controller.ts — PART 50 [537] local Pocket-style trade journal.
@@ -114,6 +115,17 @@ export const listJournalEntries = async (req: Request, res: Response) => {
     )) as Array<Record<string, unknown>>;
     return res.json({ entries: rows.map(serializeEntry), count: rows.length });
   } catch (err) {
+    // PHASE 5 RESILIENCE — the journal list is a read-only surface. A cold DB
+    // serves an EMPTY journal with a 200 (same shape as an empty result) rather
+    // than a 500, so the terminal's journal panel degrades to "no entries"
+    // instead of an error state.
+    if (isDbUnavailable(err)) {
+      logger.warn(
+        "[journal.controller] Database unavailable — serving empty journal",
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+      return res.json({ entries: [], count: 0 });
+    }
     logger.error("[journal.controller] list failed", {
       error: err instanceof Error ? err.message : String(err),
       stack: errStack(err),

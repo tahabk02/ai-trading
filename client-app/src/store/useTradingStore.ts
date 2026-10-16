@@ -6,6 +6,7 @@ import apiClient, {
   type SignalData,
   type CandleDataPoint,
   type RiskStateSnapshot,
+  type DepartureContract,
 } from "@/services/api";
 import {
   DEFAULT_SYMBOL,
@@ -19,12 +20,15 @@ import {
   isTimeframe,
   normalizeTimeframe,
   TIMEFRAME_MS,
+  isExternalSignalPrediction,
+  EXTERNAL_SIGNAL_FLOOR,
 } from "@/lib/realtimeCandleAggregator";
 import tradingAccuracyVerifier, {
   ERROR_RATE_LIMIT,
 } from "@/lib/accuracyVerifier";
 import { clampMinConfidencePct } from "@/lib/minConfidenceFilter";
 import { clampTierSelection } from "@/lib/tierFilter";
+import { isStandaloneMode } from "@/lib/standaloneMode";
 import {
   resolveExecutionFloor,
   type TierSelection,
@@ -401,7 +405,14 @@ export interface TradingState {
     | "degraded"
     | "live"
     | "stalled"
-    | "disconnected";
+    | "disconnected"
+    | "standalone";
+  /**
+   * STANDALONE SaaS MODE — the fallback feed's sub-mode set alongside
+   * `feedStatus === "standalone"`. Drives the always-visible disclosure badge:
+   * a real public proxy tape vs a labeled synthetic OTC tape. "live" otherwise.
+   */
+  feedMode: "live" | "standalone_proxy" | "standalone_synthetic" | "mixed";
   /** Currently selected trading symbol */
   activeSymbol: string;
 
@@ -566,6 +577,8 @@ export interface TradingState {
   // ── Actions ──
   setActiveSymbol: (symbol: string) => void;
   setFeedStatus: (status: TradingState["feedStatus"]) => void;
+  /** Set the standalone feed sub-mode (badge disclosure). */
+  setFeedMode: (mode: TradingState["feedMode"]) => void;
   setSelectedTimeframe: (timeframe: string) => void;
   /**
    * HYDRATION-SAFE persisted-timeframe restore. The store initializes
@@ -652,6 +665,9 @@ export interface TradingState {
     market_waiting?: boolean;
     waiting_reason?: string | null;
     waiting_detail?: string | null;
+    dataSource?: string;
+    source?: string;
+    horizon?: { departure?: DepartureContract | null } | null;
   }) => void;
   // ── Trading Actions ──
   setExpirationSeconds: (seconds: number) => void;
@@ -689,6 +705,9 @@ export interface TradingState {
     market_waiting?: boolean;
     waiting_reason?: string | null;
     waiting_detail?: string | null;
+    dataSource?: string;
+    source?: string;
+    horizon?: { departure?: DepartureContract | null } | null;
   }) => void;
 }
 
@@ -925,6 +944,7 @@ const lastRealtimePublish = new Map<string, number>();
     // ── State defaults ──
     activeSymbol: DEFAULT_SYMBOL, // "EUR/USD" — strict OTC whitelist default
     feedStatus: "awaiting_ssid",
+    feedMode: "live",
     currentPrice: 0,
     lastPriceUpdate: null,
     predictionData: null,
@@ -1717,7 +1737,13 @@ const lastRealtimePublish = new Map<string, number>();
       const { barFrac: tradeFloorFrac } = resolveExecutionFloor(
         useMarketTerminalStore.getState().minTier,
       );
-      const STRICT_TRADE_CONFIDENCE_MIN = tradeFloorFrac * 100;
+      // PHASE 5 — an external (n8n) verdict is authorized against its own 60%
+      // floor rather than the operator's engine-tier floor. The engine-tier
+      // mirror still governs every engine-scored prediction.
+      const externalVerdict = isExternalSignalPrediction(predictionData);
+      const STRICT_TRADE_CONFIDENCE_MIN = externalVerdict
+        ? EXTERNAL_SIGNAL_FLOOR * 100
+        : tradeFloorFrac * 100;
       const engineDirection = direction === "CALL" ? "BUY" : "SELL";
       const engineBacked =
         predictionData?.signal === engineDirection &&
@@ -1749,7 +1775,9 @@ const lastRealtimePublish = new Map<string, number>();
       ) {
         const floorTier = useMarketTerminalStore.getState().minTier;
         set({
-          lastTradeResult: `⛔ Engine signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below your ${floorTier} trade floor (${STRICT_TRADE_CONFIDENCE_MIN.toFixed(1)}%). Select a lower tier to trade this band.`,
+          lastTradeResult: externalVerdict
+            ? `⛔ External signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below the ${STRICT_TRADE_CONFIDENCE_MIN.toFixed(0)}% external floor.`
+            : `⛔ Engine signal ${engineDirection} @ ${(predictionData?.confidence ?? 0).toFixed(1)}% confidence — below your ${floorTier} trade floor (${STRICT_TRADE_CONFIDENCE_MIN.toFixed(1)}%). Select a lower tier to trade this band.`,
         });
         return;
       }
@@ -1981,8 +2009,13 @@ const lastRealtimePublish = new Map<string, number>();
       )
         .trim()
         .toUpperCase();
-      const direction = ["BUY", "SELL"].includes(rawDir)
-        ? (rawDir as "BUY" | "SELL")
+      // PHASE 5 — external n8n verdicts speak Pocket's CALL/PUT vocabulary;
+      // map to the store's engine-facing BUY/SELL so an un-normalized ingress
+      // payload still resolves a direction instead of being dropped.
+      const normalizedDir =
+        rawDir === "CALL" ? "BUY" : rawDir === "PUT" ? "SELL" : rawDir;
+      const direction = ["BUY", "SELL"].includes(normalizedDir)
+        ? (normalizedDir as "BUY" | "SELL")
         : null;
       const wsSymbol = String(payload?.symbol ?? "")
         .trim()
@@ -2017,6 +2050,16 @@ const lastRealtimePublish = new Map<string, number>();
 
       const hasPrice = Number.isFinite(price) && price > 0;
       const ts = payload?.timestamp ?? new Date().toISOString();
+
+      // PHASE 5 — external n8n provenance + departure contract. Tagging the
+      // merged prediction `dataSource: "n8n"` is what makes the gated signal
+      // view apply the authorized external floor (60%) instead of the strict
+      // 96.5% engine bar; the horizon lights the chart's DEPART/ENTRY markers.
+      const externalSource = isExternalSignalPrediction(payload);
+      const payloadHorizon =
+        payload?.horizon && typeof payload.horizon === "object"
+          ? payload.horizon
+          : null;
 
       if (direction && hasPrice) {
         const wsSignalTf = aiTimeframeFor(
@@ -2104,6 +2147,15 @@ const lastRealtimePublish = new Map<string, number>();
                 waiting_reason: payload?.waiting_reason ?? null,
                 waiting_detail: payload?.waiting_detail ?? null,
                 timestamp: ts,
+                ...(externalSource ? { dataSource: "n8n" as const } : {}),
+                ...(payloadHorizon
+                  ? {
+                      horizon: {
+                        ...(s.predictionData.horizon ?? {}),
+                        ...payloadHorizon,
+                      } as PredictionResponse["horizon"],
+                    }
+                  : {}),
               }
             : null;
           return {
@@ -2149,6 +2201,15 @@ const lastRealtimePublish = new Map<string, number>();
                     ? verdict.target
                     : s.predictionData.target_price,
                 timestamp: ts,
+                ...(externalSource ? { dataSource: "n8n" as const } : {}),
+                ...(payloadHorizon
+                  ? {
+                      horizon: {
+                        ...(s.predictionData.horizon ?? {}),
+                        ...payloadHorizon,
+                      } as PredictionResponse["horizon"],
+                    }
+                  : {}),
               }
             : {
                 symbol: wsSymbol || normActive || "",
@@ -2165,6 +2226,10 @@ const lastRealtimePublish = new Map<string, number>();
                 proxyLatencyMs: null,
                 indicators: { rsi_14: 0, sma_20: 0, sma_50: 0 },
                 timestamp: ts,
+                ...(externalSource ? { dataSource: "n8n" as const } : {}),
+                ...(payloadHorizon
+                  ? { horizon: payloadHorizon as PredictionResponse["horizon"] }
+                  : {}),
               };
         }
         return {
@@ -2279,10 +2344,15 @@ const lastRealtimePublish = new Map<string, number>();
 
       const candle = aggregator.ingest(rawTick);
       if (!candle) return;
-      set({ feedStatus: "live" });
+      // In STANDALONE mode the authoritative feed_status ("standalone") owns the
+      // badge — a flowing fallback tick must not silently promote it to "live"
+      // and hide the disclosure. Outside standalone, a fresh tick is proof of a
+      // live feed, as before.
+      if (!isStandaloneMode()) set({ feedStatus: "live" });
     },
 
     setFeedStatus: (status) => set({ feedStatus: status }),
+    setFeedMode: (mode) => set({ feedMode: mode }),
 
     /**
      * Switch the aggregator timeframe — re-buckets retained real ticks
@@ -2373,6 +2443,7 @@ const lastRealtimePublish = new Map<string, number>();
         predictionBySymbol: {},
         currentPrice: 0,
         feedStatus: "awaiting_ssid",
+        feedMode: "live",
         lastPriceUpdate: null,
         lastQuantDispatch: null,
         quoteStreamWaiting: false,

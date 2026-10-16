@@ -88,6 +88,12 @@ interface TickEntry {
    * market proxy resetting it. Absent on legacy callers that never stamped one.
    */
   source?: string;
+  /**
+   * STANDALONE SaaS MODE — true when this entry was authored by the labeled
+   * synthetic OTC generator (no real public source exists for OTC). Kept
+   * per-entry so provenance survives into snapshots; consumers MUST disclose it.
+   */
+  synthetic?: boolean;
 }
 
 /** Single-symbol live quote snapshot for the market terminal grid. Every field
@@ -231,6 +237,8 @@ class RealtimeTickBufferService {
       ask?: number;
       stale?: boolean;
       source?: string;
+      /** STANDALONE SaaS MODE — true for the labeled synthetic OTC walk. */
+      synthetic?: boolean;
     },
   ): void {
     const norm = (symbol || "").trim().toUpperCase();
@@ -245,6 +253,7 @@ class RealtimeTickBufferService {
       ask: opts?.ask,
       ...(opts?.stale ? { stale: true } : {}),
       ...(opts?.source ? { source: opts.source } : {}),
+      ...(opts?.synthetic ? { synthetic: true } : {}),
     });
     this.ticks.set(norm, ring);
     this.lastTickAt.set(norm, new Date(now).toISOString());

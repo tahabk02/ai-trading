@@ -341,6 +341,13 @@ export const secrets = {
   POCKET_BRIDGE_AUTO_SPAWN: process.env.POCKET_BRIDGE_AUTO_SPAWN || "true",
   // Python interpreter to use for the bridge ("python", "python3", "py", or full path).
   POCKET_BRIDGE_PYTHON: process.env.POCKET_BRIDGE_PYTHON || "",
+  // ── STANDALONE SaaS MODE ──
+  // When the Pocket Option bridge is not live, author a fallback tape so charts,
+  // candles and n8n signals keep working: real public proxy where a source
+  // exists, labeled synthetic for OTC. Default ON (auto-engage).
+  STANDALONE_FEED_ENABLED: boolFlag(process.env.STANDALONE_FEED_ENABLED, true),
+  // Allow the labeled synthetic OTC generator (OTC pairs have no public source).
+  STANDALONE_SYNTHETIC_OTC: boolFlag(process.env.STANDALONE_SYNTHETIC_OTC, true),
 };
 
 export default secrets;

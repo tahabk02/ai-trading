@@ -186,6 +186,30 @@ describe("trading panel — execution invariants (DOM level)", () => {
       for (const el of expiryOptions()) expect(el).not.toBeDisabled();
     });
 
+    // PHASE 5 — the external (n8n) floor is a SCOPED carve-out. A verdict
+    // tagged `dataSource: "n8n"` gates at 60%, while the identical engine
+    // confidence still hits the strict 96.5% bar.
+    it("enable for an external n8n verdict at 65% (60% floor)", () => {
+      arm({
+        predictionData: {
+          signal: "BUY",
+          confidence: 65,
+          dataSource: "n8n",
+          tier: "T5",
+        },
+      });
+      ui(<TradingPanel stalePrice={false} />);
+      expect(call()).toBeEnabled();
+      expect(put()).toBeEnabled();
+    });
+
+    it("stay locked for an ENGINE 65% verdict (strict 96.5% bar)", () => {
+      arm({ predictionData: { signal: "BUY", confidence: 65, tier: "T5" } });
+      ui(<TradingPanel stalePrice={false} />);
+      expect(call()).toBeDisabled();
+      expect(put()).toBeDisabled();
+    });
+
     it("block when the socket is down", () => {
       arm();
       setSocketConnected(false);

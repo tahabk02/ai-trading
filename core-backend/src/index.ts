@@ -25,6 +25,7 @@ import { liveTickSignalDispatcher } from "./services/liveTickSignal.dispatch";
 import { symbolRegistry } from "./services/symbolRegistry.service";
 import { forexDataService } from "./services/forexData.service";
 import { pocketOptionBridgeService } from "./services/pocketOptionBridge.service";
+import { standaloneFeedService } from "./services/standaloneFeed.service";
 import { realtimeCandleAggregatorService } from "./services/realtimeCandleAggregator.service";
 import { realtimeTickBuffer } from "./services/realtimeTickBuffer.service";
 import { buildMarketQuotesSnapshot } from "./services/marketQuotes.service";
@@ -743,6 +744,13 @@ httpServer.listen(PORT, () => {
   // the bridge reports a clean awaiting_ssid state (no fabricated data).
   pocketOptionBridgeService.start();
 
+  // ── STANDALONE SaaS MODE FALLBACK FEED ──
+  // When the PO bridge is not live, keep the platform usable: a real public
+  // proxy tape for non-OTC pairs + a labeled synthetic tape for OTC. It stands
+  // down automatically the instant the bridge reports "live". Opt out with
+  // STANDALONE_FEED_ENABLED=false.
+  standaloneFeedService.start();
+
   // ── PART 43.6 [483] PO SESSION-STATE ALERTING ──
   // Watch the raw relay status: when the SSID dies (session_expired) for longer
   // than PO_SESSION_STALE_ALERT_MIN, alert by email + platform sink — the UI
@@ -815,6 +823,7 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     tickIngestionService.stopAllStreams();
+    standaloneFeedService.stop();
     clearInterval(marketQuotesTimer);
     pocketOptionBridgeService.stop();
     poSessionMonitor.stop();

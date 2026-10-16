@@ -13,6 +13,10 @@ import { tickLatencyProbe } from "@/lib/tickLatencyProbe";
 import { clampTierSelection } from "@/lib/tierFilter";
 import type { SignalTier } from "@/lib/signalTiers";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
+import {
+  setStandaloneMode,
+  type StandaloneFeedMode,
+} from "@/lib/standaloneMode";
 
 // ── CANONICAL SUBSCRIPTION SYMBOL ──
 // Every subscribe payload pushed to the backend MUST use the canonical
@@ -225,6 +229,7 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
   const applyServerCandle = useTradingStore((state) => state.applyServerCandle);
   const seedServerCandles = useTradingStore((state) => state.seedServerCandles);
   const setFeedStatus = useTradingStore((state) => state.setFeedStatus);
+  const setFeedMode = useTradingStore((state) => state.setFeedMode);
   const selectedTimeframe = useTradingStore((state) => state.selectedTimeframe);
   const selectedHorizonMinutes = useTradingStore(
     (state) => state.selectedHorizonMinutes,
@@ -601,8 +606,23 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
         "awaiting_ssid",
         "auth_failed",
         "degraded",
+        "standalone",
       ];
       if (!allowed.includes(raw)) return;
+
+      // ── STANDALONE SaaS MODE ──
+      // The flag must be written BEFORE the store update so every component that
+      // re-renders off `feedStatus` already sees the correct standalone truth in
+      // `isPoOfflineOtc`. A non-standalone frame clears it.
+      if (raw === "standalone") {
+        const mode = String(payload.feedMode || "standalone_proxy") as StandaloneFeedMode;
+        setStandaloneMode(true, mode);
+        setFeedMode(mode);
+      } else {
+        setStandaloneMode(false);
+        setFeedMode("live");
+      }
+
       setFeedStatus(
         raw as
           | "live"
@@ -610,7 +630,8 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
           | "disconnected"
           | "awaiting_ssid"
           | "auth_failed"
-          | "degraded",
+          | "degraded"
+          | "standalone",
       );
     };
     socket.on("feed_status", onFeedStatus);
@@ -637,6 +658,9 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
       socket.off("history_candles", onHistoryCandles);
       socket.off("feed_status", onFeedStatus);
       socket.off("connect", onConnected);
+      // STANDALONE SaaS MODE — never leave a stale flag set across an unmount /
+      // socket swap; the next authoritative frame re-establishes the truth.
+      setStandaloneMode(false);
     };
   }, [
     socket,
@@ -648,6 +672,7 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
     applyServerCandle,
     seedServerCandles,
     setFeedStatus,
+    setFeedMode,
     emitSubscribe,
   ]);
 

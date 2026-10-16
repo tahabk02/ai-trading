@@ -3,6 +3,7 @@ import { render } from "@testing-library/react";
 import { LanguageProvider } from "@/hooks/useLangContext";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 import { useTradingStore } from "@/store/useTradingStore";
+import { resetStandaloneMode } from "@/lib/standaloneMode";
 import { resetSocket } from "./mocks/socket";
 
 /**
@@ -23,6 +24,9 @@ const pristinePro = useTradingStore.getState();
 
 export function resetStores() {
   localStorage.clear();
+  // The standalone feed flag is module-level (not store) state; clear it so no
+  // test can leak standalone mode into the next.
+  resetStandaloneMode();
   useMarketTerminalStore.setState(pristineTerminal, true);
   useTradingStore.setState(pristinePro, true);
 }

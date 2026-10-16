@@ -19,6 +19,7 @@
 
 import type { MarketQuote } from "@/services/api";
 import { getAssetSubType } from "@/constants/symbols";
+import { isStandaloneMode } from "@/lib/standaloneMode";
 
 /** Freshness floor mirrored from the backend (`QUOTE_STALE_AFTER_MS`). */
 export const QUOTE_PROVENANCE_STALE_MS = 15_000;
@@ -63,6 +64,7 @@ const SOURCE_LABELS: Record<string, string> = {
   pocket_option_last_known: "PO HELD",
   yahoo_intraday_held: "YAHOO HELD",
   none: "NO SOURCE",
+  standalone_synthetic: "SIMULATED",
 };
 
 /** Human sentence per known authoring feed (tooltip). */
@@ -82,6 +84,8 @@ const SOURCE_TITLES: Record<string, string> = {
   pocket_option_last_known: "Held Pocket Option print — last known",
   yahoo_intraday_held: "Held Yahoo intraday print",
   none: "No source recorded",
+  standalone_synthetic:
+    "Standalone mode — LABELED SYNTHETIC OTC price (no public source; not a real market print)",
 };
 
 /** "pocket_option_ssot:live" → "pocket_option_ssot" (HTTP-live stamp suffix). */
@@ -111,6 +115,12 @@ export function isPoOfflineOtc(
   symbol: string,
   quote?: ProvenanceQuote | null,
 ): boolean {
+  // STANDALONE SaaS MODE — when the fallback feed is engaged the OTC price is a
+  // LABELED proxy/synthetic tick (disclosed by the standalone badge), not a
+  // silent PO-offline proxy. It is a usable, continuously-flowing tape, so it
+  // must not trip the "PO OFFLINE — not tradeable" blocker. The honest origin is
+  // announced by the badge instead of by withholding the verdict.
+  if (isStandaloneMode()) return false;
   if (!quote || quote.marketClosed === true) return false;
   if (getAssetSubType(symbol) !== "otc") return false;
   const source = normalizeSource(quote.source);
@@ -174,6 +184,21 @@ export function quoteProvenance(quote?: ProvenanceQuote | null): QuoteProvenance
       label: "UNKNOWN SRC",
       title: "Quote predates provenance tracking — origin unverified",
       tone: "unknown",
+    };
+  }
+
+  // STANDALONE SaaS MODE provenance — a labeled fallback tape, never disguised.
+  if (source.startsWith("standalone:") || source === "standalone_synthetic") {
+    const synthetic = source === "standalone_synthetic";
+    const tier = source.startsWith("standalone:")
+      ? source.slice("standalone:".length)
+      : null;
+    return {
+      label: synthetic ? "SIMULATED" : "STANDALONE",
+      title: synthetic
+        ? "Standalone mode — labeled synthetic OTC price (no public source; not a real market print)"
+        : `Standalone mode — real public proxy price (${tier})`,
+      tone: "fallback",
     };
   }
 

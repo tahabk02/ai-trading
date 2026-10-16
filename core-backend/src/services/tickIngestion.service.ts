@@ -34,6 +34,7 @@ import { restoredFeedStatus } from "../lib/feedStatus";
 import { feedStateReporter, FeedStateReport } from "../lib/feedStateLog";
 import { feedMetrics } from "../lib/feedMetrics";
 import { isForexMarketClosed } from "../lib/marketSchedule";
+import { standaloneState } from "../lib/standaloneState";
 
 export interface LiveMarketTick {
   symbol: string;
@@ -419,7 +420,16 @@ export class LiveTickIngestionService {
   private async pollOnce(symbol: string): Promise<void> {
     this.inFlightPolls.add(symbol);
     try {
-      // ════════════════════════════════════════════════════════════════
+      // ── STANDALONE SaaS MODE HAND-OFF ──
+      // While the standalone fallback feed is authoring the tape it drives EVERY
+      // whitelisted symbol (real proxy + labeled synthetic OTC). Standing down
+      // here prevents this per-symbol poll from racing the standalone emitter
+      // with a second, differently-sourced tick for the SAME symbol. The guard
+      // self-clears the instant the PO bridge is live again (standalone resets
+      // its state), so normal per-symbol polling resumes untouched.
+      if (standaloneState.isActive()) return;
+
+      // ════════════════════════════════════════════════════════════════════
       // PO-AUTHORITY GUARD — skip HTTP polling entirely when the PO
       // bridge is ACTIVELY LIVE and delivering real ticks for this symbol.
       // This eliminates the root cause of price divergence: two sources

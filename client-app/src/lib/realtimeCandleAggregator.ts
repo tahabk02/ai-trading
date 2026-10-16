@@ -217,6 +217,42 @@ export function historyBarCheck(
  *  Quick Trade BUY/SELL unlocks only at the strict executable bar. */
 export const SIGNAL_CONFIDENCE_THRESHOLD = 0.965;
 
+/**
+ * PHASE 5 — EXTERNAL (n8n) SIGNAL FLOOR.
+ *
+ * n8n verdicts arrive from an independent strategy pipeline that validates its
+ * own entry conditions before dispatching, so they carry their OWN authorized
+ * floor (60%) rather than the strict 96.5% engine bar. This is NOT a
+ * relaxation of the engine gate: `SIGNAL_CONFIDENCE_THRESHOLD` is untouched and
+ * every non-external (engine-scored) prediction still clears 96.5%. The floor
+ * applies ONLY when the prediction is explicitly tagged `dataSource: "n8n"`.
+ *
+ * MUST match `N8N_MIN_CONFIDENCE` in the backend n8nIngress.controller.ts.
+ */
+export const EXTERNAL_SIGNAL_FLOOR = 0.6;
+
+/** Data-source tag identifying an external n8n verdict. */
+export const EXTERNAL_SIGNAL_DATA_SOURCE = "n8n";
+
+/**
+ * True when a prediction originates from the external n8n ingress. Accepts
+ * either the camelCase `dataSource` or snake_case `source` tag the backend
+ * stamps on both quot/generation payloads.
+ */
+export function isExternalSignalPrediction(
+  prediction:
+    | { dataSource?: string; source?: string }
+    | null
+    | undefined,
+): boolean {
+  const tag = String(
+    prediction?.dataSource ?? prediction?.source ?? "",
+  )
+    .trim()
+    .toLowerCase();
+  return tag === EXTERNAL_SIGNAL_DATA_SOURCE;
+}
+
 /** Normalize a confidence value (0..1 or 0..100) into 0..1. */
 export function normalizeConfidence(raw: number): number {
   if (!Number.isFinite(raw) || raw < 0) return 0;
@@ -247,7 +283,10 @@ export interface SignalView {
 }
 
 export function buildSignalView(
-  prediction: { signal?: string; confidence?: number } | null | undefined,
+  prediction:
+    | { signal?: string; confidence?: number; dataSource?: string; source?: string }
+    | null
+    | undefined,
   threshold: number = SIGNAL_CONFIDENCE_THRESHOLD,
 ): SignalView {
   const rawSignal =
@@ -255,13 +294,19 @@ export function buildSignalView(
       ? prediction.signal
       : null;
   const conf01 = normalizeConfidence(Number(prediction?.confidence));
-  const gated = signalGate(rawSignal, conf01, threshold);
+  // PHASE 5 — an explicitly external (n8n) verdict is judged against its own
+  // authorized floor. `gatePct` below reports the EFFECTIVE threshold so the
+  // "NO SIGNAL — confidence N% < M%" copy stays truthful for both paths.
+  const effectiveThreshold = isExternalSignalPrediction(prediction)
+    ? EXTERNAL_SIGNAL_FLOOR
+    : threshold;
+  const gated = signalGate(rawSignal, conf01, effectiveThreshold);
   const gatedSignal: "BUY" | "SELL" | null = gated ? rawSignal : null;
   const gatePct =
     Math.round(
       Math.min(
-        Number.isFinite(threshold) && threshold > 0
-          ? threshold
+        Number.isFinite(effectiveThreshold) && effectiveThreshold > 0
+          ? effectiveThreshold
           : SIGNAL_CONFIDENCE_THRESHOLD,
         1,
       ) * 1000,

@@ -1754,7 +1754,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         if (sec !== lastDividerSecond) {
           lastDividerSecond = sec;
           const chart = chartRef.current;
-          if (chart && feedStatusRef.current === "live" && hasCandlesRef.current) {
+          const tapeLive =
+            feedStatusRef.current === "live" ||
+            feedStatusRef.current === "standalone";
+          if (chart && tapeLive && hasCandlesRef.current) {
             const coordinate = chart
               .timeScale()
               .timeToCoordinate(sec as UTCTimestamp);
