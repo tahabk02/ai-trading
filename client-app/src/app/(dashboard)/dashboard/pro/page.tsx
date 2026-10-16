@@ -42,6 +42,7 @@ import { SignalWidget } from "@/components/trading/signal-widget";
 import { ProExpiryBar } from "@/components/pro/pro-expiry-bar";
 import { ProTerminalHeader } from "@/components/pro/pro-terminal-header";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useServerClockOffsetSync } from "@/hooks/useServerClock";
 import {
   useTradingStore,
   selectActiveSymbol,
@@ -179,6 +180,11 @@ function ProTerminalInner() {
   const hydrateTerminalPreferences = useTerminalStore(
     (s) => s.hydrateTerminalPreferences,
   );
+
+  // Server↔client clock pump (Phase 2): folds the aggregator's clock offset into
+  // the terminal store so every Pro countdown runs on the backend grid. The Pro
+  // page owns the WS lifecycle, so it starts the single pump.
+  useServerClockOffsetSync();
 
   const [selectedSymbol, setSelectedSymbol] = useState(activeSymbol);
   const appliedDeepLinkRef = useRef<string | null>(null);

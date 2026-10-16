@@ -2253,6 +2253,19 @@ export class RealtimeCandleAggregator {
     return this.leadMs;
   }
 
+  /**
+   * PUBLIC server↔client clock offset (Phase 2, PRO terminal).
+   *
+   * The exact quantity `timingNow()` adds to `Date.now()` to land on the
+   * PO-aligned epoch: `latestUpstreamTimestamp − Date.now()` captured at the
+   * last genuine upstream ingest/seed. Reading it lets the Pro countdown reuse
+   * the SAME server-corrected clock the aggregator already buckets on, instead
+   * of the browser clock. 0 until the first upstream print arrives.
+   */
+  public getClockOffsetMs(): number {
+    return this.latestUpstreamTimestamp > 0 ? this.clockOffsetMs : 0;
+  }
+
   public setLeadTimeOffset(offsetMs?: number): void {
     const override =
       offsetMs != null && Number.isFinite(offsetMs) && offsetMs >= 0

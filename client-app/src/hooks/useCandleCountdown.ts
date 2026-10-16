@@ -28,6 +28,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { RealtimeCandleAggregator } from "@/lib/realtimeCandleAggregator";
+import { useTerminalStore } from "@/store/useTerminalStore";
 
 export interface CandleCountdownState {
   /** Whole seconds remaining to the next rollover (0 when unmounted). */
@@ -106,7 +107,11 @@ export function useCandleCountdown(
       // Fallback (no aggregator yet): epoch-aligned rollover on the minute
       // grid (Pocket-style :00/:01/:02...). For 1m this equals 60 − (s % 60);
       // for longer windows it tracks the instantly-fixed grid of the selection.
-      const nowMs = Date.now();
+      // Phase 2: the server↔client offset (shared with the aggregator / Pro
+      // countdown) corrects this wall-clock fallback too, so a skewed browser
+      // clock cannot roll the fallback bucket earlier or later than the grid.
+      const nowMs =
+        Date.now() + useTerminalStore.getState().serverTimeOffsetMs;
       const inWindow = nowMs % (win * 1000);
       const remainMs = (win * 1000 - inWindow) || win * 1000;
       const pct =

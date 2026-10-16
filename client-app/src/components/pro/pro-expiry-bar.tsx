@@ -14,6 +14,7 @@ import {
 } from "@/lib/expirySelection";
 import { timeframeToSeconds } from "@/lib/realtimeCandleAggregator";
 import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
+import { useServerNowMs } from "@/hooks/useServerClock";
 
 export const PRO_EXPIRY_OPTIONS = [
   { label: "1m", seconds: 60 },
@@ -75,36 +76,39 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   );
 
   const [isMounted, setIsMounted] = useState(false);
-  const [remainingS, setRemainingS] = useState<number>(expirationSeconds);
-  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  // The SHARED, server-corrected wall clock (Phase 2): the same offset the
+  // aggregator buckets on, so the countdown and the action-window gate below can
+  // never disagree with the backend grid nor with each other. 0 until mount.
+  const serverNowMs = useServerNowMs(250);
+  const armed = serverNowMs > 0;
   const countdownAnchorRef = useRef(0);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
+  // (Re)anchor the countdown when the browser mounts and whenever the selected
+  // window changes — using the SERVER clock, not Date.now(). Deliberately NOT
+  // re-run on every 250ms tick: the anchor is the instant the window opened, so
+  // `remaining = window − (serverNow − anchor)`. `expirationSeconds`/`armed`
+  // alone gate the (re)anchor, hence the deliberate dependency list.
   useEffect(() => {
-    const anchorMs = Date.now();
-    countdownAnchorRef.current = anchorMs;
-    setRemainingS(
-      expiryCountdownRemainingSeconds(anchorMs, anchorMs, expirationSeconds),
-    );
-    const iv = setInterval(() => {
-      const tickMs = Date.now();
-      setRemainingS(
-        expiryCountdownRemainingSeconds(
-          tickMs,
+    if (armed) countdownAnchorRef.current = serverNowMs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expirationSeconds, armed]);
+
+  // PART 24 [161] — the per-expiry action window is evaluated against the SAME
+  // server wall clock the countdown runs on, so the selector reflects the live
+  // "too late to act" boundary as it sweeps (and stays aligned to the backend).
+  const nowMs = armed ? serverNowMs : 0;
+  const remainingS =
+    armed && countdownAnchorRef.current > 0
+      ? expiryCountdownRemainingSeconds(
+          serverNowMs,
           countdownAnchorRef.current,
           expirationSeconds,
-        ),
-      );
-      // PART 24 [161] — every 250ms tick re-evaluates the per-expiry action
-      // window against the SAME wall clock the countdown runs on, so the
-      // selector reflects the live "too late to act" boundary as it sweeps.
-      setNowMs(tickMs);
-    }, 250);
-    return () => clearInterval(iv);
-  }, [expirationSeconds]);
+        )
+      : expirationSeconds;
 
   const price = Number.isFinite(currentPrice) && currentPrice > 0 ? currentPrice : 0;
   const direction = signal === "BUY" ? "UP" : signal === "SELL" ? "DOWN" : "HOLD";
