@@ -119,6 +119,16 @@ const SOCKET_OPTS: Partial<ManagerOptions & SocketOptions> = {
  */
 const LIVENESS_INTERVAL_MS = 15_000;
 const STALL_MS = 45_000;
+/**
+ * Tab-return freshness window. A backgrounded tab that regains focus must only
+ * nudge a transport that is actually down or half-open (no inbound frame for
+ * longer than this). A healthy feed ticks far more often, so returning to the
+ * tab no longer tears down a live socket — the cause of focus thrash and feed
+ * gaps when users switch windows.
+ */
+const VISIBILITY_STALE_MS = LIVENESS_INTERVAL_MS;
+/** Minimum spacing between forced reconnects (coalesces rapid online/visibility bursts). */
+const FORCE_RECONNECT_MIN_INTERVAL_MS = 2_000;
 
 // ── MODULE-LEVEL SINGLETON (Fast-Refresh / remount friendly) ──
 let globalSocket: Socket | null = null;
@@ -153,6 +163,8 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
   const lastWarnAtRef = useRef(0);
   /** Timestamp of the last inbound frame — drives the stall watchdog. */
   const lastPacketAtRef = useRef(0);
+  /** Debounce guard so a burst of online/visibility events cannot loop-reconnect. */
+  const lastForcedReconnectAtRef = useRef(0);
   const primaryRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -270,6 +282,13 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
     const forceReconnect = (why: string) => {
       const instance = socketRef.current;
       if (!instance) return;
+      const now = Date.now();
+      // Coalesce bursts: rapid `online`/`visibilitychange` events (or a fast
+      // tab-flip) must not each tear down the transport in turn.
+      if (now - lastForcedReconnectAtRef.current < FORCE_RECONNECT_MIN_INTERVAL_MS) {
+        return;
+      }
+      lastForcedReconnectAtRef.current = now;
       try {
         // A half-open transport (ERR_NETWORK_CHANGED) never fires a close, so
         // socket.io's backoff ladder never starts. Tear the transport down and
@@ -279,7 +298,7 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
           instance.disconnect();
         }
         instance.connect();
-        lastPacketAtRef.current = Date.now();
+        lastPacketAtRef.current = now;
         throttledWarn("[SocketProvider] forced reconnect:", why);
       } catch {
         /* never let recovery logic break the tree */
@@ -288,8 +307,22 @@ export const SocketProvider: React.FC<{ children: ReactNode }> = ({
 
     const onOnline = () => forceReconnect("network online");
     const onVisibility = () => {
-      if (document.visibilityState === "visible") {
-        forceReconnect("tab visible");
+      if (document.visibilityState !== "visible") return;
+      const instance = socketRef.current;
+      if (!instance) return;
+      // Only recover a transport that is actually down, or a half-open one that
+      // has gone silent past the freshness window. A healthy feed is left
+      // alone: force-reconnecting it on every tab focus caused visible feed
+      // gaps and reconnect thrash — the common case of switching windows.
+      const silentMs = Date.now() - lastPacketAtRef.current;
+      const stale =
+        lastPacketAtRef.current === 0 || silentMs > VISIBILITY_STALE_MS;
+      if (!instance.connected || stale) {
+        forceReconnect(
+          instance.connected
+            ? "tab visible (transport silent)"
+            : "tab visible (transport down)",
+        );
       }
     };
     window.addEventListener("online", onOnline);

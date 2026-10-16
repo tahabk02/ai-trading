@@ -86,11 +86,24 @@ export function targetZoneEnabled(
 export type TargetWithheldReason =
   | "too_late"
   | "stale_feed"
+  /** PART 50 [534] — no direction at all. Outranks every class sub-reason. */
+  | "no_direction"
   | "scored_only"
   | "pending_high_precision"
   | "below_tier"
   | "regime_review"
   | "no_target";
+
+/**
+ * PART 50 [534] — the engine's sub-reasons that mean "there is no direction to
+ * act on". A non-directional MARKET WAIT verdict carries one of these and must
+ * render "NO DIRECTION", never a class-gate reason (OTC_HF_FAIL / MTF_…).
+ */
+const NO_DIRECTION_DETAILS = new Set([
+  "no_directional_signal",
+  "awaiting_directional_signal",
+  "no_direction",
+]);
 
 export interface TargetRenderState {
   /** True ⇔ [394]: regime_gate "tradable" AND tier in T1–T3. */
@@ -128,21 +141,26 @@ export function targetRenderState(
       detail: null,
     };
   }
-  // Withheld — reason precedence, most specific engine verdict first.
+  // Withheld — reason precedence [534]: no direction / score below the bar,
+  // then the class gates (HF → MTF → history), then the regime verdict. A
+  // non-directional verdict is classified by its engine sub-reason BEFORE the
+  // pending_high_precision branch, so a MARKET WAIT can never read OTC_HF_FAIL.
   const reason: TargetWithheldReason =
     view.suppressedReason === "too_late" || detail === "too_late"
       ? "too_late"
       : detail === "stale_market_out_of_safety_bounds"
         ? "stale_feed"
-        : view.suppressedReason === "regime_scored_only" ||
-            view.regimeGate === "scored_only"
-          ? "scored_only"
-          : view.regimeGate === "pending_high_precision"
-            ? "pending_high_precision"
-            : view.regimeGate === "tradable"
-              ? "below_tier"
-              : // gate null / unknown future value — no verdict, fail closed
-                "regime_review";
+        : detail != null && NO_DIRECTION_DETAILS.has(detail)
+          ? "no_direction"
+          : view.suppressedReason === "regime_scored_only" ||
+              view.regimeGate === "scored_only"
+            ? "scored_only"
+            : view.regimeGate === "pending_high_precision"
+              ? "pending_high_precision"
+              : view.regimeGate === "tradable"
+                ? "below_tier"
+                : // gate null / unknown future value — no verdict, fail closed
+                  "regime_review";
   return {
     showTarget: false,
     regimeGate: view.regimeGate,
@@ -165,6 +183,9 @@ export function targetStateForPayload(
     regime_gate?: string | null;
     suppressed_reason?: string | null;
     target_price?: number;
+    /** PART 50 [534] — the verdict's own non-directional flags. */
+    market_waiting?: boolean;
+    signal?: string | null;
   } | null
   | undefined,
   targetPrice?: number,
@@ -178,7 +199,21 @@ export function targetStateForPayload(
       detail: "awaiting_payload",
     };
   }
-  const detail = normalizeViewRegimeDetail(payload.suppressed_reason);
+  const rawDetail = normalizeViewRegimeDetail(payload.suppressed_reason);
+  // [534] A verdict that is explicitly market-waiting, or that carries a
+  // present-but-non-directional signal label, has NO direction to act on: the
+  // first blocker is "no direction", and no class sub-reason may outrank it.
+  const signalLabel =
+    typeof payload.signal === "string" ? payload.signal.trim().toUpperCase() : null;
+  const nonDirectional =
+    payload.market_waiting === true ||
+    (signalLabel !== null &&
+      signalLabel !== "" &&
+      signalLabel !== "BUY" &&
+      signalLabel !== "SELL" &&
+      signalLabel !== "CALL" &&
+      signalLabel !== "PUT");
+  const detail = nonDirectional ? "no_directional_signal" : rawDetail;
   const view: SignalHoldView = {
     gatedSignal: null,
     tier: normalizeViewTier(payload.tier),
@@ -214,6 +249,11 @@ export function targetReasonCopy(
       return {
         label: "STALE FEED",
         hint: "The market feed is outside the safety bounds — the target is held, not guessed.",
+      };
+    case "no_direction":
+      return {
+        label: "NO DIRECTION",
+        hint: "The engine emitted no BUY/SELL verdict — there is no direction to act on, so no class filter or target applies.",
       };
     case "scored_only":
       return {

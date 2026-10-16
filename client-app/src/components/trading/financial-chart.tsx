@@ -67,6 +67,8 @@ import {
 import { useSignalViewStore } from "@/lib/signalViewStore";
 import { normalizeProjectionAtr, clampTargetToAnchor } from "@/lib/projectionAtr";
 import { ExpiryTimeMarker, type ExpiryMarkerTheme } from "@/lib/verticalTimeMarker";
+import { resolveDepartureLine } from "@/lib/departureLine";
+import type { DepartureContract } from "@/services/api";
 
 /**
  * ── COHERENCE PUBLISHER ──────────────────────────────────────────────────
@@ -135,6 +137,12 @@ interface FinancialChartProps {
   expirationSeconds?: number;
   signal?: "BUY" | "SELL" | null;
   confidence?: number;
+  /**
+   * EXACT DEPARTURE ("Ligne du Départ") contract from `prediction.horizon.departure`.
+   * When present and available the chart draws the exact entry (strike) level;
+   * when withheld it draws nothing and the operator reads the waiting state.
+   */
+  departure?: DepartureContract | null;
   /**
    * PART 19.2 [118] — book agreement internals; the 0-100 HUD number is a
    * confluence score (n/n strategy books aligned), never a probability.
@@ -233,6 +241,7 @@ interface ChartLineBag {
   stop?: IPriceLine;
   hi?: IPriceLine;
   lo?: IPriceLine;
+  departure?: IPriceLine;
 }
 
 function candleRow(row: GridCandle): CandlestickData {
@@ -496,6 +505,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   expirationSeconds = 300,
   signal,
   confidence,
+  departure = null,
   streamStalled = false,
   stalePrice = false,
   poOfflineOtc = false,
@@ -584,6 +594,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   anchorRef.current = predictionAnchorPrice;
   const signalRef = useRef(signal);
   signalRef.current = signal;
+  const departureRef = useRef(departure);
+  departureRef.current = departure;
   const confPropRef = useRef(confidence);
   confPropRef.current = confidence;
   const predictionDataRef = useRef(predictionData);
@@ -838,6 +850,34 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         PRICE_LINE,
         LineStyle.Solid,
         "LIVE",
+      );
+      // ── EXACT DEPARTURE ("Ligne du Départ") ──
+      // The exact entry (strike) level, re-evaluated LIVE from the engine's
+      // departure contract (`prediction.horizon.departure`) against the current
+      // tick. Drawn ONLY when the engine had a real basis (`available`) and this
+      // is not a PO-offline OTC proxy — the same honesty gate as the projection
+      // layer. ACTIVE/PENDING carry the side color (solid / dashed); an expired
+      // or missed window renders muted. When withheld the line is REMOVED, so the
+      // operator reads the waiting state instead of a synthetic level.
+      const dep = resolveDepartureLine(departureRef.current, {
+        livePrice: live,
+        nowMs: Date.now(),
+      });
+      const depRenderable = dep.renderLine && !poOfflineRef.current;
+      const depColor =
+        dep.status === "EXPIRED_ZONE" || dep.status === "MISSED_ENTRY"
+          ? NEUTRAL
+          : dep.side === "PUT"
+            ? BEARISH
+            : BULLISH;
+      setPriceLine(
+        bag,
+        "departure",
+        series,
+        depRenderable && dep.strikePrice != null ? dep.strikePrice : 0,
+        depColor,
+        dep.style === "dashed" ? LineStyle.Dashed : LineStyle.Solid,
+        "DÉPART",
       );
     },
     [],

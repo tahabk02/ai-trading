@@ -17,6 +17,7 @@ import {
 import { resolveCardTier, tierClearsSelection } from "@/lib/tierFilter";
 import { quoteProvenance, isPoOfflineOtc } from "@/lib/quoteProvenance";
 import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
+import { resolveCardGateDiagnostic } from "@/lib/gateDiagnostics";
 import { TierBadge } from "@/components/shared/tier-badge";
 
 interface AssetCardProps {
@@ -137,6 +138,24 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
         : demotedByTier
           ? `${cardTier ?? "This"} is below your ${minTier} trade floor — select a lower tier to trade it.`
           : undefined;
+
+  // ── PART 52 TRANSPARENT GATE DIAGNOSTIC (non-fabricating) ──
+  // Surface the ENGINE's own reason a non-interactive card is locked, plus what
+  // would unlock it. The reason is the payload's `suppressed_reason` (the fine
+  // class-gate / high-precision / regime sub-reason) or the regime display
+  // reason — never invented, and never a gate being bypassed. Market-closed
+  // cards have their own state and carry no gate reason.
+  const engineSuppressedReason =
+    (prediction?.data as { suppressed_reason?: string | null } | null | undefined)
+      ?.suppressed_reason ?? null;
+  const gateDiagnostic = resolveCardGateDiagnostic({
+    marketClosed,
+    interactive,
+    suppressedReason: engineSuppressedReason,
+    regimeReason: scoredOnly ? regime.reason : null,
+    demotedByFilter,
+    demotedByTier,
+  });
 
   const proHref = React.useMemo(
     () => buildProHref(symbol, horizon * 60),
@@ -560,6 +579,36 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
               {cardTargetCopy.label}
             </span>
           )}
+        </div>
+      )}
+
+      {/* ── PART 52 — GATE DIAGNOSTIC (non-interactive only) ────────────────
+          The engine's own reason the pair is locked, plus what would unlock
+          it. Non-fabricating: the code is the payload's suppressed_reason (or
+          the regime display reason); nothing here changes a gate. Hidden when
+          market-closed (that state explains itself) and when tradable. */}
+      {!marketClosed && !interactive && gateDiagnostic && (
+        <div
+          data-testid="gate-diagnostic"
+          data-code={gateDiagnostic.code}
+          title={`${gateDiagnostic.hint} ${gateDiagnostic.unlock}`}
+          className="mt-0.5 flex items-center gap-1 min-w-0 cursor-help"
+        >
+          <span className="num-fig text-[8px] uppercase tracking-tight text-term-ink-faint shrink-0">
+            GATE
+          </span>
+          <span
+            className={cn(
+              "num-fig text-[8px] font-bold uppercase tracking-tight truncate",
+              gateDiagnostic.tone === "amber"
+                ? "text-amber-400"
+                : gateDiagnostic.tone === "slate"
+                  ? "text-term-ink-faint"
+                  : "text-gold",
+            )}
+          >
+            {gateDiagnostic.label}
+          </span>
         </div>
       )}
 

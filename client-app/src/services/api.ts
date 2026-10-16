@@ -339,7 +339,60 @@ export interface PredictionResponse {
       samples: number;
       buffer_ticks: number;
     };
+    /**
+     * Deterministic price-target regression vector (Alpha.5 Pro). `available`
+     * is false and every derived value null when the tape is too short or
+     * degenerate — the engine withholds rather than fabricating a target.
+     */
+    target_regression?: TargetRegression | null;
+    /**
+     * Exact departure ("Ligne du Départ") contract derived from the regression:
+     * the strike (real entry) level, projected target, entry window and the
+     * ATR-derived slippage tolerance. All levels are null with
+     * `status === "WAITING_FOR_VALID_ENTRY_LEVEL"` when no real basis exists.
+     */
+    departure?: DepartureContract | null;
   };
+}
+
+/** Real price-target regression vector from the AI engine (`expiry_engine.py`). */
+export interface TargetRegression {
+  available: boolean;
+  reason: string | null;
+  direction: "BUY" | "SELL" | null;
+  horizon_seconds: number;
+  entry_price: number | null;
+  predicted_end_price: number | null;
+  confidence_margin: number | null;
+  confidence_lower: number | null;
+  confidence_upper: number | null;
+  hold_probability: number | null;
+  probability_basis: string | null;
+  samples: number;
+  residual_sigma: number | null;
+  regression: { slope: number; intercept: number; r2: number } | null;
+}
+
+/** Exact departure / strike contract status vocabulary. */
+export type DepartureStatus =
+  | "ACTIVE"
+  | "PENDING"
+  | "EXPIRED_ZONE"
+  | "MISSED_ENTRY"
+  | "WAITING_FOR_VALID_ENTRY_LEVEL";
+
+/** Exact departure ("Ligne du Départ") contract from the AI engine. */
+export interface DepartureContract {
+  available: boolean;
+  status: DepartureStatus;
+  reason: string | null;
+  side: "CALL" | "PUT" | null;
+  strike_price: number | null;
+  target_price: number | null;
+  entry_window_start_ms: number | null;
+  entry_window_end_ms: number | null;
+  max_allowed_slippage: number | null;
+  slippage: number | null;
 }
 
 export interface SignalData {
@@ -444,6 +497,44 @@ export interface TradeResponse {
 export interface TradeHistoryResponse {
   trades: TradeResponse[];
   count: number;
+}
+
+// ── PART 50 [537] — LOCAL trade journal (nothing is sent to Pocket Option) ──
+export interface JournalPersistRequest {
+  id?: string;
+  symbol: string;
+  side: "CALL" | "PUT";
+  entryTs: number;
+  entryPrice: number;
+  durationSec: number;
+  expiryTs: number;
+  regimeGate?: string | null;
+  tier?: string | null;
+  executable?: boolean;
+  suppressedReason?: string | null;
+  bookAligned?: number | null;
+  bookActive?: number | null;
+  signal?: string | null;
+  entrySource: string;
+}
+
+export interface JournalSettleRequest {
+  status: "WIN" | "LOSS" | "VOID";
+  settlementPrice?: number | null;
+  settlementTs?: number | null;
+  voidReason?: string | null;
+  settlementSource?: string | null;
+}
+
+export interface JournalEntryRow extends JournalPersistRequest {
+  id: string;
+  status: "OPEN" | "WIN" | "LOSS" | "VOID";
+  settlementPrice: number | null;
+  settlementTs: number | null;
+  voidReason: string | null;
+  settlementSource?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ── PART 44 [455] unified execution response envelope ──
@@ -1029,6 +1120,36 @@ const apiClient = {
     const { data } = await api.get<TradeHistoryResponse>("/trades", {
       params: { limit },
     });
+    return data;
+  },
+
+  // ── PART 50 [537] — LOCAL trade journal (nothing is sent to Pocket Option) ──
+  async createJournalEntry(
+    entry: JournalPersistRequest,
+  ): Promise<JournalEntryRow> {
+    const { data } = await api.post<JournalEntryRow>("/journal", entry);
+    return data;
+  },
+
+  async getJournalEntries(
+    limit = 200,
+    symbol?: string,
+  ): Promise<{ entries: JournalEntryRow[]; count: number }> {
+    const { data } = await api.get<{ entries: JournalEntryRow[]; count: number }>(
+      "/journal",
+      { params: { limit, ...(symbol ? { symbol } : {}) } },
+    );
+    return data;
+  },
+
+  async settleJournalEntry(
+    id: string,
+    settlement: JournalSettleRequest,
+  ): Promise<JournalEntryRow> {
+    const { data } = await api.patch<JournalEntryRow>(
+      `/journal/${encodeURIComponent(id)}/settle`,
+      settlement,
+    );
     return data;
   },
 

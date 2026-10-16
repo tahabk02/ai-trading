@@ -590,11 +590,36 @@ def _validate_response_finite(response: Dict[str, Any]) -> Dict[str, Any]:
         response["executable"] = False
         response["regime_gate"] = REGIME_GATE_SCORED_ONLY
         response["regime_status"] = REGIME_STATUS_PENDING_HIGH_PRECISION
-        response["suppressed_reason"] = (
-            response.get("waiting_reason")
-            or response.get("suppressed_reason")
-            or SUPPRESSED_REASON_AWAITING_DIRECTION
-        )
+
+    # ── PART 50 [534] — REASON PRIORITY: no direction OUTRANKS the class gate ──
+    # A non-directional / market-waiting verdict must surface the ABSENT
+    # DIRECTION, never a class sub-reason (otc_hf_fail / mtf_misaligned /
+    # insufficient_history …). Those sub-reasons describe a DIRECTIONAL verdict
+    # that a class filter vetoed; on a MARKET WAIT they are a stale artifact of
+    # running the class gate on an authoritative direction that was never
+    # emitted. The first blocker is that no direction exists. A REAL blocker
+    # (e.g. the confluence gate's CONFLUENCE_BELOW_THERMAL) is preserved.
+    _CLASS_SUB_REASONS = {
+        "otc_hf_fail",
+        "crypto_hf_fail",
+        "mtf_misaligned",
+        "mtf_insufficient_evidence",
+        "below_high_precision_bar",
+        "no_bid_ask_quotes",
+        "insufficient_history",
+        "spread_too_wide",
+    }
+    if not _directional or _still_waiting:
+        _existing_reason = response.get("suppressed_reason")
+        if (
+            not isinstance(_existing_reason, str)
+            or _existing_reason.strip() == ""
+            or _existing_reason in _CLASS_SUB_REASONS
+        ):
+            response["suppressed_reason"] = (
+                response.get("waiting_reason")
+                or SUPPRESSED_REASON_AWAITING_DIRECTION
+            )
 
     # ══ HONEST TIER + DISPATCHABLE / SCORED-ONLY SURFACE ═════════════════
     # Applied HERE, at the single function every `return` in this module

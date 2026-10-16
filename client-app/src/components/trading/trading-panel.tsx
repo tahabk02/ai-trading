@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   Lock,
   Unlock,
+  Crosshair,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import { formatPairPrice } from "@/utils/format";
@@ -35,6 +36,8 @@ import {
 import { expirySelectorState } from "@/lib/expirySelection";
 import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
 import { isPoOfflineOtc } from "@/lib/quoteProvenance";
+import { resolveDepartureLine } from "@/lib/departureLine";
+import { TradeJournalPanel } from "./trade-journal-panel";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
 // Mirrors the backend PO expiration whitelist exactly (seconds). The chart
@@ -201,6 +204,38 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   // NEVER display HOLD — the engine always resolves BUY/SELL. Before the first
   // gated directional verdict lands the badge shows a neutral waiting state.
   const direction = isCall ? "BUY" : isPut ? "SELL" : "WAITING";
+
+  // ── EXACT DEPARTURE ("Ligne du Départ") ──
+  // The engine's departure contract (`prediction.horizon.departure`) carries the
+  // exact entry (strike) level and the entry window. It is RE-EVALUATED against
+  // the live tick so the window readout and slippage stay current. This is a
+  // DISPLAY readout only: it never enables a button (that remains the existing
+  // signal/staleness/kill-switch gate) and it never fabricates a level — a
+  // withheld contract renders "WAITING FOR VALID ENTRY LEVEL".
+  const departure = resolveDepartureLine(
+    predictionData?.horizon?.departure ?? null,
+    { livePrice: currentPrice, nowMs: Date.now() },
+  );
+  const departureStrike = departure.strikePrice;
+  const departureWindowText =
+    departure.status === "PENDING"
+      ? `ENTRY IN ${formatCountdown(departure.entryCountdownSec)}`
+      : departure.status === "ACTIVE"
+        ? `OPEN · ${formatCountdown(departure.zoneValidRemainingSec)} LEFT`
+        : departure.status === "EXPIRED_ZONE"
+          ? "WINDOW CLOSED"
+          : departure.status === "MISSED_ENTRY"
+            ? "SLIPPAGE EXCEEDED"
+            : "";
+  const departureTone =
+    departure.status === "ACTIVE"
+      ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
+      : departure.status === "PENDING"
+        ? "bg-blue-500/10 border-blue-500/40 text-blue-300"
+        : departure.status === "MISSED_ENTRY" ||
+            departure.status === "EXPIRED_ZONE"
+          ? "bg-amber-500/10 border-amber-500/40 text-amber-400"
+          : "bg-slate-800/60 border-slate-700 text-slate-400";
 
   // ── LIVE CANDLE-CLOSE COUNTDOWN (LEAD-SHIFTED, SSR-safe) ──
   // Sweeps down to the next barrier rollover. Grid-locked to the aggregator's
@@ -653,6 +688,31 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         show through the controls. `z-10` lifts them above that grid.
       */}
       <div className="sticky bottom-0 z-10 mt-auto px-3 sm:px-4 pt-3 sm:pt-4 pb-2 sm:pb-3 flex flex-col gap-2 sm:gap-2.5 bg-[var(--tp-surface)] border-t border-[var(--tp-border)] backdrop-blur-sm">
+        {/* EXACT DEPARTURE READOUT — strike + entry window, non-fabricating. */}
+        <div
+          data-testid="departure-readout"
+          data-status={departure.status}
+          className={cn(
+            "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border font-mono text-[9px] sm:text-[10px] font-bold uppercase tracking-wider",
+            departureTone,
+          )}
+        >
+          <span className="flex items-center gap-1.5 shrink-0">
+            <Crosshair className="w-3 h-3 shrink-0" />
+            DÉPART
+          </span>
+          <span
+            className="tabular-nums truncate"
+            data-testid="departure-strike"
+          >
+            {departureStrike != null
+              ? `$${formatPairPrice(departureStrike, activeSymbol)}`
+              : "—"}
+          </span>
+          <span className="truncate text-right">
+            {departureWindowText || departure.label}
+          </span>
+        </div>
         {/* HIGHER / BUY */}
         <button
           data-testid="action-call"
@@ -679,6 +739,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         >
           <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6" />
           <span className="text-sm sm:text-lg font-black">{t("higherBuy")}</span>
+          <span className="text-[9px] sm:text-[10px] font-mono font-bold opacity-90 tabular-nums">
+            {departureStrike != null
+              ? `@ ${formatPairPrice(departureStrike, activeSymbol)}`
+              : ""}
+          </span>
         </button>
 
         {/* LOWER / SELL */}
@@ -703,6 +768,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         >
           <TrendingDown className="w-5 h-5 sm:w-6 sm:h-6" />
           <span className="text-sm sm:text-lg font-black">{t("lowerSell")}</span>
+          <span className="text-[9px] sm:text-[10px] font-mono font-bold opacity-90 tabular-nums">
+            {departureStrike != null
+              ? `@ ${formatPairPrice(departureStrike, activeSymbol)}`
+              : ""}
+          </span>
         </button>
       </div>
 
@@ -724,6 +794,12 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           </div>
         </div>
       )}
+
+      {/* PART 50 [535]-[538] — LOCAL Pocket-style trade journal. Nothing here
+          is ever sent to Pocket Option; it is a stopwatch + scoreboard. */}
+      <div className="mx-3 sm:mx-4 mb-3">
+        <TradeJournalPanel stalePrice={stalePrice} />
+      </div>
 
       {/* Footer */}
       <div className="mt-auto px-3 sm:px-4 py-2.5 sm:py-3 border-t border-slate-800/60 bg-obsidian-950/40 safe-area-bottom">

@@ -247,6 +247,42 @@ describe("PART 40 [395] — every withheld state carries one truthful reason", (
     expect(st.reason).toBe("too_late");
   });
 
+  it("[534] a non-directional MARKET WAIT renders NO DIRECTION, not HF", () => {
+    // The exact reported bug: MARKET WAIT 12.4% (4/6) whose payload still
+    // carries a class sub-reason must cite the missing direction, not HF.
+    const st = targetStateForPayload({
+      tier: "T5",
+      regime_gate: "pending_high_precision",
+      suppressed_reason: "otc_hf_fail",
+      market_waiting: true,
+      signal: null,
+      target_price: 0,
+    });
+    expect(st.showTarget).toBe(false);
+    expect(st.reason).toBe("no_direction");
+    expect(targetReasonCopy(st.reason, st.detail).label).toBe("NO DIRECTION");
+  });
+
+  it("[534] an explicit no_directional_signal view outranks HF", () => {
+    const st = targetRenderState(
+      view({
+        tier: "T5",
+        regimeGate: "pending_high_precision",
+        regimeDetail: "no_directional_signal",
+      }),
+      1.085,
+    );
+    expect(st.reason).toBe("no_direction");
+  });
+
+  it("[534] a directional HF failure still reads pending_high_precision", () => {
+    const st = targetRenderState(
+      view({ regimeGate: "pending_high_precision", regimeDetail: "otc_hf_fail" }),
+      1.085,
+    );
+    expect(st.reason).toBe("pending_high_precision");
+  });
+
   it("the same withheld state reads identically for a payload and for a view", () => {
     const fromPayload = targetStateForPayload(
       payload({ tier: "T5", regime_gate: "pending_high_precision", suppressed_reason: "otc_hf_fail" }),

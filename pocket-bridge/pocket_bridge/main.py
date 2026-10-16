@@ -34,6 +34,7 @@ from .config import (
     mask_uid,
 )
 from .m20_engine import M20Engine
+from .redis_pub import RedisPublisher
 from .relay import RelayServer
 
 logging.basicConfig(
@@ -90,16 +91,28 @@ async def amain(settings: BridgeSettings) -> None:
     bridge = PocketOptionBridge(settings, engine, session=stored_session)
     relay.health_provider = bridge.health_payload
 
-    # Wire bridge -> relay.
+    # ── REDIS DUAL-PATH (ALPHA.5 PRO) ──
+    # Second, ADDITIVE fan-out of the same tape to `radar_bus`. The relay above
+    # remains the SSOT transport core-backend consumes; this publisher only ever
+    # enqueues into its own bounded outbox, so a slow Redis can never slow, drop
+    # or reorder a relay frame. No REDIS_URL -> a disabled no-op publisher.
+    publisher = RedisPublisher()
+    await publisher.start()
+
+    # Wire bridge -> relay (+ Redis).
     async def on_tick(payload: Dict) -> None:
         await relay.broadcast({"type": "tick", "payload": payload})
+        await publisher.publish_tick(payload)
 
     async def on_candle(candle) -> None:
-        await relay.broadcast({"type": "candle", "payload": candle.to_dict()})
+        candle_payload = candle.to_dict()
+        await relay.broadcast({"type": "candle", "payload": candle_payload})
+        await publisher.publish_candle(candle_payload)
 
     async def on_status(payload: Dict) -> None:
         await relay.broadcast({"type": "status", "payload": payload})
         await relay.broadcast({"type": "snapshot", "payload": engine.snapshots()})
+        await publisher.publish_status(payload)
 
     async def on_ready() -> None:
         # Explicit readiness handshake: the Node backend holds its subscribe
@@ -108,9 +121,13 @@ async def amain(settings: BridgeSettings) -> None:
         await relay.broadcast(
             {"type": "ready", "payload": {"assets_initialized": True}}
         )
+        await publisher.publish_status(
+            {"status": "ready", "assets_initialized": True}
+        )
 
     async def on_heartbeat(payload: Dict) -> None:
         await relay.broadcast({"type": "heartbeat", "payload": payload})
+        await publisher.publish_heartbeat(payload)
 
     bridge.on_tick = on_tick
     bridge.on_candle = on_candle
@@ -231,6 +248,8 @@ async def amain(settings: BridgeSettings) -> None:
                     "uptime_s": uptime_s,
                     # Last-resort credential-login availability (opt-in, masked).
                     **credential_login_status(),
+                    # Additive Redis dual-path health (never affects the relay).
+                    "redis": publisher.status(),
                 }
             )
             self.send_response(200)
@@ -259,6 +278,7 @@ async def amain(settings: BridgeSettings) -> None:
     periodic.cancel()
     await bridge.stop()
     await relay.close()
+    await publisher.stop()
     if health_server is not None:
         try:
             health_server.shutdown()

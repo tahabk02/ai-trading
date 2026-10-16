@@ -1,16 +1,39 @@
 # =============================================================================
 #  PRODUCTION STACK — Hetzner VPS (4 GB RAM, Ubuntu 22.04/24.04)
 # =============================================================================
-#  Deploy:
+#  Deploy (recommended — handles env, migrations, TLS, health checks):
+#    cp .env.production.example .env            # then fill it in
+#    ./deploy.sh --edge                         # real domain → full stack incl. nginx + TLS
+#  Bare IP, no domain (plain HTTP on :80, profile `http`):
+#    ./deploy-vps.sh                            # rsync + provision + deploy over SSH
+#    # …or run ON the VPS:  docker compose -f docker-compose.prod.yml --profile http up -d --build
+#  …or by hand:
 #    cp core-backend/.env.prod.example core-backend/.env.prod   # then fill in
 #    cp ai-engine/.env.example        ai-engine/.env
 #    cp pocket-bridge/.env.example    pocket-bridge/.env
 #    docker compose -f docker-compose.prod.yml up -d --build
 #
+#  ── EDGE PROFILE (bundled nginx + certbot) ─────────────────────────────────
+#  The `edge` profile adds a TLS-terminating nginx reverse proxy and a certbot
+#  renewal loop. It is OFF by default so a host-level proxy can be used instead:
+#    docker compose -f docker-compose.prod.yml --profile edge up -d nginx certbot
+#  nginx is the ONLY service that publishes ports (80/443) to the internet.
+#
+#  ── RESOURCE LIMITS ────────────────────────────────────────────────────────
+#  Every service carries BOTH a memory ceiling and a CPU ceiling. On a shared
+#  4 GB VPS a runaway consumer (a model load, a Prisma query storm) must be
+#  bounded by the kernel, not by hope — an unbounded container can OOM-kill
+#  postgres or the bridge and take the trading session with it.
+#
+#  ── RESTART POLICY ─────────────────────────────────────────────────────────
+#  `unless-stopped` (not `always`): a service an operator deliberately stopped
+#  stays stopped across daemon restarts. `always` resurrects a manually-stopped
+#  container, which surprises operators during maintenance windows.
+#
 #  ── NETWORK POSTURE (why almost nothing is published) ──────────────────────
 #  Only the frontend is reachable from outside, and even that binds to
-#  127.0.0.1 by default: TLS is terminated by a reverse proxy on the host
-#  (Caddy/nginx), which is the only process that should face the internet.
+#  127.0.0.1 by default: TLS is terminated by the `edge` nginx (or a host-level
+#  Caddy/nginx), which is the only process that should face the internet.
 #
 #  postgres / redis / ai-engine / core-backend / execution-engine /
 #  pocket-bridge are reachable ONLY over the internal `radar_network` bridge.
@@ -31,7 +54,7 @@ name: trading-ai-platform
 # Reusable hardening block: no privilege escalation + bounded logs.
 # Unbounded json-file logs are a top cause of a 4 GB VPS filling its disk.
 x-hardened: &hardened
-  restart: always
+  restart: unless-stopped
   security_opt:
     - no-new-privileges:true
   logging:
@@ -50,7 +73,7 @@ services:
   # deploy silently hit the SQLite fallback (file:./dev.db) and returned
   # nothing while the service looked healthy.
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: prod_postgres
     <<: *hardened
     environment:
@@ -88,6 +111,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - radar_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 768m
     healthcheck:
       # -d/-U target the real database: `pg_isready` alone reports ready even
       # while the initdb/migration phase is still running.
@@ -137,6 +165,11 @@ services:
       - redis_data:/data
     networks:
       - radar_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256m
     healthcheck:
       # Must authenticate, otherwise the probe reports NOAUTH as a failure
       # (which would be correct, but the -a form keeps it explicit).
@@ -198,6 +231,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "1.50"
           memory: 1g
     healthcheck:
       # urllib (not curl/wget): python:3.11-slim has no curl, and urllib raises
@@ -337,6 +371,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "1.00"
           memory: 768m
     healthcheck:
       test:
@@ -396,6 +431,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "0.50"
           memory: 384m
     healthcheck:
       # /health answers 503 until the Redis subscription is live, so `up`
@@ -445,6 +481,15 @@ services:
       PO_PASSWORD_FILE: ${PO_PASSWORD_FILE:-}
       PO_LOGIN_TIMEOUT: ${PO_LOGIN_TIMEOUT:-45}
       PO_TOS_CONSENT: ${PO_TOS_CONSENT:-}
+      # ── ADDITIVE REDIS DUAL-PATH (ALPHA.5 PRO) ──
+      # The bridge publishes its live tape to `radar_bus` IN ADDITION to the
+      # WebSocket relay core-backend already consumes (the relay stays the SSOT
+      # transport; this is a second, non-blocking fan-out through a bounded
+      # outbox). Leave empty to disable entirely — the bridge then runs
+      # relay-only, exactly as before.
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      PO_BRIDGE_REDIS_PREFIX: ${PO_BRIDGE_REDIS_PREFIX:-po}
+      PO_BRIDGE_REDIS_ENABLED: ${PO_BRIDGE_REDIS_ENABLED:-true}
     env_file:
       - path: ./pocket-bridge/.env
         required: false
@@ -470,6 +515,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "0.50"
           memory: 384m
     healthcheck:
       test:
@@ -482,6 +528,12 @@ services:
       retries: 5
       # The bridge is healthy in a clean "awaiting_ssid" state by design.
       start_period: 30s
+    depends_on:
+      redis:
+        # Only gates the optional dual-path publish on a healthy bus; the
+        # relay itself never depends on Redis, so a down bus cannot stop the
+        # bridge from streaming to core-backend.
+        condition: service_healthy
 
   # ===========================================================================
   #  VISUALIZATION LAYER
@@ -529,6 +581,7 @@ services:
     deploy:
       resources:
         limits:
+          cpus: "0.75"
           memory: 512m
     healthcheck:
       # /api/healthz is answered LOCALLY by Next (reserved in server.js), so a
@@ -544,6 +597,149 @@ services:
       retries: 3
       start_period: 20s
 
+  # ===========================================================================
+  #  HTTP GATEWAY  (plain HTTP on :80 for bare-IP access)  — profile: http
+  # ===========================================================================
+  #  For a host reached by IP only (e.g. http://91.99.71.111) there is NO
+  #  domain, and Let's Encrypt cannot issue for a bare IP, so TLS is
+  #  impossible. This gateway terminates plain HTTP and is the ONLY
+  #  internet-facing service in that mode. Start it explicitly (the bundled
+  #  deploy-vps.sh does this for you):
+  #    docker compose -f docker-compose.prod.yml --profile http up -d nginx-http
+  #
+  #  It is profile-gated so it never collides on :80 with the TLS `edge` nginx
+  #  below. Use ONE of them: `http` for a bare IP, `edge` for a real domain.
+  #  Its config is a full, static nginx.conf (./nginx/nginx.conf) — no
+  #  envsubst/template step, because there is no ${DOMAIN} to substitute.
+  nginx-http:
+    image: nginx:1.27-alpine
+    container_name: prod_nginx_http
+    profiles: ["http"]
+    <<: *hardened
+    environment:
+      TZ: UTC
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    # The only published port in this mode (see the NETWORK POSTURE note).
+    ports:
+      - "80:80"
+    depends_on:
+      client-app:
+        condition: service_healthy
+      core-backend:
+        condition: service_healthy
+      ai-engine:
+        condition: service_healthy
+    networks:
+      - radar_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===========================================================================
+  #  EDGE LAYER  (nginx TLS termination + certbot renewal)  — profile: edge
+  # ===========================================================================
+  #  OFF by default. Start explicitly:
+  #    docker compose -f docker-compose.prod.yml --profile edge up -d nginx certbot
+  #  …or let ./deploy.sh --edge do it (it issues the certificate first).
+
+  # ── NGINX (edge reverse proxy + TLS) ──────────────────────────────────────
+  # The ONLY service that publishes internet-facing ports. Its config is a FULL
+  # nginx.conf (see infra/nginx/nginx.conf) rendered from a template at start:
+  #   ./infra/nginx/nginx.conf -> /etc/nginx/templates/nginx.conf.template
+  #   NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx   =>   /etc/nginx/nginx.conf
+  # NGINX_ENVSUBST_FILTER restricts substitution to ${DOMAIN} ONLY, so nginx's
+  # own $host / $http_upgrade / $connection_upgrade survive untouched.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: prod_nginx
+    profiles: ["edge"]
+    <<: *hardened
+    environment:
+      TZ: UTC
+      DOMAIN: ${DOMAIN:?DOMAIN is required for the edge profile - the public hostname}
+      NGINX_ENVSUBST_TEMPLATE_DIR: /etc/nginx/templates
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      # `$$` escapes the literal `$` anchor from compose interpolation, so the
+      # container receives `^DOMAIN$`.
+      NGINX_ENVSUBST_FILTER: "^DOMAIN$$"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
+      # Shared with certbot: the Let's Encrypt lineage + the ACME webroot.
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    # The ONLY published ports in the whole stack. 80 for the ACME challenge +
+    # the HTTPS redirect; 443 for the app. Nothing else faces the internet.
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      client-app:
+        condition: service_healthy
+      core-backend:
+        condition: service_healthy
+      ai-engine:
+        condition: service_healthy
+    networks:
+      - radar_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128m
+    healthcheck:
+      # Busybox wget ships in nginx:alpine; /nginx-health answers on :80 without
+      # depending on a valid certificate existing yet.
+      test:
+        - CMD-SHELL
+        - "wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── CERTBOT (renewal loop) ────────────────────────────────────────────────
+  # Initial issuance is done ONCE by deploy.sh (standalone, before nginx binds
+  # :80). This service only RENEWS, using the webroot shared with nginx. It
+  # never runs as a long-lived privileged process; it just re-checks twice a day
+  # and certbot acts only inside the 30-day renewal window.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: prod_certbot
+    profiles: ["edge"]
+    <<: *hardened
+    environment:
+      TZ: UTC
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint:
+      - /bin/sh
+      - -c
+    # `trap exit TERM` lets `docker stop` interrupt the sleep promptly. The
+    # `wait $${!}` holds the shell open on the background sleep.
+    command:
+      - >
+        trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!}; done
+    networks:
+      - radar_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+
 # =============================================================================
 #  PERSISTENT VOLUMES  (named volumes survive `docker compose down`)
 #  A bare `down` keeps them; `down -v` DESTROYS the database.
@@ -552,6 +748,12 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  # TLS material + the ACME webroot, shared between the edge nginx and certbot.
+  # A bare `down` keeps them; `down -v` also loses the certificate lineage.
+  certbot_certs:
+    driver: local
+  certbot_www:
     driver: local
 
 networks:

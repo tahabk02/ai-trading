@@ -7,6 +7,7 @@ import settingsRoutes from "./settings.routes";
 import riskRuleRoutes from "./riskRule.routes";
 import riskStateRoutes from "./riskState.routes";
 import tradesRoutes from "./trades.routes";
+import journalRoutes from "./journal.routes";
 import historyRoutes from "./history.routes";
 import signalOutcomeRoutes from "./signalOutcome.routes";
 import auditRoutes from "./audit.routes";
@@ -22,6 +23,7 @@ router.use("/", settingsRoutes); // GET/PUT /settings
 router.use("/", riskRuleRoutes); // CRUD /risk-rules
 router.use("/", riskStateRoutes); // GET/POST/PUT /risk-state (kill switch)
 router.use("/", tradesRoutes); // POST/GET /trades
+router.use("/", journalRoutes); // POST/GET /journal + PATCH /journal/:id/settle (PART 50)
 router.use("/", historyRoutes); // GET /history + /health/history (30-min data layer)
 router.use("/", signalOutcomeRoutes); // POST/GET /signal-outcomes + /signal-outcomes/stats
 router.use("/", auditRoutes); // GET /audit/execution-logs (PART 44 [456])

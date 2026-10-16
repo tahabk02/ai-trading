@@ -51,7 +51,12 @@ DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket
 #: momentary network blip self-heals without ever spinning into an endless
 #: reconnect storm that could look like brute-forcing.
 TRANSIENT_CONNECT_ATTEMPTS = 3
-RECONNECT_BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60)
+#: Exponential reconnect cadence: starts at 2s and is CAPPED at 30s (ALPHA.5 PRO
+#: daemon spec). Kept as an explicit tuple rather than a computed power-of-two so
+#: the ladder is auditable at a glance; the reader loops clamp the index to the
+#: last entry, so a plate that keeps failing never waits longer than 30s but a
+#: recovered plate is picked up on the very next step.
+RECONNECT_BACKOFF_SECONDS = (2, 5, 10, 20, 30)
 
 #: Extra seconds the bridge waits beyond the SDK's own handshake budget before
 #: declaring a transport failure. Without this the Python-side

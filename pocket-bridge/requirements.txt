@@ -1,6 +1,11 @@
 BinaryOptionsToolsV2==0.2.14
 websockets>=12.0
 python-dotenv>=1.0
+# Additive Redis dual-path (ALPHA.5 PRO): fan ticks/candles/status out to
+# `radar_bus`. Optional at runtime — without REDIS_URL the publisher is a
+# no-op, and with it present but this package missing the bridge degrades to
+# the relay-only path (one logged warning) instead of failing to start.
+redis>=5.0
 # Headless SSID refresh (session/refresh_ssid.py) — the bridge tolerates its
 # absence with a clear install hint, but the container needs it.
 playwright>=1.40

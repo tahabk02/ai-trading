@@ -509,6 +509,26 @@ export class WebSocketService {
       executable?: boolean;
       regime_gate?: string | null;
       suppressed_reason?: string | null;
+      /**
+       * PART 52 — deep time-series expiry + strike vectors: the contract
+       * boundary (entry → aligned expiry), the projected endpoint / strike
+       * status, and the raw math vectors (start price, predicted end price,
+       * modeled probability score + basis). Declared here so the socket hop
+       * preserves them instead of silently dropping the engine's math.
+       */
+      entry_timestamp?: string | null;
+      entry_price?: number | null;
+      expiry_timestamp?: string | null;
+      predicted_target_price?: number | null;
+      target_status?: string | null;
+      prediction_vectors?: {
+        start_price: number | null;
+        predicted_end_price: number | null;
+        probability_score: number | null;
+        probability_basis: string | null;
+        direction: "BUY" | "SELL" | null;
+        horizon_seconds: number;
+      } | null;
     }) {
     if (!this.io) return;
     this.io.to(payload.symbol).emit("live_quant_signal", payload);

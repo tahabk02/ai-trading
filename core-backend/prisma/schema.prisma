@@ -183,6 +183,43 @@ model AssetHistory {
   @@index([createdAt])
 }
 
+// ── PART 50 [537] — LOCAL TRADE JOURNAL (Pocket-style start/end) ──
+// A paper journal of trades the OPERATOR says they took on Pocket Option.
+// Nothing here is ever sent to PO: this is a local stopwatch + scoreboard.
+// The entry price is the last genuine PO tick at press time; settlement is the
+// LAST PO tick with ts <= expiry (never the first print after expiry). The
+// `gate*` columns are CONTEXT captured at press time, not a claim that a
+// signal existed (`impliesSignal` is always false).
+model JournalEntry {
+  id               String   @id @default(uuid())
+  symbol           String
+  side             String   // CALL | PUT
+  entryTs          BigInt   // broker/tick-clock epoch ms of the entry PO tick
+  entryPrice       Float    // last live PO tick price at press time
+  durationSec      Int      // TIMER mode duration
+  expiryTs         BigInt   // entryTs + durationSec * 1000
+  regimeGate       String?
+  tier             String?
+  executable       Boolean  @default(false)
+  suppressedReason String?
+  bookAligned      Int?
+  bookActive       Int?
+  signal           String?
+  status           String   @default("OPEN") // OPEN | WIN | LOSS | VOID
+  settlementPrice  Float?
+  settlementTs     BigInt?
+  voidReason       String?
+  entrySource      String   // feed that authored the entry price
+  settlementSource String?
+  impliesSignal    Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([status])
+  @@index([createdAt])
+}
+
 // Raw real-tick persistence for the 30-minute window (one row per genuine print).
 model TickHistory {
   id        String   @id @default(uuid())

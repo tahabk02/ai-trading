@@ -1288,3 +1288,79 @@ Proven offline: with `os.environ['POCKET_OPTION_SSID']=''`,
 `pocket-bridge/.env.example`,
 `core-backend/src/lib/__tests__/pocketOptionBridge.status.test.ts`.
 
+## PART 52 - deep time-series endpoint prediction + strike/expiry vectors (DONE)
+
+### What was found
+
+The engine already froze a target (SignalLock `target_price`/`expires_at_ms`) and
+tied a `entry_ts`/`expiry_ts` window (`horizon_engine.build_horizon_payload`), but
+three real gaps remained:
+
+- The horizon table was MINUTE-only (`HORIZON_OPTIONS=(1,2,3,5,10)`); sub-minute
+  expiries (5s/15s/30s) did not exist.
+- No confidence band and no projected-endpoint vector. `_regression_stats`
+  reported a slope + R² but nothing projected the regression to the expiry, and
+  nothing bounded it.
+- The emitted contract had no `entryPrice`, no `targetStatus`, and the core
+  backend's live broadcast carried `target_price` with NO raw math vector (start
+  price / predicted end price / probability) — the client could not tell a
+  computed target from a bare number.
+
+### What was done
+
+- NEW `ai-engine/app/services/expiry_engine.py` — pure, no-fabrication math:
+  `HORIZON_SECONDS=(5,15,30,60,300)`, `resolve_horizon_seconds` (floor-biased
+  snap), `align_expiry_ms` (expiry lands ON a Δt boundary; exact boundary
+  preserved), `compute_price_target_regression` (OLS over the real 1 Hz close
+  tape projected Δt steps ahead → `predicted_end_price`; ±z·σ·√Δt confidence
+  band; `hold_probability` = normal CDF of the projected edge, labelled
+  `regression_residual_gaussian`), `symbol_price_digits`. Withheld
+  (`available=False`, all-None) on a short/degenerate tape and NO probability on
+  a zero-σ tape.
+- `ai-engine/app/services/horizon_engine.py` — `build_horizon_payload` now emits
+  an additive `target_regression` block computed over the SAME real buffer
+  (guarded so a regression hiccup can never break the contract).
+- NEW `core-backend/src/lib/expiryEngine.ts` — backend twin:
+  `HORIZON_SECONDS`, `resolveHorizonSeconds`, `alignExpiryMs`,
+  `computePriceTargetVector`, `computeTargetStatus`, `normalCdf`,
+  `computeTradeParameters` → `{entryTimestamp, entryPrice, expiryTimestamp,
+  predictedTargetPrice, targetStatus, horizonSeconds, predictionVectors{start_price,
+  predicted_end_price, probability_score, probability_basis, direction,
+  horizon_seconds}}`.
+- `core-backend/src/services/liveTickSignal.dispatch.ts` — the broadcast now
+  prefers the AI Engine's own `target_regression`, falls back to a deterministic
+  OLS regression over `realtimeTickBuffer`, and rides
+  `entry_timestamp`/`entry_price`/`expiry_timestamp`/`predicted_target_price`/
+  `target_status`/`prediction_vectors` on the `live_quant_signal` payload.
+- `core-backend/src/services/websocket.service.ts` — `broadcastLiveQuantSignal`
+  payload type declares the new (optional) fields so the socket hop preserves the
+  math instead of dropping it.
+
+### Verification
+
+- `ai-engine` — NEW `tests/test_expiry_engine.py` (**15 passed**): horizon set +
+  snapping, boundary alignment edges, real numeric endpoints, direction honoring,
+  determinism, withheld/degenerate/flat paths, digits. Full suite **590 passed /
+  1 xfailed** (no regressions).
+- `core-backend` — NEW `src/lib/__tests__/expiryEngine.test.ts` (**18 passed**)
+  and NEW `src/lib/__tests__/liveTickSignal.expiryVectors.test.ts` (**3 passed**,
+  drives the real `broadcast()` path and asserts the emitted `live_quant_signal`
+  payload carries the vectors, the AI-Engine-regression preference, and the
+  null-when-withheld path). `npx tsc --noEmit` → **0**; `npx vitest run` →
+  **57 files / 520 passed** (was 55/499; +2 files/+21).
+- LIVE socket emission: proven at the emission boundary by the dispatch test
+  above; a real end-to-end `/tick-signal` → socket frame is N/A here (the AI
+  Engine at `127.0.0.1:8000` is not running in this environment) → OK-withheld +
+  reason, never a pass.
+
+### Files
+
+`ai-engine/app/services/expiry_engine.py`,
+`ai-engine/app/services/horizon_engine.py`,
+`ai-engine/tests/test_expiry_engine.py`,
+`core-backend/src/lib/expiryEngine.ts`,
+`core-backend/src/lib/__tests__/expiryEngine.test.ts`,
+`core-backend/src/lib/__tests__/liveTickSignal.expiryVectors.test.ts`,
+`core-backend/src/services/liveTickSignal.dispatch.ts`,
+`core-backend/src/services/websocket.service.ts`.
+

@@ -52,6 +52,12 @@ from typing import Any, Deque, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from .expiry_engine import (
+    compute_departure_line,
+    compute_price_target_regression,
+    symbol_price_digits,
+)
+
 EPS = 1e-12
 
 # ── SUPPORTED TARGET-EXPIRY HORIZONS (minutes) ──
@@ -571,6 +577,41 @@ def build_horizon_payload(
 
     confidence_pct = round(float(stable["confidence"]) * 100.0, 1)
 
+    # ── DETERMINISTIC PRICE-TARGET REGRESSION VECTOR ──
+    # Additive, real, and WITHHELD (available=False, all-None) when the tape is
+    # too short or degenerate — never a fabricated endpoint. `horizon_seconds` is
+    # the contract expiry (hz minutes) expressed in seconds.
+    try:
+        target_regression = compute_price_target_regression(
+            tape,
+            entry_price=live_price,
+            horizon_seconds=int(hz * 60),
+            direction=direction_buy_sell,
+            symbol_digits=symbol_price_digits(symbol),
+        )
+    except Exception:  # noqa: BLE001 - a regression hiccup must not break the contract
+        target_regression = None
+
+    # ── EXACT DEPARTURE / STRIKE CONTRACT ──
+    # Pure derivation from the regression vector above: the exact entry level
+    # (strike), the projected target, and the entry window in epoch-ms. Never
+    # invents a level — a withheld regression yields status
+    # WAITING_FOR_VALID_ENTRY_LEVEL with all-None levels so the terminal renders
+    # "WAITING FOR VALID ENTRY LEVEL" instead of a synthetic line. Slippage
+    # tolerance is derived from the REAL ATR only.
+    entry_ms = int(now_utc.timestamp() * 1000)
+    expiry_ms = entry_ms + int(hz * 60 * 1000)
+    departure = compute_departure_line(
+        target_regression,
+        side=direction_buy_sell,
+        atr=atr,
+        entry_ms=entry_ms,
+        expiry_ms=expiry_ms,
+        current_price=live_price,
+        symbol_digits=symbol_price_digits(symbol),
+        now_ms=entry_ms,
+    )
+
     return {
         "horizon_minutes": hz,
         "backend_timeframe": HORIZON_TO_BACKEND_TF.get(hz, "1m"),
@@ -622,4 +663,6 @@ def build_horizon_payload(
             "samples": int(stable["samples"]),
             "buffer_ticks": int(tape.size),
         },
+        "target_regression": target_regression,
+        "departure": departure,
     }

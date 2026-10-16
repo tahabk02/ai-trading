@@ -28,6 +28,12 @@ import { secrets } from "../config/secrets";
 import { websocketService } from "./websocket.service";
 import { clampMinTierToEngineSet } from "../lib/signalTiers";
 import type { SignalTier } from "../lib/signalTiers";
+import {
+  computePriceTargetVector,
+  computeTradeParameters,
+  resolveHorizonSeconds,
+  symbolPriceDigits,
+} from "../lib/expiryEngine";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { publishDurableSignal } from "../messaging/signalStream";
 import { isAlertEligible } from "../lib/alertGate";
@@ -489,6 +495,68 @@ public clearSelectedHorizonMinutes(symbol: string): void {
         ? Number(data.horizon_minutes)
         : this.getSelectedHorizonMinutes(symbol);
 
+    // ── DEEP TIME-SERIES EXPIRY + STRIKE VECTORS (PART 52) ──
+    // The AI Engine's own projected endpoint + modeled hold probability when it
+    // emitted a `target_regression` block; otherwise a deterministic OLS
+    // regression over the REAL tick tape. Either way the numbers are computed
+    // from real prices — a tape too short/degenerate yields null vectors, never
+    // a fabricated target. The contract boundary (entry → aligned expiry) and
+    // the strike status travel WITH the verdict.
+    const aiRegression =
+      (data?.horizon && data.horizon.target_regression) ||
+      data?.target_regression ||
+      null;
+    const horizonSeconds = resolveHorizonSeconds(
+      horizonMinutes !== null ? horizonMinutes * 60 : null,
+    );
+    const entryMsParsed = Date.parse(String(data?.timestamp ?? ""));
+    const entryMs = Number.isFinite(entryMsParsed) ? entryMsParsed : Date.now();
+    const priceForStrike = Number.isFinite(price) && price > 0 ? price : null;
+
+    let predictedTargetPrice =
+      Number(aiRegression?.predicted_end_price) > 0
+        ? Number(aiRegression.predicted_end_price)
+        : null;
+    if (predictedTargetPrice === null && Number(data?.target_price) > 0) {
+      predictedTargetPrice = Number(data.target_price);
+    }
+    let holdProbability = Number.isFinite(Number(aiRegression?.hold_probability))
+      ? Number(aiRegression.hold_probability)
+      : null;
+    let probabilityBasis =
+      typeof aiRegression?.probability_basis === "string"
+        ? aiRegression.probability_basis
+        : null;
+
+    if (predictedTargetPrice === null || holdProbability === null) {
+      const closes = realtimeTickBuffer
+        .getRecentWindow(symbol, 200)
+        .map((t) => t.price);
+      const local = computePriceTargetVector({
+        closes,
+        entryPrice: priceForStrike,
+        horizonSeconds,
+        direction,
+        symbolDigits: symbolPriceDigits(symbol),
+      });
+      if (local.available) {
+        if (predictedTargetPrice === null) predictedTargetPrice = local.predictedEndPrice;
+        if (holdProbability === null) holdProbability = local.holdProbability;
+        if (probabilityBasis === null) probabilityBasis = local.probabilityBasis;
+      }
+    }
+
+    const trade = computeTradeParameters({
+      entryMs,
+      entryPrice: priceForStrike,
+      livePrice: priceForStrike,
+      horizonSeconds,
+      direction,
+      predictedTargetPrice,
+      holdProbability,
+      probabilityBasis,
+    });
+
     const payload = {
         symbol,
         signalType: direction,
@@ -522,6 +590,12 @@ public clearSelectedHorizonMinutes(symbol: string): void {
             ? data.suppressed_reason
             : null,
         ...(horizonMinutes !== null ? { horizon_minutes: horizonMinutes } : {}),
+        entry_timestamp: trade.entryTimestamp,
+        entry_price: trade.entryPrice,
+        expiry_timestamp: trade.expiryTimestamp,
+        predicted_target_price: trade.predictedTargetPrice,
+        target_status: trade.targetStatus,
+        prediction_vectors: trade.predictionVectors,
         ...(data?.aiEngine ? { aiEngine: data.aiEngine } : {}),
         timestamp,
       };

@@ -760,28 +760,43 @@ class BridgeSettings:
     #:
     #: PART 38.2 — expanded from the original 20 majors/crosses to every
     #: whitelist symbol Pocket Option's live ``active_assets()`` dump actually
-    #: lists (verified against ``GET /api/v1/symbols`` → 50 PO assets). Eight
-    #: whitelist pairs PO does NOT list (USD/TRY, USD/ZAR, USD/MXN, USD/SGD,
-    #: USD/SEK, USD/NOK, USD/PLN, USD/CZK) were deliberately NOT added — a
-    #: reader armed against an asset the broker has never heard of can only
-    #: produce ``no_ssot_cache`` noise; those pairs must be served (and
-    #: LABELLED) by the REST fallback tier instead. The five legacy majors in
-    #: the original set that PO is not currently listing (USD/JPY, USD/CHF,
-    #: USD/CAD, NZD/USD, NZD/JPY) are kept: asset availability rotates per
-    #: session, so the arm stays valid for whenever they return.
+    #: lists (verified against ``GET /api/v1/symbols`` → 50 PO assets).
+    #:
+    #: ALPHA.5 PRO — UNIFIED WITH THE PLATFORM'S 44-ASSET WHITELIST.
+    #: ``core-backend``'s ``symbolRegistry.service.ts`` advertises exactly 44
+    #: strict instruments (32 OTC forex + 10 standard wholesale "real" forex +
+    #: BTC/USD + ETH/USD). The bridge's configured universe is the UNION of that
+    #: canonical 44 with every PO-listed pair it already streamed (AUD/CHF,
+    #: NZD/CAD), i.e. 46 pairs — so the bridge can never advertise FEWER pairs
+    #: than the platform it serves, and no working pair is ever dropped by a
+    #: registry change.
+    #:
+    #: Resolution stays AUTHORITATIVE, never assumed: every configured symbol is
+    #: resolved against the broker's own ``active_assets()`` at runtime, and a
+    #: symbol the broker has never heard of raises ``AssetSkippedError`` — that
+    #: single reader stops with a warning while every other pair keeps streaming
+    #: (never a global degradation, never a fabricated price). A pair PO does not
+    #: currently list — the eight ``USD/*`` entries PART 38.2 deferred — is served
+    #: and LABELLED by the REST fallback tier instead, exactly as that part
+    #: documented: arming it here only ever costs one bounded startup warning.
     symbols: List[str] = field(default_factory=lambda: [
-        # PO OTC majors / crosses (original static set)
+        # ── OTC forex (32) ──
         "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
         "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "EUR/CHF",
         "EUR/AUD", "EUR/CAD", "EUR/NZD", "GBP/JPY", "GBP/CHF",
-        "AUD/JPY", "AUD/CAD", "AUD/CHF", "NZD/JPY", "NZD/CAD",
-        # PART 38.2 — PO-listed whitelist symbols that were never subscribed
-        "EUR/TRY", "GBP/AUD", "GBP/CAD", "CAD/JPY", "CHF/JPY",
-        "AUD/NZD", "CAD/CHF", "EUR/RUB", "MAD/USD", "KES/USD",
-        # PART 38.2 — PO-listed standard-forex (non-OTC venue) pairs
-        "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK",
-        "EUR/HUF",
-        # PART 38.2 — PO-listed crypto majors (whitelist cards had no tape)
+        "AUD/JPY", "AUD/CAD", "AUD/NZD", "NZD/JPY", "GBP/AUD",
+        "GBP/CAD", "CAD/JPY", "CHF/JPY", "CAD/CHF", "EUR/RUB",
+        "EUR/TRY", "MAD/USD", "KES/USD",
+        # OTC entries the platform whitelists but the bridge had never armed
+        # (PART 38.2 deferred them to the REST fallback tier; now mirrored).
+        "USD/TRY", "USD/ZAR", "USD/MXN", "USD/SGD",
+        # PO-listed pairs already streaming here that the registry omits —
+        # retained so the union never removes a working pair.
+        "AUD/CHF", "NZD/CAD",
+        # ── Standard wholesale "real" forex (10, ECB-sourced fallback) ──
+        "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK", "EUR/HUF",
+        "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
+        # ── Crypto majors (2) ──
         "BTC/USD", "ETH/USD",
     ])
 

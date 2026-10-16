@@ -588,6 +588,7 @@ function ProTerminalInner() {
                       }
                       expirationSeconds={selectedExpirationSeconds}
                       signal={predictionData?.signal ?? null}
+                      departure={predictionData?.horizon?.departure ?? null}
                       streamStalled={streamStalled}
                       stalePrice={stalePrice}
                       poOfflineOtc={activePoOffline}
