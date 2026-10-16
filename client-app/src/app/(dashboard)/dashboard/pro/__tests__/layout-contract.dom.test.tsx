@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
  */
 
 const PRO = "src/app/(dashboard)/dashboard/pro/page.tsx";
+const HEADER = "src/components/pro/pro-terminal-header.tsx";
 const CHART = "src/components/trading/financial-chart.tsx";
 const PANEL = "src/components/trading/trading-panel.tsx";
 
@@ -35,6 +36,7 @@ const read = (p: string) => readFileSync(p, "utf8");
 const proSrc = read(PRO);
 const chartSrc = read(CHART);
 const pro = strip(proSrc);
+const header = strip(read(HEADER));
 const chart = strip(chartSrc);
 const panel = strip(read(PANEL));
 
@@ -212,8 +214,11 @@ describe("phase 2 — structural height model", () => {
     // Pure layout: a boolean in React state read only by classNames, so the tick
     // paint path and the projection matrix never see it.
     expect(pro).toMatch(/const \[focusMode, setFocusMode\] = useState\(false\)/);
-    expect(pro).toMatch(/data-testid="focus-mode-toggle"/);
-    expect(pro).toMatch(/aria-pressed=\{focusMode\}/);
+    // The focus TOGGLE moved into ProTerminalHeader during the Phase 1 control
+    // surface extraction, so this contract follows the control rather than the
+    // page file. The state itself (above) still lives on the page.
+    expect(header).toMatch(/data-testid="focus-mode-toggle"/);
+    expect(header).toMatch(/aria-pressed=\{focusMode\}/);
     // Single-column grid while focused, 3-pane grid otherwise.
     expect(pro).toMatch(/xl:grid-cols-\[minmax\(0,1fr\)\]/);
     expect(pro).toMatch(/xl:grid-cols-\[280px_minmax\(0,1fr\)_320px\]/);

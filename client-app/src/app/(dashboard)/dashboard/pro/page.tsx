@@ -40,6 +40,7 @@ const FinancialChart = dynamic(
 import { NeuralMatrixVisualizer } from "@/components/pro/neural-matrix-visualizer";
 import { SignalWidget } from "@/components/trading/signal-widget";
 import { ProExpiryBar } from "@/components/pro/pro-expiry-bar";
+import { ProTerminalHeader } from "@/components/pro/pro-terminal-header";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   useTradingStore,
@@ -53,6 +54,7 @@ import {
   selectSelectedExpiration,
 } from "@/store/useTradingStore";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
+import { useTerminalStore } from "@/store/useTerminalStore";
 
 /**
  * PRO TERMINAL — the single-asset deep-dive. Opened from the Market Terminal
@@ -172,6 +174,11 @@ function ProTerminalInner() {
   const hydrateSelectedTimeframe = useTradingStore(
     (s) => s.hydrateSelectedTimeframe,
   );
+  // Pro-only UI preferences (AUTO execution toggle) hydrate AFTER first paint,
+  // so the deterministic SSR default never mismatches the persisted value.
+  const hydrateTerminalPreferences = useTerminalStore(
+    (s) => s.hydrateTerminalPreferences,
+  );
 
   const [selectedSymbol, setSelectedSymbol] = useState(activeSymbol);
   const appliedDeepLinkRef = useRef<string | null>(null);
@@ -239,6 +246,11 @@ function ProTerminalInner() {
     hydrateSelectedTimeframe();
   }, [hydrateSelectedTimeframe]);
 
+  // Re-apply the persisted Pro UI preferences (AUTO execution) AFTER mount.
+  useEffect(() => {
+    hydrateTerminalPreferences();
+  }, [hydrateTerminalPreferences]);
+
   // Auto-fetch on symbol OR timeframe change (timeframe can change from settings page)
   useEffect(() => {
     const sym = (selectedSymbol || "").trim().toUpperCase();
@@ -278,11 +290,6 @@ function ProTerminalInner() {
   const engineLive = socketStatus === "connected" || connected;
   const enginePending =
     socketStatus === "connecting" || socketStatus === "reconnecting";
-  const engineColor = engineLive
-    ? "bg-emerald-500"
-    : enginePending
-      ? "bg-amber-400"
-      : "bg-rose-500";
   const engineLabel = engineLive
     ? "ACTIVE"
     : socketStatus === "reconnecting"
@@ -300,114 +307,20 @@ function ProTerminalInner() {
         {/* ═══ UNIFIED TOP NAVBAR (logo, links, status, theme, language) ═══ */}
         <Header />
 
-        {/* ═══ TERMINAL TOOLBAR (engine status + symbol submit + sync) ═══ */}
-        <nav className="border-b border-slate-800/80 bg-obsidian/80 backdrop-blur-md sticky top-0 z-30 shrink-0">
-          <div className="max-w-full mx-auto px-3 sm:px-4 md:px-6 h-14 sm:h-16 flex items-center justify-between">
-            <div className="flex items-center gap-2 sm:gap-4">
-              <h2 className="text-slate-100 font-bold text-[10px] sm:text-xs md:text-sm tracking-widest uppercase hidden xs:inline">
-                Pro Terminal
-              </h2>
-              <div className="w-px h-4 bg-slate-800 hidden xs:block" />
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <div
-                  className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${engineColor} ${enginePending ? "animate-pulse" : ""}`}
-                  title={statusDetail}
-                />
-                <span
-                  className="text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-tighter"
-                  title={statusDetail}
-                >
-                  <span className="hidden xs:inline">
-                    Engine: {engineLabel}
-                  </span>
-                  <span className="xs:hidden">
-                    {engineLive ? "ON" : enginePending ? "..." : "OFF"}
-                  </span>
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 sm:gap-4">
-              <form
-                onSubmit={handleSymbolSubmit}
-                className="flex items-center gap-1 sm:gap-2"
-              >
-                <input
-                  name="symbol"
-                  type="text"
-                  placeholder="BTC/USDT"
-                  value={selectedSymbol}
-                  onChange={(e) => setSelectedSymbol(e.target.value)}
-                  className="w-20 sm:w-24 md:w-28 bg-obsidian-950/80 border border-slate-700 rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs text-slate-100 font-mono placeholder-slate-500 focus:outline-none focus:border-emerald-500 min-h-[36px] sm:min-h-[40px]"
-                />
-                <button
-                  type="submit"
-                  disabled={predictionLoading}
-                  className="text-[10px] bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-bold px-2 sm:px-3 py-1.5 rounded-lg transition-all min-h-[36px] sm:min-h-[40px]"
-                >
-                  {predictionLoading ? (
-                    <span className="flex items-center gap-1">
-                      <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span className="hidden xs:inline">...</span>
-                    </span>
-                  ) : (
-                    "Go"
-                  )}
-                </button>
-              </form>
-              {/*
-                FOCUS MODE — one click to an isolated, full-viewport chart.
-
-                Deliberately a plain button in the existing toolbar rather than a
-                floating overlay: overlays sit ON TOP of the canvas and occlude
-                candles, and this control is *about* the chart, so it belongs in
-                the same row as the symbol submit. It also stays reachable while
-                the centre column scrolls, which a canvas-absolute control would
-                not.
-              */}
-              <button
-                type="button"
-                onClick={toggleFocusMode}
-                aria-pressed={focusMode}
-                title={
-                  focusMode
-                    ? "Exit chart focus — show side rails"
-                    : "Focus chart — hide side rails"
-                }
-                data-testid="focus-mode-toggle"
-                className={
-                  "text-[10px] font-bold px-2 sm:px-3 py-1.5 rounded-lg transition-all min-h-[36px] sm:min-h-[40px] shrink-0 " +
-                  (focusMode
-                    ? "bg-emerald-600 text-white hover:bg-emerald-500"
-                    : "bg-obsidian-950/80 border border-slate-700 text-slate-300 hover:border-emerald-500/60 hover:text-emerald-400")
-                }
-              >
-                <span className="hidden xs:inline">
-                  {focusMode ? "Exit Focus" : "Focus"}
-                </span>
-                <span className="xs:hidden">{focusMode ? "Exit" : "Foc"}</span>
-              </button>
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <div
-                  className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${engineColor} ${enginePending ? "animate-pulse" : ""}`}
-                  title={statusDetail}
-                />
-                <span
-                  className="text-[9px] sm:text-xs uppercase tracking-widest font-bold"
-                  title={statusDetail}
-                >
-                  {engineLive ? (
-                    <span className="text-emerald-400">Sync</span>
-                  ) : enginePending ? (
-                    <span className="text-amber-400">Syncing</span>
-                  ) : (
-                    <span className="text-rose-400">Err</span>
-                  )}
-                </span>
-              </div>
-            </div>
-          </div>
-        </nav>
+        {/* ═══ TERMINAL HEADER (engine status + symbol + focus + control bar) ═══ */}
+        <ProTerminalHeader
+          engineLive={engineLive}
+          enginePending={enginePending}
+          engineLabel={engineLabel}
+          statusDetail={statusDetail}
+          selectedSymbol={selectedSymbol}
+          onSymbolChange={setSelectedSymbol}
+          onSymbolSubmit={handleSymbolSubmit}
+          predictionLoading={predictionLoading}
+          focusMode={focusMode}
+          onToggleFocusMode={toggleFocusMode}
+          timeframe={selectedTimeframe}
+        />
 
         {/*
           FEED HEALTH — owns its own 1 Hz sampler internally.

@@ -228,12 +228,6 @@ type GridCandle = Candle & {
   symbol?: string;
 };
 
-const LEAD_OFFSET_OPTIONS: ReadonlyArray<{ label: string; value: number | null }> = [
-  { label: "AUTO", value: null },
-  { label: "20S", value: 20_000 },
-  { label: "1M", value: 60_000 },
-];
-
 interface ChartLineBag {
   live?: IPriceLine;
   target?: IPriceLine;
@@ -524,7 +518,6 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const setAggregatorTimeframe = useTradingStore(
     (s) => s.setAggregatorTimeframe,
   );
-  const setLeadOffset = useTradingStore((s) => s.setLeadOffset);
   /** PART 39 [374] — full switch (persist + aggregator + prediction). */
   const setSelectedTimeframe = useTradingStore((s) => s.setSelectedTimeframe);
   const predictionData = useTradingStore((s) => s.predictionData);
@@ -2089,41 +2082,19 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         </div>
       ) : null}
 
-      {/* PREDICTIVE LEAD-TIME OFFSET SELECTOR — AUTO (default) = exact PO
-          parity on the backend floor grid; explicit 20s / 1m lead projects the
-          grid that far ahead instead. Persists via the store. */}
+      {/* RESET FEED — clears all caches and re-initializes the live feed from
+          the broker's tick ring.
+
+          The predictive LEAD-TIME OFFSET selector (AUTO / 20S / 1M) that used
+          to live here is now owned by the Pro control bar; this chart still
+          READS `selectedLeadOffsetMs` from the store to project the candles, it
+          just no longer renders a duplicate control surface for it. */}
       {hasCandles ? (
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 z-10">
-          <span className="text-[9px] font-mono text-sky-400 uppercase tracking-widest font-bold bg-sky-500/10 border border-sky-500/20 rounded px-1.5 py-0.5">
-            LEAD
-          </span>
-          {LEAD_OFFSET_OPTIONS.map((opt) => {
-            const active =
-              (selectedLeadOffsetMs ?? null) === (opt.value ?? null);
-            return (
-              <button
-                key={opt.label}
-                type="button"
-                onClick={() => setLeadOffset(opt.value)}
-                className={`text-[9px] font-mono uppercase tracking-widest font-bold rounded px-1.5 py-0.5 transition-colors ${
-                  active
-                    ? "bg-sky-500/25 border border-sky-400/50 text-sky-300"
-                    : "bg-white/5 border border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
-                }`}
-                title={
-                  opt.value == null
-                    ? "Auto (default): exact PO floor grid — candles line up 1:1 with the backend"
-                    : `Project candles ${opt.value / 1000}s ahead of the feed`
-                }
-              >
-                {opt.label}
-              </button>
-            );
-          })}
-          <span className="w-px h-3 bg-white/10" />
+        <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
           <button
             type="button"
             onClick={() => hardResetLiveData()}
+            data-testid="chart-reset-feed"
             className="text-[9px] font-mono uppercase tracking-widest font-bold rounded px-1.5 py-0.5 transition-colors bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:text-rose-200 hover:border-rose-400/50"
             title="Clear all caches and re-initialize the live feed from the broker's tick ring"
           >
