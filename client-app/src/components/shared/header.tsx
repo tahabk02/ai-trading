@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useWebSocket } from "@/hooks/useWebSocket";
+import { useSocket } from "@/hooks/useSocket";
 import { useLangContext } from "@/hooks/useLangContext";
 import { useAuthStore } from "@/store/useAuthStore";
 import { ThemeSwitcher, LanguageSwitcher } from "./theme-lang-switcher";
@@ -32,8 +32,19 @@ import { cn } from "@/utils/cn";
  * close it on the client only.
  */
 export const Header: React.FC = () => {
-  // No URL passed — useWebSocket auto-detects Dev Tunnel vs localhost via getBaseUrl.ts
-  const { connected } = useWebSocket();
+  // ── CONNECTION DOT — read the transport, never the orchestrator (Phase 3) ──
+  // The Header renders on EVERY dashboard page and needs exactly one fact:
+  // whether the transport is live. It used to call `useWebSocket()` for this,
+  // which spun the FULL per-symbol orchestrator (socket handlers + 1s sweep +
+  // stall/hard-reconnect watchdogs + subscribe emits) a second time on top of
+  // the page that actually owns the feed. On the Pro terminal that meant TWO
+  // orchestrators sharing ONE socket — every `live_tick` was folded into the
+  // aggregator twice. `useSocket()` reads the SAME shared provider status
+  // (`status === "connected"`) with NO side effects, so the Header adds zero
+  // handlers, intervals or watchdogs: the app-wide deep-dive orchestrator now
+  // exists exactly ONCE (Pro page), and the all-pairs grid owns its own
+  // (`useMarketTerminal`).
+  const { connected } = useSocket();
   const { t } = useLangContext();
   const pathname = usePathname();
 

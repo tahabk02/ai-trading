@@ -21,10 +21,13 @@ import { useFeedHealth, type FeedFreshness } from "@/hooks/useFeedHealth";
  * clock. All continuous sampling is scoped to this leaf.
  *
  * The booleans are passed in rather than read from `useWebSocket` here on
- * purpose: the hook is per-instance, so a third call to it inside this
- * component would create a THIRD WebSocket + watchdog. The Pro page and the
- * Header already hold one each; that duplication is tracked for Phase 3
- * de-duplication, and this component must not add to it.
+ * purpose: the hook is per-instance, so a call to it inside this component
+ * would create a SECOND WebSocket + watchdog alongside the Pro page's. That
+ * duplication is what Phase 3 removed at the source — the Header no longer
+ * holds a `useWebSocket` orchestrator at all (it reads the shared transport
+ * `useSocket()`), so the Pro page is the single owner for this feed. This
+ * component still takes the booleans as props rather than starting a
+ * surrogate orchestrator of its own.
  */
 
 export interface FeedHealthProps {
