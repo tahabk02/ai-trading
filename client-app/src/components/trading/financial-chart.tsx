@@ -68,6 +68,13 @@ import { useSignalViewStore } from "@/lib/signalViewStore";
 import { normalizeProjectionAtr, clampTargetToAnchor } from "@/lib/projectionAtr";
 import { ExpiryTimeMarker, type ExpiryMarkerTheme } from "@/lib/verticalTimeMarker";
 import { resolveDepartureLine } from "@/lib/departureLine";
+import {
+  computePriceMarkers,
+  DEPART_COLOR,
+  type PriceMarkerSet,
+} from "@/lib/priceMarkerOverlay";
+import { PriceMarkerOverlay } from "@/components/trading/price-marker-overlay";
+import { useJournalStore } from "@/store/useJournalStore";
 import type { DepartureContract } from "@/services/api";
 
 /**
@@ -177,7 +184,6 @@ interface FinancialChartProps {
 const OBSIDIAN = "#070910";
 const BULLISH = "#26a69a";
 const BEARISH = "#ef5350";
-const NEUTRAL = "rgba(100,116,139,0.6)";
 const GAP_CANDLE = "rgba(100,116,139,0.16)";
 const VOL_UP = "rgba(34,171,148,0.45)";
 const VOL_DOWN = "rgba(242,54,69,0.45)";
@@ -521,6 +527,16 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   /** PART 39 [374] — full switch (persist + aggregator + prediction). */
   const setSelectedTimeframe = useTradingStore((s) => s.setSelectedTimeframe);
   const predictionData = useTradingStore((s) => s.predictionData);
+  /**
+   * PHASE 4 — the operator's own journal entry for THIS symbol (the store keeps
+   * entries newest-first, so the first match is the most recent). It drives the
+   * LIVE/FINAL price line, the green/red flip against the entry strike, and the
+   * shaded trade window. Journal changes are rare (a trade is opened or
+   * settled), so this re-render is bounded to those events — never per tick.
+   */
+  const journalEntries = useJournalStore((s) => s.entries);
+  const activeJournalEntry =
+    journalEntries.find((e) => e.symbol === activeSymbol) ?? null;
   const { t } = useLangContext();
   const { resolvedTheme } = useTheme();
 
@@ -573,6 +589,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const [targetLayerActive, setTargetLayerActive] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
   const [hudNowMs, setHudNowMs] = useState<number>(() => Date.now());
+  /**
+   * PHASE 4 — the DOM price-marker layer (DEPART / ENTRY / LIVE·FINAL badges +
+   * the shaded trade window). Recomputed at most once per second on the HUD
+   * cadence, NEVER per tick, so it cannot reintroduce a per-tick re-render
+   * (INVARIANT 1).
+   */
+  const [priceMarkers, setPriceMarkers] = useState<PriceMarkerSet | null>(null);
   const targetDurationMin = targetDurationMinutes(expSeconds);
 
   const activeSymbolRef = useRef(activeSymbol);
@@ -632,6 +655,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // LATEST OTC PO-offline state without re-creating its identity every flip.
   const poOfflineRef = useRef(poOfflineOtc);
   poOfflineRef.current = poOfflineOtc;
+  // PHASE 4 — mirrored so the stable syncMarkers callback + the once-per-second
+  // overlay recompute always read the LATEST journal entry.
+  const journalEntryRef = useRef(activeJournalEntry);
+  journalEntryRef.current = activeJournalEntry;
 
   const predictionLike: {
     signal?: string | null;
@@ -751,11 +778,27 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     const chart = chartRef.current;
     if (!chart || mainCount <= 0) return;
     try {
-      chart
-        .timeScale()
-        .setVisibleLogicalRange(
-          targetViewportRange(mainCount, intervals, TARGET_RIGHT_GUTTER),
-        );
+      const range = targetViewportRange(
+        mainCount,
+        intervals,
+        TARGET_RIGHT_GUTTER,
+      );
+      /*
+       * PHASE 4 — 10% AUTOSCALE PADDING on every time-axis update.
+       *
+       * The raw range lands the newest bar against the right gutter and the
+       * oldest visible bar against the left edge. Padding BOTH sides by 10% of
+       * the visible span (floored at one bar, and never driving the left edge
+       * negative) leaves breathing room around the tape, so a marker or the
+       * live price line is never clipped by an axis edge as the window
+       * re-anchors. The padding is applied here — at the single chart caller —
+       * so the pure `targetViewportRange` contract keeps its exact values.
+       */
+      const pad = Math.max(1, Math.round((range.to - range.from) * 0.1));
+      chart.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, range.from - pad),
+        to: range.to + pad,
+      });
     } catch {}
   }, []);
 
@@ -834,43 +877,51 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         setPriceLine(bag, "hi", series, 0, TGT_LINE, LineStyle.Dotted, "T-HI");
         setPriceLine(bag, "lo", series, 0, TGT_LINE, LineStyle.Dotted, "T-LO");
       }
-      // ── LIVE price line ──
-      setPriceLine(
-        bag,
-        "live",
-        series,
-        live,
-        PRICE_LINE,
-        LineStyle.Solid,
-        "LIVE",
-      );
-      // ── EXACT DEPARTURE ("Ligne du Départ") ──
+      // ── LIVE / FINAL PRICE LINE (PHASE 4) ──
+      //
+      // The price line flips GREEN/RED against the operator's OWN journal
+      // entry: CALL wins strictly above the strike, PUT strictly below it. With
+      // no entry in hand the line stays the neutral LIVE reference — it never
+      // fabricates a verdict. The axis label reads LIVE while the trade is open
+      // and FINAL once it has settled, so a settled strike is never mistaken
+      // for a live one.
+      const journalEntry = journalEntryRef.current;
+      let liveColor = PRICE_LINE;
+      let liveTitle = "LIVE";
+      if (journalEntry && live > 0) {
+        const winning =
+          journalEntry.side === "CALL"
+            ? live > journalEntry.entryPrice
+            : live < journalEntry.entryPrice;
+        liveColor = winning ? BULLISH : BEARISH;
+        liveTitle = journalEntry.status === "OPEN" ? "LIVE" : "FINAL";
+      }
+      setPriceLine(bag, "live", series, live, liveColor, LineStyle.Solid, liveTitle);
+      // ── EXACT DEPARTURE ("Ligne du Départ") — PHASE 4: cyan dashed ──
       // The exact entry (strike) level, re-evaluated LIVE from the engine's
       // departure contract (`prediction.horizon.departure`) against the current
       // tick. Drawn ONLY when the engine had a real basis (`available`) and this
       // is not a PO-offline OTC proxy — the same honesty gate as the projection
-      // layer. ACTIVE/PENDING carry the side color (solid / dashed); an expired
-      // or missed window renders muted. When withheld the line is REMOVED, so the
-      // operator reads the waiting state instead of a synthetic level.
+      // layer. PHASE 4 pins it to the cyan DASHED `DEPART | <price>` treatment
+      // so it reads as one unmistakable execution layer; when withheld the line
+      // is REMOVED, so the operator reads the waiting state instead of a
+      // synthetic level.
       const dep = resolveDepartureLine(departureRef.current, {
         livePrice: live,
         nowMs: Date.now(),
       });
-      const depRenderable = dep.renderLine && !poOfflineRef.current;
-      const depColor =
-        dep.status === "EXPIRED_ZONE" || dep.status === "MISSED_ENTRY"
-          ? NEUTRAL
-          : dep.side === "PUT"
-            ? BEARISH
-            : BULLISH;
+      const depRenderable =
+        dep.renderLine && !poOfflineRef.current && dep.strikePrice != null;
       setPriceLine(
         bag,
         "departure",
         series,
         depRenderable && dep.strikePrice != null ? dep.strikePrice : 0,
-        depColor,
-        dep.style === "dashed" ? LineStyle.Dashed : LineStyle.Solid,
-        "DÉPART",
+        DEPART_COLOR,
+        LineStyle.Dashed,
+        dep.strikePrice != null
+          ? `DEPART | ${dep.strikePrice.toFixed(getPriceDigits(activeSymbolRef.current))}`
+          : "DEPART",
       );
     },
     [],
@@ -1715,6 +1766,60 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         if (sec !== lastHudSecond) {
           lastHudSecond = sec;
           setHudNowMs(now);
+          /*
+           * PHASE 4 — PRICE MARKER OVERLAY, recomputed on the HUD cadence.
+           *
+           * High-contrast DOM badges for the DEPART strike, the journal ENTRY
+           * and the LIVE/FINAL price, plus the shaded trade window with its
+           * countdown. Every coordinate is read from the chart itself, so the
+           * badges stay glued to the tape as it pans/zooms. This runs once per
+           * second — NEVER per tick — so the overlay cannot reintroduce a
+           * per-tick re-render (INVARIANT 1).
+           */
+          const depView = resolveDepartureLine(departureRef.current, {
+            livePrice: Number(currentPriceRef.current) || 0,
+            nowMs: now,
+          });
+          const jEntry = journalEntryRef.current;
+          /*
+           * lightweight-charts brands its `Time`/`Coordinate` types, so the
+           * pure overlay lib takes a narrow structural view instead. This tiny
+           * adapter converts epoch-SECONDS → the branded `UTCTimestamp` the
+           * library expects (the same cast the divider path already uses),
+           * keeping the lib free of any chart dependency.
+           */
+          const chartForMarkers = chartRef.current
+            ? {
+                timeScale: () => ({
+                  timeToCoordinate: (t: number): number | null =>
+                    chartRef.current?.timeScale().timeToCoordinate(
+                      t as UTCTimestamp,
+                    ) ?? null,
+                }),
+              }
+            : null;
+          setPriceMarkers(
+            computePriceMarkers({
+              chart: chartForMarkers,
+              series: candleSeriesRef.current,
+              departPrice:
+                depView.renderLine && !poOfflineRef.current
+                  ? depView.strikePrice
+                  : null,
+              livePrice: Number(currentPriceRef.current) || 0,
+              digits: getPriceDigits(activeSymbolRef.current),
+              nowMs: now,
+              entry: jEntry
+                ? {
+                    price: jEntry.entryPrice,
+                    side: jEntry.side,
+                    open: jEntry.status === "OPEN",
+                    entryTsMs: jEntry.entryTs,
+                    expiryTsMs: jEntry.expiryTs,
+                  }
+                : null,
+            }),
+          );
         }
       } catch {}
       raf = requestAnimationFrame(frame);
@@ -1793,6 +1898,18 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           truth, so the CoherenceStrip cannot show a different signal. */}
       <SignalViewPublisher view={hudView} />
       <div ref={containerRef} className="absolute inset-0" />
+
+      {/* PHASE 4 — PRICE MARKER OVERLAY. High-contrast DOM badges for the
+          DEPART strike (cyan dashed), the journal ENTRY and the LIVE/FINAL
+          price line, plus a shaded trade window with a live countdown. Sits
+          above the canvas but below the z-10 HUD, and is pointer-transparent so
+          it can never steal a click. */}
+      {hasCandles && priceMarkers ? (
+        <PriceMarkerOverlay
+          markers={priceMarkers.markers}
+          window={priceMarkers.window}
+        />
+      ) : null}
 
       {/* ── CURRENT TIME (LIVE) DIVIDER ── the neon boundary between the real
           historical tape (left) and the Future Prediction Zone (right). Pinned
