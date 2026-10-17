@@ -25,7 +25,7 @@ from pocket_bridge.bridge import (
     PocketOptionBridge,
     TRANSIENT_CONNECT_ATTEMPTS,
 )
-from pocket_bridge.config import BridgeSettings
+from pocket_bridge.config import BridgeSettings, DEFAULT_USER_AGENT
 from pocket_bridge.m20_engine import M20Engine
 
 TIMEOUT_ERROR = (
@@ -35,6 +35,7 @@ TIMEOUT_ERROR = (
 
 def _settings(monkeypatch, tmp_path, **overrides) -> BridgeSettings:
     monkeypatch.delenv("POCKET_OPTION_SSID", raising=False)
+    monkeypatch.delenv("POCKET_OPTION_USER_AGENT", raising=False)
     monkeypatch.delenv("PO_SESSION_PATH", raising=False)
     monkeypatch.delenv("POCKET_OPTION_WS_URLS", raising=False)
     return BridgeSettings(
@@ -112,12 +113,25 @@ def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client
     """Unset POCKET_OPTION_WS_URLS keeps the SDK's own streaming defaults
     (pinning url= previously killed the tick stream) while still shipping the
     tuned timeouts."""
+    monkeypatch.delenv("POCKET_OPTION_USER_AGENT", raising=False)
     bridge = _bridge(monkeypatch, tmp_path)
     asyncio.run(bridge._import_client())
     fake = fake_client.instances[-1]
     assert fake.url is None
     assert "urls" not in fake.config
     assert fake.config["connection_initialization_timeout_secs"] > 60
+    assert fake.config["user_agent"] == DEFAULT_USER_AGENT
+
+
+def test_configured_user_agent_is_sent_to_sdk(monkeypatch, tmp_path, fake_client):
+    bridge = _bridge(monkeypatch, tmp_path, user_agent="CustomUA/1.0")
+    asyncio.run(bridge._import_client())
+    assert fake_client.instances[-1].config["user_agent"] == "CustomUA/1.0"
+
+
+def test_user_agent_is_read_from_environment(monkeypatch):
+    monkeypatch.setenv("POCKET_OPTION_USER_AGENT", "CustomUA/1.0")
+    assert BridgeSettings().user_agent == "CustomUA/1.0"
 
 
 def test_handshake_timeout_never_escalates_to_session_expired(

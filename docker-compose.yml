@@ -159,6 +159,8 @@ services:
     environment:
       POCKET_BRIDGE_HOST: 0.0.0.0
       POCKET_BRIDGE_PORT: 8788
+      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
       TZ: UTC
     env_file:
       - ./pocket-bridge/.env

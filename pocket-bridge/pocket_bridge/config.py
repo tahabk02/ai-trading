@@ -63,6 +63,12 @@ except Exception:  # pragma: no cover - dotenv is optional at runtime
 
 logger = logging.getLogger("pocket_bridge.config")
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/129.0.0.0 Safari/537.36"
+)
+
 
 def parse_ssid(value: str) -> dict:
     """Return the canonical Pocket Option auth fields from either SSID form."""
@@ -746,6 +752,15 @@ class BridgeSettings:
     urls: List[str] = field(default_factory=lambda: [
         u for u in os.getenv("POCKET_OPTION_WS_URLS", "").split(",") if u.strip()
     ])
+
+    #: User-Agent presented on the Pocket Option WebSocket handshake.
+    #: Blank or unset values use a pinned browser fingerprint.
+    user_agent: str = field(
+        default_factory=lambda: (
+            (os.getenv("POCKET_OPTION_USER_AGENT", "") or "").strip()
+            or DEFAULT_USER_AGENT
+        )
+    )
 
     #: Native SDK handshake budget (seconds). The Rust core raises
     #: "General error: Connection initialization timed out" when the whole
