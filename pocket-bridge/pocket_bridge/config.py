@@ -63,11 +63,15 @@ except Exception:  # pragma: no cover - dotenv is optional at runtime
 
 logger = logging.getLogger("pocket_bridge.config")
 
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/129.0.0.0 Safari/537.36"
-)
+DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+
+
+def resolve_user_agent(value: str | None) -> str:
+    """Resolve unset or SDK-placeholder User-Agents to the pinned browser UA."""
+    user_agent = (value or "").strip()
+    if not user_agent or "(sdk default)" in user_agent.lower():
+        return DEFAULT_UA
+    return user_agent
 
 
 def parse_ssid(value: str) -> dict:
@@ -756,9 +760,8 @@ class BridgeSettings:
     #: User-Agent presented on the Pocket Option WebSocket handshake.
     #: Blank or unset values use a pinned browser fingerprint.
     user_agent: str = field(
-        default_factory=lambda: (
-            (os.getenv("POCKET_OPTION_USER_AGENT", "") or "").strip()
-            or DEFAULT_USER_AGENT
+        default_factory=lambda: resolve_user_agent(
+            os.getenv("POCKET_OPTION_USER_AGENT")
         )
     )
 

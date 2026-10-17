@@ -25,7 +25,7 @@ from pocket_bridge.bridge import (
     PocketOptionBridge,
     TRANSIENT_CONNECT_ATTEMPTS,
 )
-from pocket_bridge.config import BridgeSettings, DEFAULT_USER_AGENT
+from pocket_bridge.config import BridgeSettings, DEFAULT_UA
 from pocket_bridge.m20_engine import M20Engine
 
 TIMEOUT_ERROR = (
@@ -120,7 +120,7 @@ def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client
     assert fake.url is None
     assert "urls" not in fake.config
     assert fake.config["connection_initialization_timeout_secs"] > 60
-    assert fake.config["user_agent"] == DEFAULT_USER_AGENT
+    assert fake.config["user_agent"] == DEFAULT_UA
 
 
 def test_configured_user_agent_is_sent_to_sdk(monkeypatch, tmp_path, fake_client):
@@ -132,6 +132,38 @@ def test_configured_user_agent_is_sent_to_sdk(monkeypatch, tmp_path, fake_client
 def test_user_agent_is_read_from_environment(monkeypatch):
     monkeypatch.setenv("POCKET_OPTION_USER_AGENT", "CustomUA/1.0")
     assert BridgeSettings().user_agent == "CustomUA/1.0"
+
+
+@pytest.mark.parametrize(
+    "environment_value",
+    [None, "", "   ", "(sdk default)", "Chrome/100 (sdk default)"],
+)
+def test_sdk_default_user_agent_sentinel_always_uses_pinned_ua(
+    monkeypatch, tmp_path, fake_client, environment_value
+):
+    if environment_value is None:
+        monkeypatch.delenv("POCKET_OPTION_USER_AGENT", raising=False)
+    else:
+        monkeypatch.setenv("POCKET_OPTION_USER_AGENT", environment_value)
+
+    settings = BridgeSettings()
+    bridge = _bridge(monkeypatch, tmp_path, user_agent=settings.user_agent)
+    asyncio.run(bridge._import_client())
+
+    assert settings.user_agent == DEFAULT_UA
+    assert fake_client.instances[-1].config["user_agent"] == DEFAULT_UA
+
+
+def test_direct_sdk_placeholder_is_replaced_and_fingerprint_logs_pinned_ua(
+    monkeypatch, tmp_path, fake_client, caplog
+):
+    bridge = _bridge(monkeypatch, tmp_path, user_agent="(sdk default)")
+    with caplog.at_level(logging.INFO, logger="pocket_bridge.bridge"):
+        asyncio.run(bridge._import_client())
+
+    assert fake_client.instances[-1].config["user_agent"] == DEFAULT_UA
+    assert f"handshake_fingerprint user_agent={DEFAULT_UA}" in caplog.text
+    assert "(sdk default)" not in caplog.text
 
 
 def test_handshake_timeout_never_escalates_to_session_expired(

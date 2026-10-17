@@ -20,6 +20,7 @@ import json
 import logging
 import signal
 import time
+from dataclasses import replace
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from typing import Dict
@@ -32,6 +33,7 @@ from .config import (
     load_stored_session,
     mask_secret,
     mask_uid,
+    resolve_user_agent,
 )
 from .m20_engine import M20Engine
 from .relay import RelayServer
@@ -44,6 +46,10 @@ logger = logging.getLogger("pocket_bridge.main")
 
 
 async def amain(settings: BridgeSettings) -> None:
+    effective_user_agent = resolve_user_agent(settings.user_agent)
+    if effective_user_agent != settings.user_agent:
+        settings = replace(settings, user_agent=effective_user_agent)
+    logger.info("handshake_fingerprint user_agent=%s", effective_user_agent)
     logger.info(
         "SSID loaded: format=%s length=%d uid=%s isDemo=%s isOptimized=%s",
         settings.ssid_format,

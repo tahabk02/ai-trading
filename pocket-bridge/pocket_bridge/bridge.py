@@ -24,7 +24,7 @@ from typing import Dict, Optional, Tuple
 
 from .config import (
     BridgeSettings,
-    DEFAULT_USER_AGENT,
+    resolve_user_agent,
     StoredSession,
     asset_candidates,
     asset_for_symbol,
@@ -399,9 +399,7 @@ class PocketOptionBridge:
         sdk_config: Dict[str, object] = {
             "connection_initialization_timeout_secs": int(self.settings.po_init_timeout),
             "timeout_secs": int(self.settings.po_request_timeout),
-            "user_agent": (
-                (self.settings.user_agent or "").strip() or DEFAULT_USER_AGENT
-            ),
+            "user_agent": resolve_user_agent(self.settings.user_agent),
             # Short rotate delay = a blocked/failing host is bypassed fast
             # instead of costing the full handshake budget on every attempt.
             "reconnect_time": int(self.settings.po_reconnect_time),
@@ -427,6 +425,10 @@ class PocketOptionBridge:
             urls or "(sdk default regional list)",
             sdk_config["connection_initialization_timeout_secs"],
             self._endpoint_rotation,
+        )
+        logger.info(
+            "handshake_fingerprint user_agent=%s",
+            sdk_config["user_agent"],
         )
         logger.info(
             "auth_payload_sent via=%s session_len=%d uid=%s isDemo=%s isOptimized=%s",
