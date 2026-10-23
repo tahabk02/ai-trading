@@ -19,6 +19,8 @@ pocket-bridge/session/*.json
 pocket-bridge/session/*cookie*
 pocket-bridge/session/*.txt
 pocket-bridge/session/__pycache__/
+# Local scratch capture of a Pocket Option session cookie. Never commit it.
+temp_pssid.txt
 
 node_modules/
 **/node_modules/
