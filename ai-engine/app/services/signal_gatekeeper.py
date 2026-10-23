@@ -1020,3 +1020,51 @@ def apply_strict_execution_gate(
         suppressed_reason=suppressed_reason,
     )
     return surface
+
+
+def evaluate_signal_gate(
+    signal: Any = None,
+    confidence: Any = None,
+    *,
+    asset_class: str = "REAL",
+    class_gate: Optional[Dict[str, Any]] = None,
+    regime_type: Optional[str] = None,
+    spread_status: Optional[str] = None,
+    min_confidence: Optional[Any] = None,
+    min_tier: Optional[str] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Compatibility entry point for callers that evaluate a whole payload.
+
+    Accepts either the individual verdict fields above or a single mapping::
+
+        evaluate_signal_gate({"signal": "BUY", "confidence": 97.5, ...})
+
+    The mapping form understands ``signal``/``direction`` and the same policy
+    keys ``apply_strict_execution_gate`` consumes. The result is always the
+    canonical execution surface — this function never fabricates a direction
+    and never weakens the strict bar.
+    """
+    if isinstance(signal, dict):
+        payload = dict(signal)
+        signal = payload.get("signal", payload.get("direction"))
+        confidence = payload.get("confidence", confidence)
+        asset_class = payload.get("asset_class", asset_class)
+        class_gate = payload.get("class_gate", class_gate)
+        regime_type = payload.get("regime_type", regime_type)
+        spread_status = payload.get("spread_status", spread_status)
+        min_confidence = payload.get("min_confidence", min_confidence)
+        min_tier = payload.get("min_tier", min_tier)
+        if confidence is None:
+            confidence = payload.get("confidence_pct")
+
+    return apply_strict_execution_gate(
+        signal,
+        confidence,
+        asset_class=asset_class,
+        class_gate=class_gate,
+        regime_type=regime_type,
+        spread_status=spread_status,
+        min_confidence=min_confidence,
+        min_tier=min_tier,
+    )

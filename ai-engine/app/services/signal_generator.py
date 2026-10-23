@@ -280,6 +280,33 @@ class SignalGenerator:
         )
         return payload
 
+    def generate(
+        self,
+        data: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Alias of :meth:`generate_signal` used by newer service layers.
+
+        ``data`` may be a payload mapping, and keyword fields are merged on top
+        of it (e.g. ``generate(symbol=..., candles=..., live_price=...)``).
+        """
+        payload: Dict[str, Any] = dict(data or {})
+        payload.update(kwargs)
+        return self.generate_signal(payload)
+
+    def get_signals(
+        self,
+        data: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Return the signal payload for one evaluation.
+
+        Kept as a named alias because orchestration code imports ``get_signals``
+        while the HTTP layer calls ``generate``; both resolve to the same
+        zero-fabrication pipeline.
+        """
+        return self.generate(data, **kwargs)
+
     @staticmethod
     def _atr_stops(direction: str, entry: float, atr: float) -> tuple:
         """ATR-scaled protective stops honoring the dispatched direction."""
