@@ -258,6 +258,8 @@ export const secrets = {
   // connects as a client. When no SSID is set, the bridge (and therefore the
   // backend) runs in a clean "awaiting_ssid" state with NO fabricated prices.
   POCKET_OPTION_SSID: process.env.POCKET_OPTION_SSID || "",
+  POCKET_OPTION_UID: process.env.POCKET_OPTION_UID || "",
+  POCKET_OPTION_IS_DEMO: process.env.POCKET_OPTION_IS_DEMO || "0",
   // ── Pocket Option session self-healing (session/capture_session.py +
   // session/refresh_ssid.py) ──
   // The bridge normally refreshes its SSID from a captured browser session

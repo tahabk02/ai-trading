@@ -479,6 +479,8 @@ export class PocketOptionBridgeService {
             // backend goes live immediately (not stuck in awaiting_ssid) when
             // the SSID is configured at the backend layer.
             POCKET_OPTION_SSID: secrets.POCKET_OPTION_SSID || "",
+            POCKET_OPTION_UID: String(secrets.POCKET_OPTION_UID || "0"),
+            POCKET_OPTION_IS_DEMO: String(secrets.POCKET_OPTION_IS_DEMO ?? "0"),
           },
         },
       );

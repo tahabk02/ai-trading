@@ -31,6 +31,7 @@ from app.services.signal_gatekeeper import (
     tier_min_confidence,
     tier_rank,
     apply_gate,
+    apply_strict_execution_gate,
     # ── PART 9: execution-latency-aware time-gated emission ──
     DEFAULT_MIN_ACTIONABLE_WINDOW_MS,
     LATENCY_P95_MULTIPLIER,
@@ -465,3 +466,19 @@ def test_align_expiration_to_bucket_invalid_timeframe_safe():
     assert align_expiration_to_bucket(60, None, 0, 300) == 60
     assert align_expiration_to_bucket(None, 0, 0, 300) == 60
     assert align_expiration_to_bucket(60, 60, 0, 300) == 60
+def test_apply_gate_floors_t5_selector_to_lowest_tradable():
+    """A hostile/mis-set min_tier=T5 can never make a 75% verdict executable."""
+    result = apply_gate("BUY", 75.0, min_tier="T5")
+    assert result["executable"] is False
+    assert result["threshold_pct"] == 80.0
+    assert result["min_tier"] == "T5"
+
+
+def test_confidence_above_100_clamps_without_double_normalization():
+    """150/1000 are clamped to 100% and keep their honest T1 tier."""
+    assert normalize_confidence(150) == 1.0
+    assert normalize_confidence(1000) == 1.0
+    result = apply_strict_execution_gate("BUY", 150)
+    assert result["tier"] == "T1"
+    assert result["confidence_pct"] == 100.0
+    assert result["executable"] is True

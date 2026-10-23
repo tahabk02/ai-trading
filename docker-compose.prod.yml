@@ -164,7 +164,7 @@ services:
       TZ: UTC
       ENVIRONMENT: production
       LOG_FORMAT: JSON
-      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.98}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-95.0}
       AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
       # Service names, never 127.0.0.1: inside a container, loopback is THIS
       # container — that mistake 503s every predict.

@@ -301,6 +301,27 @@ def test_ssid_parses_raw_and_full():
     assert parse_ssid("   ") == {}
 
 
+def test_ssid_parses_bare_json_array_frame():
+    """A captured bare ["42","auth",{...}] payload is a valid auth frame."""
+    frame = json.dumps(
+        ["42", "auth", {"session": SSID_VALUE, "uid": 138336943, "isDemo": 1}]
+    )
+    parsed = parse_ssid(frame)
+    assert parsed["session"] == SSID_VALUE
+    assert parsed["uid"] == 138336943
+    assert parsed["isDemo"] == 1
+
+
+def test_ssid_raw_token_uses_env_demo_flag(monkeypatch):
+    """A 26-char demo token must inherit the explicit demo mode from env."""
+    monkeypatch.setenv("POCKET_OPTION_IS_DEMO", "1")
+    monkeypatch.setenv("POCKET_OPTION_UID", "138336943")
+    parsed = parse_ssid("a" * 26)
+    assert parsed["session"] == "a" * 26
+    assert parsed["isDemo"] == 1
+    assert parsed["uid"] == 138336943
+
+
 def test_ssid_missing_logs_critical(caplog):
     """test_ssid_missing_logs_critical — an unparseable POCKET_OPTION_SSID logs
     CRITICAL with a MASKED value (first 16 chars, never the full payload) and

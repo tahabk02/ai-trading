@@ -59,7 +59,7 @@ services:
     environment:
       REDIS_HOST: redis
       LOG_FORMAT: JSON
-      CONFIDENCE_THRESHOLD: 0.98
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-95.0}
       ENVIRONMENT: production
       TZ: UTC
       # P1-2026-09-24 — non-blocking interactive inference budget (ms): if a
@@ -160,6 +160,8 @@ services:
       POCKET_BRIDGE_HOST: 0.0.0.0
       POCKET_BRIDGE_PORT: 8788
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
+      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
       POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
       TZ: UTC
     env_file:

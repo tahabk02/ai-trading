@@ -12,6 +12,7 @@ import { FeedHealthBar } from "@/components/shared/feed-health";
 import { resolveProSymbol, resolveTfParam } from "@/lib/pro-deep-link";
 import { isPoOfflineOtc } from "@/lib/quoteProvenance";
 import { useSignalViewStore, selectSignalView } from "@/lib/signalViewStore";
+import apiClient from "@/services/api";
 
 // ── CLIENT-ONLY CHART ISOLATION ──
 // The ONLY chart allowed on this terminal is the platform's own
@@ -238,6 +239,32 @@ function ProTerminalInner() {
   useEffect(() => {
     hydrateSelectedTimeframe();
   }, [hydrateSelectedTimeframe]);
+
+  // Hydrate persisted tier/filter preferences after first paint, exactly like
+  // the Market Terminal. A direct Pro load otherwise evaluates against the
+  // in-memory T1 default instead of the operator's saved selection.
+  useEffect(() => {
+    useMarketTerminalStore.getState().hydrateClientPreferences();
+  }, []);
+
+  // One REST /quotes bootstrap so provenance/market-closed state is populated
+  // before the per-symbol tick stream's first frame.
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getQuotes()
+      .then((resp) => {
+        if (!cancelled) {
+          useMarketTerminalStore.getState().setQuotes(resp?.quotes ?? []);
+        }
+      })
+      .catch(() => {
+        /* the live tick stream remains authoritative */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Auto-fetch on symbol OR timeframe change (timeframe can change from settings page)
   useEffect(() => {

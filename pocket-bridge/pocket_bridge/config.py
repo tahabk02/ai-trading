@@ -75,7 +75,13 @@ def resolve_user_agent(value: str | None) -> str:
 
 
 def parse_ssid(value: str) -> dict:
-    """Return the canonical Pocket Option auth fields from either SSID form."""
+    """Return canonical auth fields from a raw session or any captured frame.
+
+    Accepted forms: a bare session token, ``42["auth",{...}]``, ``["auth",{...}]``
+    (the frame with the Socket.IO ``42`` prefix already stripped), and
+    ``["42","auth",{...}]`` (a JSON-dumped capture). Raw tokens take ``uid`` /
+    ``isDemo`` from the environment, which is why demo mode must be forwarded.
+    """
     raw = (value or "").strip()
     if raw.startswith("'") and raw.endswith("'"):
         raw = raw[1:-1].strip()
@@ -84,39 +90,67 @@ def parse_ssid(value: str) -> dict:
     raw = raw.strip()
     if not raw:
         return {}
-    if not raw.startswith("42["):
-        return {
-            "session": raw,
-            "isDemo": int(os.getenv("POCKET_OPTION_IS_DEMO", "0")),
-            "uid": int(os.getenv("POCKET_OPTION_UID", "0")),
-            "platform": 2,
-            "isFastHistory": True,
-        }
-    try:
-        message = json.loads(raw[2:])
+    if raw.startswith("42["):
+        raw = raw[2:]
+
+    if raw.startswith("["):
+        try:
+            message = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            logger.critical(
+                "invalid POCKET_OPTION_SSID value=%s error=%s",
+                mask_secret(raw, 16),
+                exc,
+            )
+            raise ValueError(
+                "POCKET_OPTION_SSID must be a raw session or valid 42[\"auth\",{...}] message"
+            ) from exc
+
+        payload = None
         if (
-            not isinstance(message, list)
-            or len(message) != 2
-            or message[0] != "auth"
-            or not isinstance(message[1], dict)
-            or not message[1].get("session")
+            isinstance(message, list)
+            and len(message) == 2
+            and message[0] == "auth"
+            and isinstance(message[1], dict)
         ):
-            raise ValueError("expected 42[\"auth\",{...}]")
-        payload = dict(message[1])
+            payload = dict(message[1])
+        elif (
+            isinstance(message, list)
+            and len(message) == 3
+            and message[0] in ("42", 42)
+            and message[1] == "auth"
+            and isinstance(message[2], dict)
+        ):
+            payload = dict(message[2])
+
+        if payload is None or not payload.get("session"):
+            logger.critical(
+                "invalid POCKET_OPTION_SSID value=%s error=%s",
+                mask_secret(raw, 16),
+                "expected 42[\"auth\",{...}]",
+            )
+            raise ValueError(
+                "POCKET_OPTION_SSID must contain a 42[\"auth\",{...}] session"
+            )
+
         payload.setdefault("uid", int(os.getenv("POCKET_OPTION_UID", "0")))
         payload.setdefault("isDemo", int(os.getenv("POCKET_OPTION_IS_DEMO", "0")))
         payload.setdefault("platform", 2)
         payload.setdefault("isFastHistory", True)
         return payload
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.critical(
-            "invalid POCKET_OPTION_SSID value=%s error=%s",
-            mask_secret(raw, 16),
-            exc,
-        )
+
+    if raw.startswith("{") or raw.startswith("]"):
         raise ValueError(
-            "POCKET_OPTION_SSID must be a raw session or valid 42[auth,...] message"
-        ) from exc
+            "POCKET_OPTION_SSID looks like JSON but is not a 42[\"auth\",{...}] frame"
+        )
+
+    return {
+        "session": raw,
+        "isDemo": int(os.getenv("POCKET_OPTION_IS_DEMO", "0")),
+        "uid": int(os.getenv("POCKET_OPTION_UID", "0")),
+        "platform": 2,
+        "isFastHistory": True,
+    }
 
 
 def auth_message(auth: dict) -> str:

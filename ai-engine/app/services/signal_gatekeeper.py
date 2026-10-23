@@ -263,7 +263,7 @@ def normalize_confidence(confidence: Any) -> float:
         return 0.0
     if c <= 1.0:
         return c
-    return c / 100.0
+    return min(c / 100.0, 1.0)
 
 
 def tier_min_confidence(tier: str) -> float:
@@ -342,15 +342,23 @@ def resolve_execution_floor(min_tier: Any = None) -> Dict[str, Any]:
     }
 
 
-def resolve_tier(confidence: Any) -> str:
+def resolve_tier(confidence: Any, *, normalized: bool = False) -> str:
     """Map a genuine confidence onto its honest tier label (T1…T5).
 
-    T1 PREMIUM (>=0.95) … T4 LOW (>=0.80) … T5 WEAK (below T4). Every band is
+    T1 PREMIUM (>=0.95) → T4 LOW (>=0.80) → T5 WEAK (below T4). Every band is
     a real, emittable tier: the ladder labels confidence, it does not decide
     whether a verdict may be seen. Tradability is `executable`, resolved
     separately against the user's floor via `resolve_execution_floor`.
+
+    Set ``normalized=True`` when the caller already passed a fractional 0..1
+    value (e.g. the output of :func:`normalize_confidence`). Re-normalizing a
+    fraction would divide it by 100 again and silently demote a strong verdict
+    to T5.
     """
-    frac = normalize_confidence(confidence)
+    if normalized:
+        frac = max(0.0, min(float(confidence), 1.0))
+    else:
+        frac = normalize_confidence(confidence)
     for tier in TIER_ORDER:
         if frac >= tier_min_confidence(tier):
             return tier
@@ -396,12 +404,9 @@ def apply_gate(
     direction = _as_signal(signal)
     frac = normalize_confidence(confidence)
     pct = round(frac * 100.0, 2)
-    tier = resolve_tier(frac)
-    rank_bar = TIER_RANK.get(str(min_tier or "").strip().upper(), TIER_RANK[MIN_EXECUTABLE_TIER])
-    threshold_frac = tier_min_confidence(min_tier) or _threshold_frac(
-        TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
-    )
-    executable = direction in ("BUY", "SELL") and tier_rank(tier) >= rank_bar
+    tier = resolve_tier(frac, normalized=True)
+    floor = resolve_execution_floor(min_tier)
+    executable = direction in ("BUY", "SELL") and frac >= floor["bar_frac"]
 
     return {
         "tier": tier,
@@ -411,7 +416,8 @@ def apply_gate(
         "executable": executable,
         "market_waiting": direction in ("BUY", "SELL") and not executable,
         "gate": tier if not executable and direction in ("BUY", "SELL") else None,
-        "threshold_pct": round(threshold_frac * 100.0, 2),
+        "threshold_pct": floor["bar_pct"],
+        "min_tier": floor["min_tier"],
     }
 
 
@@ -906,7 +912,7 @@ def apply_strict_execution_gate(
     direction = _as_signal(signal)
     frac = normalize_confidence(confidence)
     pct = round(frac * 100.0, 2)
-    tier = resolve_tier(frac)
+    tier = resolve_tier(frac, normalized=True)
     tier_label = TIER_LABELS.get(tier, "WEAK")
 
     class_gate = dict(class_gate or {})

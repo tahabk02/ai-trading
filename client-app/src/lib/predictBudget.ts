@@ -10,7 +10,7 @@
 // store already clears silently): it is classified as a recoverable
 // PredictionTimeoutError → calm re-poll with backoff, not a spinner freeze.
 
-export const PREDICT_ABORT_MS = 2000;
+export const PREDICT_ABORT_MS = 60_000;
 
 export interface PredictBudgetController {
   /** Combine into the axios request signal so budget + external aborts both fire. */

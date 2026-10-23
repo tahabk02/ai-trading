@@ -57,8 +57,8 @@ if _PARENT_DOTENV.is_file() and os.environ.get("AI_ENGINE_ALLOW_PARENT_DOTENV") 
 # PREMIUM T1 bar (95.0%) and the weakest tradable tier T4 is 80.0. The
 # validator never lets a configured value drop below MIN_EXECUTABLE_CONFIDENCE_PCT,
 # and since MIN_EXECUTABLE_TIER == "T1", the effective floor is 95.0.
-DEFAULT_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T1"], 2)          # 95.0
-MIN_EXECUTABLE_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T4"], 2)   # 80.0
+DEFAULT_CONFIDENCE_PCT = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER], 2)  # 95.0
+MIN_EXECUTABLE_CONFIDENCE_PCT = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER], 2)  # 95.0
 
 class Settings(BaseSettings):
     """
