@@ -67,13 +67,13 @@ describe("signalTiers — client mirror of the engine's multi-tier ladder (PART 
     expect(tierAtLeast(null)).toBe(false);
   });
 
-  it("targetCandlesEnabled is true ONLY for T1–T3", () => {
+  it("targetCandlesEnabled renders for every tier", () => {
     expect(targetCandlesEnabled("T1")).toBe(true);
     expect(targetCandlesEnabled("T2")).toBe(true);
     expect(targetCandlesEnabled("T3")).toBe(true);
-    expect(targetCandlesEnabled("T4")).toBe(false);
-    expect(targetCandlesEnabled("T5")).toBe(false);
-    expect(targetCandlesEnabled(null)).toBe(false);
+    expect(targetCandlesEnabled("T4")).toBe(true);
+    expect(targetCandlesEnabled("T5")).toBe(true);
+    expect(targetCandlesEnabled(null)).toBe(true);
   });
 
   it("labels carry the engine vocabulary (PREMIUM/HIGH/MEDIUM/LOW/WEAK)", () => {

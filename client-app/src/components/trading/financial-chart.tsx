@@ -67,6 +67,11 @@ import {
 import { useSignalViewStore } from "@/lib/signalViewStore";
 import { normalizeProjectionAtr, clampTargetToAnchor } from "@/lib/projectionAtr";
 import { ExpiryTimeMarker, type ExpiryMarkerTheme } from "@/lib/verticalTimeMarker";
+import {
+  resolveTradeOverlay,
+  samePrice,
+  type TradeOverlayInput,
+} from "@/lib/tradeOverlay";
 
 /**
  * ── COHERENCE PUBLISHER ──────────────────────────────────────────────────
@@ -181,6 +186,10 @@ const PRICE_LINE = "rgba(148,163,184,0.85)";
 const TGT_LINE = "#26a69a";
 const ANC_LINE = "#94a3b8";
 const STOP_LINE = "#ef5350";
+/** PART 46 [518] — live-position entry line (blue, distinct from TGT/STOP). */
+const ENTRY_LINE = "#3b82f6";
+/** PART 46 [518] — live-position expiry boundary (amber, dashed). */
+const TRADE_EXPIRY_LINE = "#f59e0b";
 
 /**
  * Read a design-system token from the live document root. The chart is drawn
@@ -214,6 +223,16 @@ function expiryMarkerTheme(): ExpiryMarkerTheme {
   };
 }
 
+/** PART 46 [518] — the active position's own boundary, visually distinct. */
+function tradeExpiryMarkerTheme(): ExpiryMarkerTheme {
+  return {
+    line: cssVar("--tp-trade-expiry-line", TRADE_EXPIRY_LINE),
+    labelBg: cssVar("--tp-elevated", "#171c28"),
+    labelInk: cssVar("--tp-text", "#f8fafc"),
+    labelMuted: cssVar("--tp-text-2", "#94a3b8"),
+  };
+}
+
 type GridCandle = Candle & {
   isGap?: boolean;
   isFinal?: boolean;
@@ -228,6 +247,7 @@ const LEAD_OFFSET_OPTIONS: ReadonlyArray<{ label: string; value: number | null }
 
 interface ChartLineBag {
   live?: IPriceLine;
+  entry?: IPriceLine;
   target?: IPriceLine;
   anchor?: IPriceLine;
   stop?: IPriceLine;
@@ -518,6 +538,18 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   /** PART 39 [374] — full switch (persist + aggregator + prediction). */
   const setSelectedTimeframe = useTradingStore((s) => s.setSelectedTimeframe);
   const predictionData = useTradingStore((s) => s.predictionData);
+  /**
+   * PART 46 [518] — live-position overlay. These selectors are deliberately
+   * narrow: a trade entering/expiring must repaint the two overlay marks, not
+   * re-create the chart. The projection horizon (`expirationSeconds` prop)
+   * stays a separate clock.
+   */
+  const isTradeActive = useTradingStore((s) => s.isTradeActive);
+  const tradeEntryPrice = useTradingStore((s) => s.tradeEntryPrice);
+  const tradeDirection = useTradingStore((s) => s.tradeDirection);
+  const tradeEntryEpochMs = useTradingStore((s) => s.tradeEntryEpochMs);
+  const tradeExpiresAtMs = useTradingStore((s) => s.tradeExpiresAtMs);
+  const storeExpirationSeconds = useTradingStore((s) => s.expirationSeconds);
   const { t } = useLangContext();
   const { resolvedTheme } = useTheme();
 
@@ -564,6 +596,35 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
    * force a style recalculation on every animation frame of the live tape.
    */
   const expiryMarkerThemeRef = useRef<ExpiryMarkerTheme | null>(null);
+  /**
+   * PART 46 [518] — a SECOND vertical primitive for the live position's expiry.
+   * It is separate from the projection marker because the two clocks are
+   * independent: a 1m execution on a 5m target horizon must not share a line.
+   */
+  const tradeExpiryMarkerRef = useRef<ExpiryTimeMarker | null>(null);
+  const tradeExpiryMarkerThemeRef = useRef<ExpiryMarkerTheme | null>(null);
+  /**
+   * Store fields read by the paint loop. Written every render into a ref so the
+   * rAF painter never depends on React re-renders for a fresh trade clock.
+   */
+  const tradeOverlayInputRef = useRef<TradeOverlayInput>({
+    isTradeActive: false,
+    tradeEntryPrice: null,
+    tradeDirection: null,
+    tradeEntryEpochMs: null,
+    tradeExpiresAtMs: null,
+    expirationSeconds: null,
+    timeframeSeconds: null,
+  });
+  tradeOverlayInputRef.current = {
+    isTradeActive,
+    tradeEntryPrice,
+    tradeDirection,
+    tradeEntryEpochMs,
+    tradeExpiresAtMs,
+    expirationSeconds: storeExpirationSeconds,
+    timeframeSeconds: tfSeconds,
+  };
   const [hasCandles, setHasCandles] = useState(false);
   /** PART 39 [375] — closed bars actually painted on the SELECTED grid. */
   const [closedCount, setClosedCount] = useState(0);
@@ -640,7 +701,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     predictionLike,
     SIGNAL_CONFIDENCE_THRESHOLD,
   );
-  const effSignal = signalView.gatedSignal;
+  // Chart rendering consumes the RAW direction. The confidence gate above only
+  // decides executability (TradingPanel); it must never blank a prediction here.
+  const effSignal = signalView.rawSignal;
   const liveCloseView =
     // RAW domain: the live tape close, NOT the Heikin-Ashi display close. The HA
     // close is a smoothed midpoint, so anchoring predictive geometry on it made
@@ -668,10 +731,12 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             confidence: confPropRef.current ?? 0,
           }
         : null;
-    const rawGated = buildSignalView(
+    // RAW engine direction for visualization. Executability is a separate
+    // concern enforced by TradingPanel; the chart must draw every prediction.
+    const rawVisual = buildSignalView(
       predictionDataRef.current ?? propLike,
       SIGNAL_CONFIDENCE_THRESHOLD,
-    ).gatedSignal;
+    ).rawSignal;
     // Signal stability: the 96.5% gate yields a raw gated value every tick,
     // but the label must NOT mutate mid-bucket. Freeze the committed signal
     // for the active timeout bucket and require sustained neutral before it
@@ -683,26 +748,6 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       tip && tip.timestamp > 0 ? bucketStart(tip.timestamp, bw) : 0;
     const wallSec = tipGridMs > 0 ? Math.floor(tipGridMs / 1000) : 0;
     const tfSec = timeframeToSeconds(timeframeRef.current);
-    // PART 9 — engine-decided time-gate: when the backend demoted this very
-    // emission to "too_late" (not enough real time left in the bucket to act),
-    // the buffer blanks the label and surfaces the reason. Never client-derived.
-    // PART 14 — the regime gate rides the SAME suppressed_reason channel:
-    // a random_walk symbol arrives as "regime_scored_only" (scored, never
-    // tradable) and is blanked + reasoned the same way.
-    const engineSuppress =
-      (
-        predictionDataRef.current as {
-          suppressed_reason?: string | null;
-        } | null
-      )?.suppressed_reason?.trim().toLowerCase() === "too_late"
-        ? ("too_late" as const)
-        : (
-            predictionDataRef.current as {
-              suppressed_reason?: string | null;
-            } | null
-          )?.suppressed_reason?.trim().toLowerCase() === "regime_scored_only"
-          ? ("regime_scored_only" as const)
-          : null;
     // PART 11 [25] + PART 21 [136] — realMs is a CONSTANT-OFFSET alias of the
     // aggregator's timingNow(): clockOffsetMs only refreshes on a genuine
     // upstream print, so between prints Date.now() advances 1:1 with
@@ -711,10 +756,12 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     // itself runs on `wallSec` (the broker-grid bucket floor), identical to the
     // `liveTipBucketSec` the projection engine consumes.
     signalHoldRef.current.evaluate(
-      rawGated,
+      rawVisual,
       wallSec,
       tfSec,
-      engineSuppress,
+      // Visualization never blanks on execution suppression (too_late /
+      // regime_scored_only). TradingPanel still enforces those for orders.
+      null,
       Date.now(),
       // PART 21 — raw /predict tier, committed with the direction. While a
       // direction is held the buffer FREEZES this tier; when neutral it is the
@@ -761,16 +808,32 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       targetPrice: number,
       anchorPrice: number,
       stopPrice: number,
-      /* PART 24 [159] — projection price lines (TGT/ANC/STOP/T-HI/T-LO) draw
-         ONLY inside the target zone (T1–T3). At T4/T5 the main tape must not
-         show a dashed TGT line next to an empty projection — the same honesty
-         gate as the candle shape. The LIVE price line stays in both cases. */
+      /* Projection price lines (TGT/ANC/STOP/T-HI/T-LO) draw whenever the
+         target layer has a projection. Execution tier/regime never gate
+         this display; the LIVE price line always stays. */
       zoneActive: boolean,
+      entryPrice: number,
+      entryLabel: string,
     ): void => {
       const series = candleSeriesRef.current;
       if (!series) return;
       const bag = linesRef.current;
       const live = Number(currentPriceRef.current);
+      /* PART 46 [518] — the position/signal entry is independent of the target
+         layer: it must remain visible when a projection is withheld (PO
+         offline, no target) because it annotates a fill, not a forecast. */
+      setPriceLine(
+        bag,
+        "entry",
+        series,
+        entryPrice,
+        ENTRY_LINE,
+        LineStyle.Solid,
+        entryLabel || "ENTRY",
+      );
+      /* ANC would be a second line on top of the entry when both use the same
+         anchor price; the entry label carries more information, so suppress it. */
+      const anchorVisible = samePrice(entryPrice, anchorPrice) ? 0 : anchorPrice;
       if (zoneActive) {
         setPriceLine(
           bag,
@@ -785,7 +848,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           bag,
           "anchor",
           series,
-          anchorPrice,
+          anchorVisible,
           ANC_LINE,
           LineStyle.Dotted,
           "ANC",
@@ -871,6 +934,30 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     (tipSec: number, tfSec: number, expSec: number): void => {
       const marker = expiryMarkerRef.current;
       if (!marker) return;
+
+      /* PART 46 [518] — an active position owns the expiry boundary. The
+         projection marker is hidden while the trade marker is live so a 1m fill
+         never appears to expire on the 5m forecast. Both are vertical time
+         boundaries; only one can be the "when this closes" answer. */
+      const overlay = resolveTradeOverlay({
+        ...tradeOverlayInputRef.current,
+        timeframeSeconds: tfSec,
+      });
+      const tradeMarker = tradeExpiryMarkerRef.current;
+      const tradeTheme = tradeExpiryMarkerThemeRef.current;
+      if (tradeMarker && tradeTheme && overlay.expiryBucketSec > 0) {
+        marker.set(0, "", expiryMarkerThemeRef.current ?? undefined);
+        tradeMarker.set(
+          overlay.expiryBucketSec,
+          overlay.expiryClock,
+          tradeTheme,
+          "TRADE EXPIRY",
+          "ACTIVE TRADE - LIVE POSITION",
+        );
+        return;
+      }
+
+      tradeMarker?.set(0, "", tradeTheme ?? undefined);
       const bucket = expiryMarkerBucketSec(tipSec, expSec, tfSec);
       marker.set(
         bucket,
@@ -985,6 +1072,14 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         expiryMarkerBucketSec: expiryMarkerRef.current?.markerBucketSec ?? 0,
         expiryMarkerX: expiryMarkerRef.current?.markerX() ?? null,
         expiryMarkerLabel: expiryMarkerRef.current?.markerLabel ?? "",
+        // PART 46 [518] - live-position overlay verification surface.
+        tradeEntryPrice: tradeOverlayInputRef.current.tradeEntryPrice ?? 0,
+        tradeExpiresAtMs: tradeOverlayInputRef.current.tradeExpiresAtMs ?? 0,
+        tradeExpiryMarkerBucketSec:
+          tradeExpiryMarkerRef.current?.markerBucketSec ?? 0,
+        tradeExpiryMarkerX: tradeExpiryMarkerRef.current?.markerX() ?? null,
+        tradeExpiryMarkerLabel:
+          tradeExpiryMarkerRef.current?.markerLabel ?? "",
         projectionKey: projectionRef.current.currentKey,
         projectionAnchorClose: projectionRef.current.currentAnchor,
       });
@@ -1004,7 +1099,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // candles can never render a different dispatch than the label shows
       // (pre-PART 21 both read separate copies of predictionDataRef).
       const view = currentSignalView();
-      const signalValue = view.gatedSignal;
+      const signalValue = view.rawSignal;
       const tierForGate = view.tier;
       const targetPriceRaw =
         Number(targetRef.current) ||
@@ -1041,6 +1136,19 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           : signalValue === "BUY"
             ? BULLISH
             : AXIS_TEXT;
+      /**
+       * PART 46 [518] — entry marker priority: broker-confirmed fill, then the
+       * selected signal's anchor. The line is independent of the target layer
+       * so a fill remains annotated when PO-offline withholds projections.
+       */
+      const tradeOverlay = resolveTradeOverlay({
+        ...tradeOverlayInputRef.current,
+        signalDirection: signalValue,
+        signalAnchorPrice: anchorPrice,
+        timeframeSeconds: tfSec,
+      });
+      const entryPrice = tradeOverlay.entry?.price ?? 0;
+      const entryLabel = tradeOverlay.entry?.label ?? "";
 
       const tip = rows.length > 0 ? rows[rows.length - 1] : null;
       const tipGridMs =
@@ -1052,21 +1160,21 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       // blanked. A time marker must not disappear because a price is missing.
       syncExpiryMarker(tipSec, tfSec, expSec);
 
-      // ── PART 40 [394] — THE TARGET GATE ──
-      // A projection renders if AND ONLY IF regime_gate === "tradable" AND the
-      // tier clears T1–T3, read from the SAME currentSignalView the HUD renders.
-      // Everything below the gate (candles, price lines, target direction) is
-      // the target layer; when it is closed the layer is CLEARED and the reason
-      // rides to the HUD instead — no ghost projection, no silent blank.
+      // TARGET VISUALIZATION GATE
+      // The projection renders whenever the AI emitted a target. Regime gate
+      // and tier are EXECUTION inputs only; they never suppress the chart.
+      // Everything below reads the RAW prediction direction.
+      // (targetRenderState only withholds when target data is absent.)
+
       const targetState = targetRenderState(view, targetPrice);
       const showTarget = targetState.showTarget;
 
-      // ── SUPPRESSION: candles ALWAYS render when live tip + target exist ──
-      // The 96.5% confidence gate ONLY affects the BUY/SELL label, never the
-      // candle rendering. Suppress when the regime gate withholds the target,
-      // when this OTC instrument is PO-offline (proxy ticks are not authorized
-      // to carry a projection — PART 43.5 [474]), or when required data is
-      // genuinely absent. Never anchor Date.now(); never gate on confidence.
+      // SUPPRESSION: candles render whenever live tip + target exist.
+      // The confidence threshold and execution tier never blank the projection.
+      // Only PO-offline (proxy ticks are not authorized to carry a projection,
+      // PART 43.5 [474]) or genuinely absent data suppress it.
+      // Never anchor Date.now(); never gate on confidence or tier.
+
       if (
         !showTarget ||
         poOfflineRef.current ||
@@ -1084,7 +1192,16 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           try { series.setMarkers([]); } catch {}
         }
         setTargetLayerActive(false);
-        syncMarkers(dirColor, null, 0, 0, 0, showTarget);
+        syncMarkers(
+          dirColor,
+          null,
+          0,
+          0,
+          0,
+          showTarget,
+          entryPrice,
+          entryLabel,
+        );
         syncChartDebug(rows, bw, tipSec, intervals, [], signalValue, targetState);
         return;
       }
@@ -1107,9 +1224,9 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         targetPrice,
         atr: Number(atrRef.current) || 0,
         signal: signalValue,
-        // PART 21 [135] — engine tier gate: candles render T1–T3 ONLY off the
-        // buffered view's tier (frozen with the direction, never a second raw
-        // fetch of predictionDataRef). Closing the PART 20 drift.
+        // Tier is metadata only here: visualization is never tier-gated.
+        // Execution still refuses weak bands in TradingPanel.
+        //
         tier: tierForGate,
       });
       const shouldReanchor = targetViewportNeedsReanchor(
@@ -1117,6 +1234,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         snap.intervals,
       );
       lastTargetIntervalsRef.current = snap.intervals;
+      const last =
+        snap.candles.length > 0
+          ? snap.candles[snap.candles.length - 1]
+          : null;
 
       if (snap.changed) {
         if (series) {
@@ -1155,20 +1276,21 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           signal: signalValue,
           key: snap.key,
         });
-        const last =
-          snap.candles.length > 0
-            ? snap.candles[snap.candles.length - 1]
-            : null;
-        syncMarkers(
-          dirColor,
-          last,
-          targetPrice,
-          anchorPrice,
-          stopPrice,
-          showTarget,
-        );
         syncChartDebug(rows, bw, tipSec, intervals, snap.candles, signalValue, targetState);
       }
+      /* PART 46 [518] — price lines update on EVERY paint, not only structural
+         projection changes: entering/exiting a trade changes the ENTRY line but
+         leaves the projection key identical. The painter is rAF-coalesced. */
+      syncMarkers(
+        dirColor,
+        last,
+        targetPrice,
+        anchorPrice,
+        stopPrice,
+        showTarget,
+        entryPrice,
+        entryLabel,
+      );
     },
     [reanchor, syncMarkers, syncChartDebug, syncExpiryMarker, currentSignalView],
     );
@@ -1323,6 +1445,17 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     } catch {
       expiryMarkerRef.current = null;
     }
+    // PART 46 [518] - the live-position boundary. Same candle series/pane as
+    // the projection marker; `syncExpiryMarker` decides which one is visible.
+    const tradeExpiryMarker = new ExpiryTimeMarker(tradeExpiryMarkerTheme());
+    tradeExpiryMarkerRef.current = tradeExpiryMarker;
+    tradeExpiryMarkerThemeRef.current = tradeExpiryMarkerTheme();
+    try {
+      candleSeries.attachPrimitive(tradeExpiryMarker);
+    } catch {
+      tradeExpiryMarkerRef.current = null;
+      tradeExpiryMarkerThemeRef.current = null;
+    }
     // ── DEBUG SURFACE BASELINE (zero-data parity) ──
     // `writeChartDebug` is otherwise only reachable through `updateTargetLayer`,
     // which requires at least one rendered candle. On a cold/offline start (no
@@ -1365,6 +1498,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       targetSeriesRef.current = null;
       expiryMarkerRef.current = null;
       expiryMarkerThemeRef.current = null;
+      tradeExpiryMarkerRef.current = null;
+      tradeExpiryMarkerThemeRef.current = null;
       rawRef.current = [];
       dataRef.current = [];
       rejectedCountRef.current = 0;
@@ -1523,6 +1658,14 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     updateTargetLayer,
     effectiveSignal,
     feedStatus,
+    // PART 46 [518] - the live-position overlay is independent of the forecast;
+    // a fill arriving between projection rebuilds must still repaint its marks.
+    isTradeActive,
+    tradeEntryPrice,
+    tradeDirection,
+    tradeEntryEpochMs,
+    tradeExpiresAtMs,
+    storeExpirationSeconds,
   ]);
 
   useEffect(() => {
@@ -1985,10 +2128,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               )}
             </div>
           ) : null}
-          {/* PART 40 [394]/[395] — THE TARGET SLOT (chart). Shows the engine
-              target only while the regime gate is open AND the tier clears
-              T1–T3; otherwise it states WHY it is withheld — the slot is never
-              blank and never shows a target the gate did not authorize. */}
+          {/* PART 40 [394]/[395] - THE TARGET SLOT (chart). Shows the engine
+              target whenever the AI emitted one; regime/tier are execution
+              inputs only. PO-offline or missing price is the only withheld
+              state. */}
           <div
             data-testid="hud-target-slot"
             data-state={hudTargetShown ? "target" : "withheld"}

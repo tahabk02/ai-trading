@@ -128,9 +128,9 @@ export const NeuralMatrixVisualizer: React.FC<NeuralMatrixVisualizerProps> = ({
     // services/api.ts); `confidence` is a pipeline identifier, not a
     // probability, so it is deliberately NOT used as a "confidence" readout.
     feed.confluence = Number(state.predictionData?.book_agreement) || 0;
-    // The GATED direction — the same buffer the chart HUD renders, so the
-    // emitter's colour can never contradict the label a few pixels away.
-    feed.direction = view ? view.gatedSignal : null;
+    // The RAW prediction direction - the same buffer the chart visualization
+    // renders. Execution gating is enforced by TradingPanel, not this map.
+    feed.direction = view ? view.rawSignal : null;
     feed.live = live;
     return feed;
   }, [live]);
@@ -180,7 +180,7 @@ export const NeuralMatrixVisualizer: React.FC<NeuralMatrixVisualizerProps> = ({
   const displaySymbol = (symbol || "").trim().toUpperCase() || "--";
 
   const activeLane = laneOf(displaySymbol === "--" ? "" : displaySymbol);
-  const verdict = coherentView ? coherentView.gatedSignal : null;
+  const verdict = coherentView ? coherentView.rawSignal : null;
 
   return (
     <section

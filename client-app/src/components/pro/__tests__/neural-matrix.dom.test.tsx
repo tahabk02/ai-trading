@@ -31,6 +31,7 @@ const signal = (next: "BUY" | "SELL" | null) =>
         ? null
         : {
             gatedSignal: next,
+            rawSignal: next,
             tier: "STANDARD",
             bucketSec: 0,
             suppressedReason: null,

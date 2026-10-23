@@ -1855,10 +1855,10 @@ describe("PART 6 — tier-gated target candles (T1–T3 overlay)", () => {
     }
   });
 
-  it("T4/T5 return an EMPTY overlay — weak bands never draw the trajectory", () => {
+  it("T4/T5 also render the trajectory — visualization is not tier-gated", () => {
     for (const tier of ["T4", "T5"]) {
       const candles = buildTargetCandles({ ...baseInputs, tier });
-      expect(candles.length).toBe(0);
+      expect(candles.length).toBe(1);
     }
   });
 
@@ -1867,7 +1867,7 @@ describe("PART 6 — tier-gated target candles (T1–T3 overlay)", () => {
     expect(candles.length).toBe(1);
   });
 
-  it("projection engine key reflects the tier gate", () => {
+  it("projection engine key carries the tier for every band", () => {
     const eng = new TargetProjectionEngine();
     const t3 = eng.present({
       liveTipBucketSec: TIP,
@@ -1892,8 +1892,8 @@ describe("PART 6 — tier-gated target candles (T1–T3 overlay)", () => {
       signal: "BUY",
       tier: "T5",
     });
-    expect(t5.candles.length).toBe(0);
-    expect(t5.key).toContain("tier|off");
+    expect(t5.candles.length).toBe(1);
+    expect(t5.key).toContain("tier|T5");
   });
 });
 
@@ -1968,7 +1968,7 @@ describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
     expect(legacy[0].marker).toBeNull();
   });
 
-  it("PART 8 regression — T4/T5 NEVER produce a renderable target-candle track", () => {
+  it("PART 8 regression — T4/T5 produce a renderable target-candle track", () => {
     const eng = new TargetProjectionEngine();
     const t4 = eng.present({
       liveTipBucketSec: TIP,
@@ -1980,7 +1980,7 @@ describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
       signal: "BUY",
       tier: "T4",
     });
-    expect(t4.candles.length).toBe(0);
+    expect(t4.candles.length).toBe(1);
     const t5 = eng.present({
       liveTipBucketSec: TIP,
       timeframeSec: 60,
@@ -1991,8 +1991,8 @@ describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
       signal: "BUY",
       tier: "T5",
     });
-    expect(t5.candles.length).toBe(0);
-    expect(t5.key).toContain("tier|off");
+    expect(t5.candles.length).toBe(1);
+    expect(t5.key).toContain("tier|T5");
     // A later identical T5 read yields NO change → no repaint can schedule.
     const again = eng.present({
       liveTipBucketSec: TIP,
@@ -2005,7 +2005,7 @@ describe("PART 8 — tier-aware target candle styling (T1–T3)", () => {
       tier: "T5",
     });
     expect(again.changed).toBe(false);
-    expect(again.candles.length).toBe(0);
+    expect(again.candles.length).toBe(1);
   });
 
   it("SignalHoldBuffer surfaces suppressedReason: frozen + too_late, resets", () => {

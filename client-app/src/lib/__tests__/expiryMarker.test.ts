@@ -397,6 +397,28 @@ describe("PART 37 expiry marker primitive", () => {
     expect(rec.rects.length).toBeGreaterThan(0);
   });
 
+  it("supports a caller-supplied title/note for the live-position boundary", () => {
+    const bucket = expiryMarkerBucketSec(TIP_SEC, 60, 60);
+    const { marker } = attachedMarker(() => 500);
+    marker.set(
+      bucket,
+      expiryMarkerClockLabel(bucket),
+      THEME,
+      "TRADE EXPIRY",
+      "ACTIVE TRADE - LIVE POSITION",
+    );
+    expect(marker.markerTitle).toBe("TRADE EXPIRY");
+    expect(marker.markerNote).toBe("ACTIVE TRADE - LIVE POSITION");
+    const { target, rec } = recordingTarget(900, 480);
+    marker.paneViews()[0].renderer()?.draw(target as never);
+    expect(rec.texts[0]).toBe(`TRADE EXPIRY ${expiryMarkerClockLabel(bucket)}`);
+    expect(rec.texts).toContain("ACTIVE TRADE - LIVE POSITION");
+    // The default remains the projection disclaimer when not overridden.
+    marker.set(bucket, expiryMarkerClockLabel(bucket), THEME);
+    expect(marker.markerTitle).toBe("EXPIRY");
+    expect(marker.markerNote).toBe(EXPIRY_MARKER_DISCLAIMER);
+  });
+
   it("keeps the label inside the pane when the marker sits at the right edge", () => {
     const { marker } = attachedMarker(() => 898);
     marker.set(expiryMarkerBucketSec(TIP_SEC, 60, 60), "22:15:00", THEME);

@@ -5,7 +5,6 @@ import {
   normalizeViewRegimeGate,
   normalizeViewTier,
 } from "./realtimeCandleAggregator";
-import { targetCandlesEnabled } from "./signalTiers";
 
 /**
  * PART 11 — BAR TINT MUST CONSUME THE BUFFERED SIGNAL, NEVER THE RAW STORE
@@ -69,17 +68,19 @@ export function barTintForBufferedSignal(
 }
 
 /**
- * PART 40 [394] — THE TARGET GATE. A projection (target candles, projection
- * price lines, the TGT slot and the target direction) renders if AND ONLY IF
- * the engine's regime gate says `tradable` AND the tier clears T1–T3. Two
- * inputs, both off the ONE SignalHoldView — no second condition exists
- * anywhere: confidence, feed status and the symbol never widen it, and a
- * missing/unknown gate fails CLOSED (withheld + reason, never a ghost target).
+ * THE TARGET VISUALIZATION GATE. A projection (target candles, price lines,
+ * the TGT slot and target direction) renders whenever the AI emitted one.
+ * Execution inputs - confidence, tier, regime gate, suppressed_reason - are
+ * deliberately NOT inputs here: they decide whether a trade may be placed,
+ * never whether a prediction is displayed. Absent target data is the only
+ * withheld state.
  */
 export function targetZoneEnabled(
-  view: Pick<SignalHoldView, "tier" | "regimeGate">,
+  _view: Pick<SignalHoldView, "tier" | "regimeGate">,
 ): boolean {
-  return view.regimeGate === "tradable" && targetCandlesEnabled(view.tier);
+  // Visualization is NOT execution. Regime/tier decide whether a trade may be
+  // placed; they never decide whether the AI projection is drawn.
+  return true;
 }
 
 /** Why the target slot is withheld. Every withheld state carries one. */
@@ -93,11 +94,11 @@ export type TargetWithheldReason =
   | "no_target";
 
 export interface TargetRenderState {
-  /** True ⇔ [394]: regime_gate "tradable" AND tier in T1–T3. */
+  /** True whenever a target price exists; execution inputs never gate it. */
   showTarget: boolean;
   /** The gate that decided it — echoed so surfaces can show the raw value. */
   regimeGate: string | null;
-  /** The target's direction — null exactly when showTarget is false. */
+  /** The RAW prediction direction (null for payload-only/awaiting states). */
   signal: "BUY" | "SELL" | null;
   /** null exactly when the target renders; else the truthful why-not. */
   reason: TargetWithheldReason | null;
@@ -116,48 +117,25 @@ export function targetRenderState(
   view: SignalHoldView,
   targetPrice?: number,
 ): TargetRenderState {
-  const detail = view.regimeDetail;
-  if (targetZoneEnabled(view)) {
-    const price = targetPrice === undefined ? 1 : Number(targetPrice);
-    const hasPrice = Number.isFinite(price) && price > 0;
-    return {
-      showTarget: true,
-      regimeGate: view.regimeGate,
-      signal: view.gatedSignal,
-      reason: hasPrice ? null : "no_target",
-      detail: null,
-    };
-  }
-  // Withheld — reason precedence, most specific engine verdict first.
-  const reason: TargetWithheldReason =
-    view.suppressedReason === "too_late" || detail === "too_late"
-      ? "too_late"
-      : detail === "stale_market_out_of_safety_bounds"
-        ? "stale_feed"
-        : view.suppressedReason === "regime_scored_only" ||
-            view.regimeGate === "scored_only"
-          ? "scored_only"
-          : view.regimeGate === "pending_high_precision"
-            ? "pending_high_precision"
-            : view.regimeGate === "tradable"
-              ? "below_tier"
-              : // gate null / unknown future value — no verdict, fail closed
-                "regime_review";
+  // The projection is a DISPLAY of the engine's prediction. Execution inputs
+  // (confidence, tier, regime gate) deliberately do not participate here: every
+  // incoming prediction with a target is rendered. The only withheld state is
+  // genuinely absent target data.
+  const price = targetPrice === undefined ? 1 : Number(targetPrice);
+  const hasPrice = Number.isFinite(price) && price > 0;
   return {
-    showTarget: false,
+    showTarget: true,
     regimeGate: view.regimeGate,
-    signal: null,
-    reason,
-    detail,
+    signal: view.rawSignal,
+    reason: hasPrice ? null : "no_target",
+    detail: null,
   };
 }
 
 /**
- * PART 40 [395] — the SAME pure gate for surfaces that hold a raw /predict
- * payload instead of a SignalHoldView (the 44-card grid). The payload is
- * normalized with the aggregator's own normalizers, so a card and the chart
- * can never disagree about what "tradable + T1–T3" means. `null` payload is
- * the honest "no verdict in hand" state — withheld with `awaiting_payload`.
+ * The same pure gate for surfaces that hold a raw /predict payload instead
+ * of a SignalHoldView (the 44-card grid). A null payload is the honest
+ * "no verdict in hand" state: withheld with awaiting_payload.
  */
 export function targetStateForPayload(
   payload: {
@@ -181,6 +159,7 @@ export function targetStateForPayload(
   const detail = normalizeViewRegimeDetail(payload.suppressed_reason);
   const view: SignalHoldView = {
     gatedSignal: null,
+    rawSignal: null,
     tier: normalizeViewTier(payload.tier),
     bucketSec: 0,
     suppressedReason:

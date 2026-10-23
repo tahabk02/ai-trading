@@ -543,6 +543,21 @@ export interface TradingState {
    * panel's countdown read the SAME clock. Null whenever no trade is in flight.
    */
   tradeEntryEpochMs: number | null;
+  /**
+   * PART 46 [518] — exact price the live position was opened at. Mirrors the
+   * backend `entry_price` once the execution response lands (the click price is
+   * used optimistically while the request is in flight) so the chart's ENTRY
+   * line and the position P&L read the same number. Null when flat.
+   */
+  tradeEntryPrice: number | null;
+  /** Direction of the live position; the chart labels the ENTRY line from it. */
+  tradeDirection: "CALL" | "PUT" | null;
+  /**
+   * PART 46 [518] — absolute expiry instant (epoch ms) for the live position.
+   * The chart's TRADE EXPIRY boundary reads this, not the projection horizon, so
+   * a 1m execution cannot be drawn on the 5m target clock.
+   */
+  tradeExpiresAtMs: number | null;
   /** Last trade result notification */
   lastTradeResult: string | null;
   /** Trade history */
@@ -980,6 +995,9 @@ const lastRealtimePublish = new Map<string, number>();
     countdownSeconds: 0,
     isTradeActive: false,
     tradeEntryEpochMs: null,
+    tradeEntryPrice: null,
+    tradeDirection: null,
+    tradeExpiresAtMs: null,
     lastTradeResult: null,
     tradeHistory: [],
 
@@ -1867,10 +1885,17 @@ const lastRealtimePublish = new Map<string, number>();
 
       // PART 45 [510] — TIMER mode: the entry instant is the click, captured
       // once here so the chart window and the panel countdown share one clock.
+      // PART 46 [518] — the same click stamps the optimistic entry price,
+      // direction and absolute expiry consumed by the chart overlay; the
+      // backend response reconciles the price/expiry below.
+      const entryEpochMs = Date.now();
       set({
         isTradeActive: true,
         countdownSeconds: expirationSeconds,
-        tradeEntryEpochMs: Date.now(),
+        tradeEntryEpochMs: entryEpochMs,
+        tradeEntryPrice: currentPrice,
+        tradeDirection: direction,
+        tradeExpiresAtMs: entryEpochMs + expirationSeconds * 1000,
       });
 
       const countdownInterval = setInterval(() => {
@@ -1881,6 +1906,9 @@ const lastRealtimePublish = new Map<string, number>();
             countdownSeconds: 0,
             isTradeActive: false,
             tradeEntryEpochMs: null,
+            tradeEntryPrice: null,
+            tradeDirection: null,
+            tradeExpiresAtMs: null,
           });
         } else {
           set({ countdownSeconds: remaining - 1 });
@@ -1901,6 +1929,10 @@ const lastRealtimePublish = new Map<string, number>();
         // label it plainly so the operator is never misled into thinking a real
         // position was opened.
         const isDryRun = execution.status === "dry_run";
+        const backendEntryPrice = Number(trade?.entry_price);
+        const backendExpiresAtMs = trade?.expires_at
+          ? Date.parse(trade.expires_at)
+          : Number.NaN;
         set((state) => ({
           tradeHistory:
             trade && !isDryRun
@@ -1910,6 +1942,17 @@ const lastRealtimePublish = new Map<string, number>();
             ? `DRY RUN — nothing was sent (${direction} on ${activeSymbol})`
             : `${direction} signal on ${activeSymbol} — ${trade ? trade.status : execution.status}`,
           tradeEntryEpochMs: isDryRun ? null : state.tradeEntryEpochMs,
+          tradeEntryPrice: isDryRun
+            ? null
+            : Number.isFinite(backendEntryPrice) && backendEntryPrice > 0
+              ? backendEntryPrice
+              : state.tradeEntryPrice,
+          tradeDirection: isDryRun ? null : state.tradeDirection,
+          tradeExpiresAtMs: isDryRun
+            ? null
+            : Number.isFinite(backendExpiresAtMs) && backendExpiresAtMs > 0
+              ? backendExpiresAtMs
+              : state.tradeExpiresAtMs,
         }));
       } catch (err: unknown) {
         clearInterval(countdownInterval);
@@ -1951,7 +1994,10 @@ const lastRealtimePublish = new Map<string, number>();
             isTradeActive: false,
             countdownSeconds: 0,
             tradeEntryEpochMs: null,
-            lastTradeResult: `⛔ ${data?.message ?? "Kill switch engaged — trading locked."}`,
+            tradeEntryPrice: null,
+            tradeDirection: null,
+            tradeExpiresAtMs: null,
+            lastTradeResult: `⚠ ${data?.message ?? "Kill switch engaged — trading locked."}`,
           });
           return;
         }
@@ -1962,6 +2008,9 @@ const lastRealtimePublish = new Map<string, number>();
           isTradeActive: false,
           countdownSeconds: 0,
           tradeEntryEpochMs: null,
+          tradeEntryPrice: null,
+          tradeDirection: null,
+          tradeExpiresAtMs: null,
           lastTradeResult: `❌ ${message}`,
         });
       }

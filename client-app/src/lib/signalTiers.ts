@@ -50,8 +50,16 @@ export const DEFAULT_EXECUTION_TIER = "T1" as SignalTier;
  */
 export const LOWEST_TRADABLE_TIER = "T4" as SignalTier;
 
-/** Target-candle overlay is rendered for T1–T3 only. */
+/** Legacy marker kept for compatibility; rendering no longer tier-gates. */
 export const TARGET_CANDLES_MIN_TIER = "T3" as SignalTier;
+
+/** Visualization is independent of the execution band: every emitted tier
+ *  (and an absent/unknown tier) still renders its AI target projection. */
+export function targetCandlesEnabled(
+  _tier: string | null | undefined,
+): boolean {
+  return true;
+}
 
 /** Normalize any genuine confidence (0..1 or 0..100) onto the 0..1 scale. */
 export function normalizeTierConfidence(raw: number): number {
@@ -91,12 +99,8 @@ export function tierAtLeast(
   return tierRank(tier) >= tierRank(min);
 }
 
-/** True when the target-candle overlay should render (T1–T3). */
-export function targetCandlesEnabled(
-  tier: string | null | undefined,
-): boolean {
-  return tierRank(tier) >= tierRank(TARGET_CANDLES_MIN_TIER);
-}
+/* Legacy floor retained for callers that describe the old projection horizon;
+ * it does not control target rendering (see targetCandlesEnabled). */
 
 // ── FLEXIBLE-TIER EXECUTION FLOOR (2026-09-30) ────────────────────────────
 // The trader picks which bands they want to trade. This NEVER changes which

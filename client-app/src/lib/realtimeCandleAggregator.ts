@@ -40,7 +40,7 @@
  *   • Strictly monotonic, synchronized to system wall-clock time with predictive lead.
  */
 
-import { targetCandlesEnabled } from "./signalTiers";
+
 
 // ── PO-Canonical Timeframe Contract ──
 // Pocket Option uses a specific set of chart intervals. We use uppercase
@@ -238,7 +238,12 @@ export function signalGate(
 }
 
 export interface SignalView {
+  /** Execution-gated direction (confidence >= threshold). */
   gatedSignal: "BUY" | "SELL" | null;
+  /** Raw engine direction, independent of the confidence/execution gate.
+   *  Visualization surfaces (chart, HUD, confluence map) consume THIS so a
+   *  prediction is never hidden just because it is not executable. */
+  rawSignal: "BUY" | "SELL" | null;
   directionText: string;
   badgeText: string | null;
   gated: boolean;
@@ -269,6 +274,7 @@ export function buildSignalView(
   const confPct = Math.round(conf01 * 100);
   return {
     gatedSignal,
+    rawSignal,
     confPct,
     gatePct,
     badgeText: !rawSignal
@@ -714,11 +720,9 @@ export function targetViewportNeedsReanchor(
 }
 
 /** Build predictive target candles for the chart projection layer.
- *  Candles ALWAYS render when the four data preconditions hold — the 96.5%
- *  confidence gate ONLY affects the BUY/SELL label, NOT the candle geometry.
- *  PART 6: when a signal `tier` is provided, the overlay renders ONLY for
- *  T1–T3 (targetCandlesEnabled). Sub-T3 tiers (T4 LOW / T5 WEAK) return an
- *  empty overlay — the trajectory is NOT drawn for weak bands.
+ *  Candles render whenever the data preconditions hold. Tier, regime and
+ *  confidence are EXECUTION inputs only - visualization must never hide an
+ *  AI target because its band is weak or not currently tradable.
  */
 export function buildTargetCandles(opts: {
   liveTipBucketMs: number;
@@ -734,10 +738,6 @@ export function buildTargetCandles(opts: {
   visualAnchor?: number;
 }): TargetCandleData[] {
   const { liveTipBucketMs, liveClose, targetPrice, atr, signal, tier, expirationSeconds, timeframeSeconds, visualAnchor } = opts;
-  // Tier gate: an engine-graded T4/T5 verdict never draws a trajectory. An
-  // ABSENT tier keeps the legacy render (contract pinned by
-  // realtimeCandleAggregator.test.ts "absent tier keeps legacy behaviour").
-  if (tier && !targetCandlesEnabled(tier)) return [];
   if (!Number.isFinite(liveTipBucketMs) || liveTipBucketMs <= 0) return [];
   if (!Number.isFinite(targetPrice) || targetPrice <= 0) return [];
   if (!Number.isFinite(timeframeSeconds) || timeframeSeconds <= 0) return [];
@@ -830,7 +830,7 @@ export function targetProjectionKey(inputs: TargetProjectionInputs): string {
     "sig",
     inputs.signal ?? "N",
     "tier",
-    inputs.tier && targetCandlesEnabled(inputs.tier) ? inputs.tier : "off",
+    inputs.tier ?? "off",
   ].join("|");
 }
 
@@ -902,28 +902,22 @@ export class TargetProjectionEngine {
         : this.anchorLiveClose > 0
           ? this.anchorLiveClose
           : 0;
-    // PART 6 — T4/T5 tiers never draw the trajectory: overlay is empty.
-    // An absent tier keeps the legacy render (pinned by the aggregator suite);
-    // a graded tier below T3 is suppressed.
-    const tierEnabled = inputs.tier
-      ? targetCandlesEnabled(inputs.tier)
-      : true;
-    this.candles = tierEnabled
-      ? buildTargetCandles({
-          liveTipBucketMs: tipSec * 1000,
-          // REAL close — the truthful anchor and the memo's baseline.
-          liveClose: anchor,
-          // DISPLAYED close — where the overlay physically attaches. Absent in
-          // tests/SSR, where buildTargetCandles falls back to `anchor`.
-          visualAnchor: inputs.visualAnchor,
-          targetPrice: inputs.targetPrice,
-          atr: inputs.atr,
-          signal: inputs.signal,
-          tier: inputs.tier,
-          expirationSeconds: expSec,
-          timeframeSeconds: tfSec,
-        })
-      : [];
+    // Visualization is execution-independent: every tier (and an absent tier)
+    // renders the projection. Tier only gates order placement, never the chart.
+    this.candles = buildTargetCandles({
+      liveTipBucketMs: tipSec * 1000,
+      // REAL close — the truthful anchor and the memo's baseline.
+      liveClose: anchor,
+      // DISPLAYED close — where the overlay physically attaches. Absent in
+      // tests/SSR, where buildTargetCandles falls back to `anchor`.
+      visualAnchor: inputs.visualAnchor,
+      targetPrice: inputs.targetPrice,
+      atr: inputs.atr,
+      signal: inputs.signal,
+      tier: inputs.tier,
+      expirationSeconds: expSec,
+      timeframeSeconds: tfSec,
+    });
     this.key = key;
     this.anchorLiveClose = anchor;
     return {
@@ -989,8 +983,11 @@ export interface SignalHoldBufferOptions {
  *  independently fetched copies a future rename could pull apart (the PART 20
  *  drift class). */
 export interface SignalHoldView {
-  /** Direction the HUD/label renders. Blanked by too_late / regime_scored_only. */
+  /** Direction the HUD/execution label renders. Blanked by too_late / regime_scored_only. */
   gatedSignal: "BUY" | "SELL" | null;
+  /** Raw/stabilized engine direction for VISUALIZATION. Never blanked by the
+   *  confidence threshold, execution tier or regime gate. */
+  rawSignal: "BUY" | "SELL" | null;
   /** Frozen held tier while a direction is held; else the latest raw /predict
    *  tier (PART 8: a T3 candle legitimately renders with a gated-out label). */
   tier: string | null;
@@ -1222,6 +1219,7 @@ export class SignalHoldBuffer {
         this.suppressedReason === "regime_scored_only"
           ? null
           : this.held,
+      rawSignal: this.held,
       tier: this.held !== null ? this.heldTier : this.lastRawTier,
       bucketSec: this.lastBucketSec,
       suppressedReason: this.suppressedReason,

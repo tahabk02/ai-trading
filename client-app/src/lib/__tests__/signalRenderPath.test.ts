@@ -198,7 +198,7 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
     expect(v.tier).toBe("T2"); // frozen beside the held direction
   });
 
-  it("the T2→T5 drop suppresses candles EXACTLY when the label clears — one tick, one flip", () => {
+  it("the T2→T5 label clears while the AI projection keeps rendering", () => {
     const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
     tick(buf, "BUY", 100, 100_000, "T2");
     // Bucket rolls to 160; sustained neutral with REAL gaps clears the label.
@@ -207,8 +207,8 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
     expect(v.gatedSignal).toBeNull(); // (a) HUD cleared by the hysteresis
     expect(v.tier).toBe("T5");
     const { candles, badge } = assertCoherent(v);
-    expect(targetCandlesEnabled(v.tier)).toBe(false);
-    expect(candles.length).toBe(0); // (b) suppressed at the SAME tick
+    expect(targetCandlesEnabled(v.tier)).toBe(true);
+    expect(candles.length).toBe(5); // (b) projection is never tier-gated
     expect(badge.badgeText).toBe("NO SIGNAL"); // (c) badge matches
   });
 
@@ -238,20 +238,20 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
     assertCoherent(v);
   });
 
-  it("PART 24 [160] — at T5/WEAK the 'TARGET CANDLES N candles' TEXT does not render (not just the shape)", () => {
+  it("PART 24 [160] — at T5/WEAK the TARGET CANDLES label still renders", () => {
     const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
     tick(buf, "BUY", 100, 100_000, "T2");
-    // Sustained neutral clears the hold into T5 — the exact screenshot state:
+    // Sustained neutral clears the direction into T5; the projection remains.
     // a WEAK badge, an empty projection, and a label that pre-PART 24 STILL said
     // "1 candles".
     tick(buf, null, 160, 160_050, "T5");
     const v = tick(buf, null, 160, 163_100, "T5");
     expect(v.tier).toBe("T5");
-    expect(targetCandlesEnabled(v.tier)).toBe(false);
+    expect(targetCandlesEnabled(v.tier)).toBe(true);
     const label = targetCandlesLabelFor(v, 1); // 1 candle would have been claimed
-    expect(label.enabled).toBe(false);
-    expect(label.count).toBeNull();
-    expect(formatTargetCandlesLabel(label)).toBeNull(); // string never assembled
+    expect(label.enabled).toBe(true);
+    expect(label.count).toBe(1);
+    expect(formatTargetCandlesLabel(label)).toBe("1 candles");
   });
 
   it("PART 24 [160] — at T2 the label renders the genuine count (positive control)", () => {
@@ -264,18 +264,18 @@ describe("PART 21 [137] — tier transition T2→T5; HUD, target candles & badge
     assertCoherent(v);
   });
 
-  it("PART 24 [164] — every surface agrees at T5 in one tick: blank label, empty candles, NO SIGNAL badge, no label text", () => {
+  it("PART 24 [164] — every surface agrees at T5: blank direction, rendered candles + label, NO SIGNAL badge", () => {
     const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
     const v = tick(buf, null, 160, 163_100, "T5");
     const { badge, candles, label, labelText } = assertCoherent(v);
     // (a) HUD direction — blank.
     expect(v.gatedSignal).toBeNull();
-    // (b) candle shape — empty overlay, nothing routes into syncMarkers T-HI/T-LO.
-    expect(candles.length).toBe(0);
+    // (b) candle shape — the AI projection is still drawn.
+    expect(candles.length).toBe(5);
     // (c) card badge — honest neutral.
     expect(badge.badgeText).toBe("NO SIGNAL");
-    // (d) PART 24 label — count and string both absent.
-    expect(label.count).toBeNull();
-    expect(labelText).toBeNull();
+    // (d) PART 24 label — count and string both present.
+    expect(label.count).toBe(5);
+    expect(labelText).toBe("5 candles");
   });
 });

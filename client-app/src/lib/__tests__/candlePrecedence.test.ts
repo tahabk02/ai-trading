@@ -111,31 +111,30 @@ describe("target candles", () => {
     timeframeSeconds: 20,
   };
 
-  it("renders for an engine-graded T1–T3 tier", () => {
+  it("renders for an engine-graded T1-T3 tier", () => {
     const rows = buildTargetCandles({ ...base, tier: "T1" });
     expect(rows.length).toBeGreaterThan(0);
   });
 
   it("keeps the documented legacy render when the engine tier is absent", () => {
-    // Pinned by realtimeCandleAggregator.test.ts ("absent tier keeps legacy
-    // behaviour"): an ungraded signal still projects, T4/T5 never do.
+    // An ungraded signal still projects; no execution tier is required.
     expect(buildTargetCandles({ ...base, tier: undefined }).length).toBeGreaterThan(
       0,
     );
   });
 
-  it("suppresses the overlay below the T3 floor", () => {
-    expect(buildTargetCandles({ ...base, tier: "T4" })).toEqual([]);
-    expect(buildTargetCandles({ ...base, tier: "T5" })).toEqual([]);
-    // A non-empty but unrecognised label ranks 0, so it suppresses too — the
-    // legacy path is reserved for a genuinely ABSENT tier.
-    expect(buildTargetCandles({ ...base, tier: "PREMIUM" })).toEqual([]);
+  it("renders the overlay for every tier, including T4, T5 and unknown labels", () => {
+    expect(buildTargetCandles({ ...base, tier: "T4" }).length).toBeGreaterThan(0);
+    expect(buildTargetCandles({ ...base, tier: "T5" }).length).toBeGreaterThan(0);
+    expect(buildTargetCandles({ ...base, tier: "PREMIUM" }).length).toBeGreaterThan(0);
   });
 
-  it("keeps the tier floor aligned with the shared tier table", () => {
+  it("keeps the projection gate aligned with the always-render contract", () => {
     expect(targetCandlesEnabled("T3")).toBe(true);
-    expect(targetCandlesEnabled("T4")).toBe(false);
+    expect(targetCandlesEnabled("T4")).toBe(true);
+    expect(targetCandlesEnabled("T5")).toBe(true);
     expect(resolveTier(0.97)).toBe("T1");
     expect(resolveTier(0.5)).toBe("T5");
   });
+
 });

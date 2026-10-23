@@ -76,6 +76,8 @@ export class ExpiryTimeMarker implements ISeriesPrimitive<Time> {
   private _requestUpdate: (() => void) | null = null;
   private _bucketSec = 0;
   private _label = "";
+  private _title = "EXPIRY";
+  private _note = EXPIRY_MARKER_DISCLAIMER;
   private _theme: ExpiryMarkerTheme;
   private readonly _paneView: ISeriesPrimitivePaneView;
 
@@ -113,13 +115,23 @@ export class ExpiryTimeMarker implements ISeriesPrimitive<Time> {
    * tape, and an unconditional requestUpdate here would redraw the whole chart
    * at tick rate.
    */
-  set(bucketSec: number, label: string, theme?: ExpiryMarkerTheme): void {
+  set(
+    bucketSec: number,
+    label: string,
+    theme?: ExpiryMarkerTheme,
+    title?: string,
+    note?: string,
+  ): void {
     const raw = Number(bucketSec);
     const nextBucket = Number.isFinite(raw) && raw > 0 ? Math.round(raw) : 0;
     const nextTheme = theme ?? this._theme;
+    const nextTitle = title || "EXPIRY";
+    const nextNote = note ?? EXPIRY_MARKER_DISCLAIMER;
     if (
       nextBucket === this._bucketSec &&
       label === this._label &&
+      nextTitle === this._title &&
+      nextNote === this._note &&
       nextTheme.line === this._theme.line &&
       nextTheme.labelBg === this._theme.labelBg &&
       nextTheme.labelInk === this._theme.labelInk &&
@@ -129,6 +141,8 @@ export class ExpiryTimeMarker implements ISeriesPrimitive<Time> {
     }
     this._bucketSec = nextBucket;
     this._label = nextBucket > 0 ? label : "";
+    this._title = nextTitle;
+    this._note = nextNote;
     this._theme = nextTheme;
     this._requestUpdate?.();
   }
@@ -139,6 +153,14 @@ export class ExpiryTimeMarker implements ISeriesPrimitive<Time> {
 
   get markerLabel(): string {
     return this._label;
+  }
+
+  get markerTitle(): string {
+    return this._title;
+  }
+
+  get markerNote(): string {
+    return this._note;
   }
 
   get markerTheme(): ExpiryMarkerTheme {
@@ -214,11 +236,12 @@ class ExpiryRenderer implements ISeriesPrimitivePaneRenderer {
       ctx.setLineDash([]);
 
       // ÔöÇÔöÇ label block: EXPIRY HH:MM:SS over the honesty clause ÔöÇÔöÇ
-      const title = `EXPIRY ${label}`;
+      const title = `${marker.markerTitle} ${label}`;
+      const note = marker.markerNote;
       ctx.font = `700 10px ${MONO}`;
       const titleW = ctx.measureText(title).width;
       ctx.font = `600 7px ${MONO}`;
-      const noteW = ctx.measureText(EXPIRY_MARKER_DISCLAIMER).width;
+      const noteW = ctx.measureText(note).width;
       const boxW = Math.ceil(Math.max(titleW, noteW)) + 8;
       const boxH = 22;
       const gap = 3;
@@ -242,7 +265,7 @@ class ExpiryRenderer implements ISeriesPrimitivePaneRenderer {
       ctx.fillText(title, bx + 4, by + 3);
       ctx.font = `600 7px ${MONO}`;
       ctx.fillStyle = theme.labelMuted;
-      ctx.fillText(EXPIRY_MARKER_DISCLAIMER, bx + 4, by + 14);
+      ctx.fillText(note, bx + 4, by + 14);
 
       ctx.restore();
     });
