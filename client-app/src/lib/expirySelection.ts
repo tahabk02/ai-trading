@@ -31,16 +31,16 @@ import { TARGET_CANDLES_MIN_TIER, tierRank, type SignalTier } from "./signalTier
  *      b. the regime/tier gate. The projection horizon (Pro Expiry Bar) drives
  *         the chart's target-candle zone, which only exists at T1-T3
  *         (TARGET_CANDLES_MIN_TIER); the execution expiry grid (Quick Trade) is
- *         honest at the engine's MIN_EXECUTABLE_TIER (T1, 96.5% - STRICT
+ *         honest at the engine's MIN_EXECUTABLE_TIER (T1, 95.0% - STRICT
  *         high-precision bar). A random_walk symbol arrives as suppressed_reason
  *         === "regime_scored_only" and is never tradable at any tier; a
- *         sub-96.5% signal arrives as "pending_high_precision" and is likewise
+ *         sub-95.0% signal arrives as "pending_high_precision" and is likewise
  *         never tradable.
  *
  *   3. COMMIT ELIGIBILITY — enforced at the action boundary, never in the nav.
  *      `executeTrade` independently refuses a dispatch without a fresh quote
  *      (<= 2.5s), without a matching engine signal younger than 15s, and below
- *      the strict 96.5% confidence floor; the engine's SignalLock refuses
+ *      the strict 95.0% confidence floor; the engine's SignalLock refuses
  *      HOLD / zero-confidence / zero-target verdicts. Un-gating navigation
  *      therefore cannot manufacture a tradeable signal - it only stops the UI
  *      from trapping the operator.
@@ -184,7 +184,7 @@ export function expiryCountdownRemainingSeconds(
 /**
  * Whole-selector state: the regime/tier gate folded over the per-option timing
  * gate. minTradableTier is the surface's honest floor — "T3" for the chart
- * projection horizon, "T1" (MIN_EXECUTABLE_TIER, 96.5%) for execution.
+ * projection horizon, "T1" (MIN_EXECUTABLE_TIER, 95.0%) for execution.
  *
  * NOTE the return type carries no `disabled` / `suppressed` field. Consumers
  * MUST NOT gate interaction on `actionReady` / `regimeBlocked`; they exist to be

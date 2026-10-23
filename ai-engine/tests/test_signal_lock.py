@@ -584,7 +584,7 @@ def test_a_raised_confidence_floor_still_takes_effect_under_a_held_lock():
     f = floored.json()
     assert f.get("signal_locked") is True  # the verdict is served from the lock
     # ...while the policy is honoured from THIS request.
-    assert f["threshold_pct"] == pytest.approx(70.0)
+    assert f["threshold_pct"] == pytest.approx(80.0)
     assert f["bar_source"] == "floored"
     # Lowering the floor must promote the SAME locked verdict again, and the
     # locked confidence must stay on the endpoint's 0..100 scale. The strict

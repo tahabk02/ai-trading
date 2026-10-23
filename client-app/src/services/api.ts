@@ -62,14 +62,14 @@ export interface PredictionRequest {
   /**
    * Confidence Filter — user-set minimum executable confidence (50..99%).
    * Below it the engine demotes the pair to SCORED-ONLY (executable:false);
-   * absent = engine default 96.5% strict bar.
+   * absent = engine default 95.0% strict bar.
    */
   min_confidence?: number;
   /**
    * Flexible-tier floor — the weakest signal band the caller wants to trade
    * (T1..T5). The engine ALWAYS emits every computed tier with its true
    * confidence; this only decides which of them are marked `executable`.
-   * Absent = engine default T1 (96.5%). T5 is accepted but floors to T4.
+   * Absent = engine default T1 (95.0%). T5 is accepted but floors to T4.
    */
   min_tier?: TierSelection;
 }

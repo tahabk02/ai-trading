@@ -92,26 +92,26 @@ def _response(**overrides):
 
 def test_every_band_is_a_real_emitted_tier():
     # T5 is no longer an internal "suppressed" sentinel — it is a band the
-    # engine genuinely reports for sub-70% confidences.
+    # engine genuinely reports for sub-80% confidences.
     assert TIER_ORDER == ["T1", "T2", "T3", "T4", "T5"]
-    assert tier_min_confidence("T5") == pytest.approx(0.0)
+    assert tier_min_confidence("T5") == pytest.approx(0.75)
     assert TIER_LABELS["T5"] == "WEAK"
 
 
 @pytest.mark.parametrize(
     "raw,expected_bar,source",
     [
-        (None, 96.5, "default"),
-        ("", 96.5, "default"),
-        ("   ", 96.5, "default"),
-        ("nonsense", 96.5, "default"),
-        ("T0", 96.5, "default"),
-        ("T1", 96.5, "user"),
-        ("t1", 96.5, "user"),
+        (None, 95.0, "default"),
+        ("", 95.0, "default"),
+        ("   ", 95.0, "default"),
+        ("nonsense", 95.0, "default"),
+        ("T0", 95.0, "default"),
+        ("T1", 95.0, "user"),
+        ("t1", 95.0, "user"),
         ("  T2 ", 90.0, "user"),
-        ("T3", 80.0, "user"),
-        ("t4", 70.0, "user"),
-        ("T5", 70.0, "floored"),
+        ("T3", 85.0, "user"),
+        ("t4", 80.0, "user"),
+        ("T5", 80.0, "floored"),
     ],
 )
 def test_execution_floor_resolution(raw, expected_bar, source):
@@ -138,7 +138,7 @@ def test_weaker_selection_never_raises_the_bar():
 
 def test_default_is_the_unchanged_legacy_bar():
     assert DEFAULT_EXECUTION_TIER == "T1"
-    assert resolve_execution_floor(None)["bar_pct"] == pytest.approx(96.5)
+    assert resolve_execution_floor(None)["bar_pct"] == pytest.approx(95.0)
 
 
 # ── 2 ── the gate honours the selection ────────────────────────────────────
@@ -171,7 +171,7 @@ def test_gate_reports_the_selected_min_tier_and_floor_metadata():
 @pytest.mark.parametrize(
     "confidence,floor,expected_executable",
     [
-        # Under the strict T1 default nothing below 96.5% trades.
+        # Under the strict T1 default nothing below 95% trades.
         (92.0, None, False),
         (92.0, "T1", False),
         # The SAME 92% verdict trades as soon as the trader selects T2.
@@ -182,8 +182,8 @@ def test_gate_reports_the_selected_min_tier_and_floor_metadata():
         (92.0, "T5", True),
         (60.0, "T5", False),
         (60.0, "T4", False),
-        (71.0, "T4", True),
-        (79.0, "T3", False),
+        (81.0, "T4", True),
+        (84.0, "T3", False),
         (97.0, "T1", True),
     ],
 )
@@ -195,8 +195,8 @@ def test_executable_follows_the_selected_floor(confidence, floor, expected_execu
 def test_valid_min_tier_takes_precedence_over_min_confidence():
     # Two overlapping controls: the tier is the newer, coarser control and wins
     # when both are supplied, so behaviour is unambiguous.
-    surface = _surface(75.0, min_tier="T4", min_confidence=99.0)
-    assert surface["threshold_pct"] == pytest.approx(70.0)
+    surface = _surface(85.0, min_tier="T4", min_confidence=99.0)
+    assert surface["threshold_pct"] == pytest.approx(80.0)
     assert surface["executable"] is True
 
 
@@ -216,7 +216,8 @@ def test_tier_selection_never_hides_the_verdict_from_the_surface():
         (99.5, "T1"),
         (92.0, "T2"),
         (85.0, "T3"),
-        (75.0, "T4"),
+        (80.0, "T4"),
+        (75.0, "T5"),
         (42.0, "T5"),
         (0.0, "T5"),
     ],
@@ -356,7 +357,7 @@ def test_predict_without_min_tier_uses_the_strict_default():
     resp = _post(client)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["threshold_pct"] == pytest.approx(96.5)
+    assert body["threshold_pct"] == pytest.approx(95.0)
     assert body["bar_source"] == "default"
     assert body["min_tier"] == "T1"
 

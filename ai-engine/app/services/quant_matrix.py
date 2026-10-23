@@ -102,8 +102,8 @@ HIGH_CONFIDENCE_ALERT_THRESHOLD = 90.0
 # (CONFLUENCE_BELOW_THERMAL) that names the gate — the state is never HOLD.
 # Rigorous risk filters (ATR regime, queue, evidence persistence, logical-AND
 # pillars) remain untouched and independent of this gate.
-THERMAL_GATE_FLOOR = round(TIER_THRESHOLDS["T4"] * 100.0, 2)   # 30 — T4-LOW bar (temp; was 70)
-THERMAL_GATE_CEILING = round(TIER_THRESHOLDS["T4"] * 100.0, 2)  # flat (== floor)
+THERMAL_GATE_FLOOR = round(TIER_THRESHOLDS["T4"], 2)     # 80 — T4-LOW bar
+THERMAL_GATE_CEILING = round(TIER_THRESHOLDS["T4"], 2)    # flat (== floor)
 
 
 # ════════════════════════════════════════════════════════════════════

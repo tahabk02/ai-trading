@@ -28,7 +28,7 @@ export type RealForexDataKind = "live" | "daily_close";
 
 /**
  * Why a scored-only card is not tradable — surfaced on hover + on-card.
- * STRICT 96.5% BAR (2026-09-24): engine surfaces regime_gate
+ * STRICT 95.0% BAR (2026-09-24): engine surfaces regime_gate
  * "pending_high_precision" for every verdict below the executable floor, so
  * the card copy explains the high-precision gate explicitly.
  */
@@ -39,7 +39,7 @@ export const REAL_FOREX_NONINTERACTIVE_COPY: Record<
   regime_pending_confirmation: "Regime review pending — not yet confirmed tradable",
   regime_scored_only: "Random walk regime — scored only, not tradable",
   regime_pending_high_precision:
-    "Below 96.5% — high-precision gate pending, scored only",
+    "Below 95.0% — high-precision gate pending, scored only",
 };
 
 export interface RealForexRegimeDisplay {
@@ -50,7 +50,7 @@ export interface RealForexRegimeDisplay {
   /**
    * Why the card is non-tradable:
    *   "regime_pending_high_precision"  — engine executable=false (regime_gate
-   *                                       "pending_high_precision", sub-96.5%)
+   *                                       "pending_high_precision", sub-95.0%)
    *   "regime_scored_only"             — backend regime_gate === "scored_only"
    *   "regime_pending_confirmation"    — no verdict on the payload (null)
    *   null                             — tradable (engine-cleared real pair)
@@ -91,10 +91,10 @@ export function resolveRealForexRegimeDisplay(
 
   const gate = String(regimeGate || "").trim().toLowerCase();
 
-  // PART 28.2 + STRICT 96.5% BAR (2026-09-24): honor the backend gate exactly.
+  // PART 28.2 + STRICT 95.0% BAR (2026-09-24): honor the backend gate exactly.
   // No blanket [47]/[48] block — a real pair is tradable only when the
   // engine's strict execution gate says so (regime_gate "tradable");
-  // "pending_high_precision" (sub-96.5% SCORED-ONLY) is its own reason;
+  // "pending_high_precision" (sub-95.0% SCORED-ONLY) is its own reason;
   // random_walk gate stays scored_only; no verdict stays "pending".
   if (gate === "tradable")
     return {

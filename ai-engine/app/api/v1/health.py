@@ -19,6 +19,7 @@ from app.services.signal_gatekeeper import (
     TIER_ORDER,
     MIN_EXECUTABLE_TIER,
     resolve_tier,
+    tier_min_confidence,
 )
 from app.services.accuracy_tracker import accuracy_report, get_accuracy_tracker
 
@@ -110,8 +111,8 @@ async def health_check_ready(response: Response) -> Dict[str, Any]:
 def gate_report() -> Dict[str, Any]:
     """Single source of truth for the AI Engine's multi-tier gate payload.
 
-    Exposes the canonical TIER_THRESHOLDS ladder (T1 PREMIUM 96.5% → T4 LOW
-    70%, T5 WEAK below) plus the LEGACY 98% hard-gate parity values so the
+    Exposes the canonical TIER_THRESHOLDS ladder (T1 PREMIUM 95.0% → T4 LOW
+    80%, T5 WEAK 75%) plus the LEGACY 98% hard-gate parity values so the
     client can verify the tiers it renders (gatePct = min tier) match the
     engine's dispatch rule. ``resolve_tier`` gives the engine-side tier for a
     given percentage.
@@ -121,7 +122,7 @@ def gate_report() -> Dict[str, Any]:
         configured_pct = configured * 100.0
     else:
         configured_pct = configured
-    min_exec_pct = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER] * 100.0, 2)
+    min_exec_pct = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER], 2)
     return {
         "gate": GATE_REASON,
         "min_executable_tier": MIN_EXECUTABLE_TIER,
@@ -129,8 +130,8 @@ def gate_report() -> Dict[str, Any]:
         "tiers": {
             tier: {
                 "label": TIER_LABELS.get(tier, "WEAK"),
-                "min_pct": round(float(TIER_THRESHOLDS.get(tier, 0.0)) * 100.0, 2),
-                "min_frac": float(TIER_THRESHOLDS.get(tier, 0.0)),
+                "min_pct": round(float(TIER_THRESHOLDS.get(tier, 0.0)), 2),
+                "min_frac": round(tier_min_confidence(tier), 6),
             }
             for tier in [*TIER_ORDER, "T5"]
         },

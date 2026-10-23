@@ -289,14 +289,14 @@ describe("history bar gate (mission history-parity)", () => {
 });
 
 describe("signal gate (mission AI-confidence parity)", () => {
-  it("test_signal_gate — BUY/SELL needs ≥96.5% (0.965, STRICT bar) on both 0..1 and 0..100 scales, custom threshold honored", () => {
-    expect(signalGate("BUY", 0.964)).toBe(false);
-    expect(signalGate("BUY", 0.965)).toBe(true);
+  it("test_signal_gate — BUY/SELL needs ≥95% (0.95, STRICT bar) on both 0..1 and 0..100 scales, custom threshold honored", () => {
+    expect(signalGate("BUY", 0.949)).toBe(false);
+    expect(signalGate("BUY", 0.95)).toBe(true);
     expect(signalGate("BUY", 0.98)).toBe(true);
-    expect(signalGate("SELL", 0.979)).toBe(true); // ≥ 0.965
-    expect(signalGate("SELL", 0.964)).toBe(false);
-    expect(signalGate("BUY", 96.5)).toBe(true); // 0..100 scale
-    expect(signalGate("BUY", 96.4)).toBe(false);
+    expect(signalGate("SELL", 0.979)).toBe(true); // ≥ 0.95
+    expect(signalGate("SELL", 0.949)).toBe(false);
+    expect(signalGate("BUY", 95)).toBe(true); // 0..100 scale
+    expect(signalGate("BUY", 94.9)).toBe(false);
     expect(signalGate("BUY", 30)).toBe(false); // legacy LIVE-TEST floor now ignored
     expect(signalGate("BUY", 25)).toBe(false);
     expect(signalGate(null, 0.99)).toBe(false);
@@ -1338,12 +1338,12 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
     expect(view.gated).toBe(false);
     expect(view.gatedSignal).toBeNull();
     expect(view.directionText).toBe("NO SIGNAL");
-    expect(view.badgeText).toBe("NO SIGNAL — confidence 25% < 96.5%");
+    expect(view.badgeText).toBe("NO SIGNAL — confidence 25% < 95%");
     expect(view.confPct).toBe(25);
-    expect(view.gatePct).toBe(96.5);
+    expect(view.gatePct).toBe(95);
   });
 
-  it("test_gated_signal_passes_above_threshold — ≥96.5% BUY/SELL clears the gate on both scales", () => {
+  it("test_gated_signal_passes_above_threshold — ≥95% BUY/SELL clears the gate on both scales", () => {
     const view = buildSignalView({ signal: "BUY", confidence: 99 });
     expect(view.gated).toBe(true);
     expect(view.gatedSignal).toBe("BUY");
@@ -1356,8 +1356,8 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
       buildSignalView({ signal: "SELL", confidence: 97 }).gatedSignal,
     ).toBe("SELL");
     expect(
-      buildSignalView({ signal: "SELL", confidence: 96.4 }).gatedSignal,
-    ).toBeNull(); // sub-96.5 → no directional call
+      buildSignalView({ signal: "SELL", confidence: 94.9 }).gatedSignal,
+    ).toBeNull(); // sub-95 → no directional call
     expect(
       buildSignalView({ signal: "SELL", confidence: 55 }).gatedSignal,
     ).toBeNull();
@@ -1371,7 +1371,7 @@ describe("empty chart + shared signal gate (mission empty-chart)", () => {
     const panelBlocked = buildSignalView(blocked);
     const chartBlocked = buildSignalView(blocked);
     expect(panelBlocked.gatedSignal).toBeNull();
-    expect(chartBlocked.badgeText).toBe("NO SIGNAL — confidence 25% < 96.5%");
+    expect(chartBlocked.badgeText).toBe("NO SIGNAL — confidence 25% < 95%");
     expect(chartBlocked.directionText).toBe(panelBlocked.directionText);
     const panelPassed = buildSignalView(passed);
     const chartPassed = buildSignalView(passed);
@@ -1469,7 +1469,7 @@ describe("expiration ↔ timeframe decoupling (FINAL MISSION 5.1–5.10)", () =>
     expect(candles[3].close).toBe(104); // last slot lands exactly on the target
   });
 
-  it("test_target_color_follows_gated_signal — gated BUY → teal candles, failed gate → neutral, 96.5% threshold respected", () => {
+  it("test_target_color_follows_gated_signal — gated BUY → teal candles, failed gate → neutral, 95% threshold respected", () => {
     const gated = buildSignalView({ signal: "BUY", confidence: 99 });
     expect(gated.gatedSignal).toBe("BUY");
     const teal = buildTargetCandles({
@@ -1485,9 +1485,9 @@ describe("expiration ↔ timeframe decoupling (FINAL MISSION 5.1–5.10)", () =>
     expect(teal[0].color).toContain("38,166,154"); // rgba(38,166,154,…) teal
     const blocked = buildSignalView({ signal: "SELL", confidence: 25 });
     expect(blocked.gatedSignal).toBeNull();
-    expect(blocked.gated).toBe(false); // did NOT pass the 96.5% gate
+    expect(blocked.gated).toBe(false); // did NOT pass the 95% gate
     expect(blocked.confPct).toBe(25);
-    expect(blocked.gatePct).toBe(96.5);
+    expect(blocked.gatePct).toBe(95);
     expect(blocked.confPct).toBeLessThan(SIGNAL_CONFIDENCE_THRESHOLD * 100);
     const neutral = buildTargetCandles({
       liveClose: 100,
@@ -1823,7 +1823,7 @@ describe("ARCHITECTURAL OVERHAUL — signal stability & state freezing", () => {
     expect(buf.evaluate("SELL", 302)).toBe("SELL"); // same-direction extends the hold
   });
 
-  it("neutral never flickers on a single errant tick — jitter around the 96.5% gate cannot shimmer the label", () => {
+  it("neutral never flickers on a single errant tick — jitter around the 95% gate cannot shimmer the label", () => {
     const buf = new SignalHoldBuffer({ holdNeutralEvals: 2, commitBucketSec: 60 });
     const raw = [null, "BUY", null, "BUY", null, "BUY"] as const;
     let out: ("BUY" | "SELL" | null)[] = [];

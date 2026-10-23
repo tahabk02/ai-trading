@@ -7,18 +7,18 @@ multi-tier ladder as the confluence gate (signal_gatekeeper):
   GATE_WEIGHTS  = mtf .25 | momentum .25 | volatility .15 | volume .15 | pressure .20
   ensemble_score = Σ weight × factor (every factor is an honest 0|1)
   EMIT ⇔ ensemble tier is dispatchable (STRICT MIN_EXECUTABLE_TIER = T1,
-  0.965 — 2026-09-24 restored over the LIVE-TEST T4-LOW 0.30 floor),
+  0.95 — 2026-09-24 restored over the LIVE-TEST T4-LOW 0.30 floor),
   resolved honestly:
       5/5 = 1.00 → T1 PREMIUM EMIT · 4/5 = 0.85 → T3 BLOCK · 1/5 = 0.25 → T5 BLOCK.
 
 Under the strict bar ANY single failed factor caps the score at ≤ 0.85 —
-i.e. IMMEDIATELY below the 0.965 emission floor — so the ensemble BLOCKS
+i.e. IMMEDIATELY below the 0.95 emission floor — so the ensemble BLOCKS
 instead of merely downgrading. Only a perfect 5/5 clears the watershed.
 """
 
 import pytest
 
-from app.services.signal_gatekeeper import TIER_THRESHOLDS, MIN_EXECUTABLE_TIER
+from app.services.signal_gatekeeper import MIN_EXECUTABLE_TIER, tier_min_confidence
 from app.services.quality_gate import (
     GATE_WEIGHTS,
     FACTOR_ORDER,
@@ -57,11 +57,11 @@ def _aligned_inputs() -> dict:
     }
 
 
-# ── 1 ── the quality bar is the STRICT executable tier (T1 = 0.965)
+# ── 1 ── the quality bar is the STRICT executable tier (T1 = 0.95)
 def test_quality_emit_bar_is_strict_executable_tier():
-    assert QUALITY_EMIT_BAR == pytest.approx(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER])
-    assert QUALITY_EMIT_BAR == pytest.approx(0.965)
-    assert current_hard_gate() == pytest.approx(0.965)
+    assert QUALITY_EMIT_BAR == pytest.approx(tier_min_confidence(MIN_EXECUTABLE_TIER))
+    assert QUALITY_EMIT_BAR == pytest.approx(0.95)
+    assert current_hard_gate() == pytest.approx(0.95)
     assert round(sum(GATE_WEIGHTS.values()), 6) == pytest.approx(1.0)
     assert FACTOR_ORDER == ["mtf", "momentum", "volatility", "volume", "pressure"]
 
@@ -77,9 +77,9 @@ def test_mtf_single_tf_blocks_the_ensemble():
     assert factors["mtf"] == 0               # one TF can never claim confluence
     assert factors["momentum"] == 1
     verdict = evaluate_quality(factors)
-    assert verdict["decision"] == "BLOCK"    # 0.75 < 0.965 strict bar
-    assert verdict["tier"] == "T4"          # honest LOW, but not executable
-    assert verdict["tier_label"] == "LOW"
+    assert verdict["decision"] == "BLOCK"    # 0.75 < 0.95 strict bar
+    assert verdict["tier"] == "T5"          # honest WEAK, but not executable
+    assert verdict["tier_label"] == "WEAK"
     assert verdict["reason"].startswith("QUALITY_BELOW_GATE")
 
 
@@ -89,7 +89,7 @@ def test_momentum_failure_blocks_the_ensemble():
         {"mtf": 1, "momentum": 0, "volatility": 1, "volume": 1, "pressure": 1}
     )
     assert verdict["decision"] == "BLOCK"
-    assert verdict["tier"] == "T4"
+    assert verdict["tier"] == "T5"
     assert verdict["quality"] == pytest.approx(0.75)
 
 
@@ -124,7 +124,7 @@ def test_pressure_failure_blocks_the_ensemble():
         {"mtf": 1, "momentum": 1, "volatility": 1, "volume": 1, "pressure": 0}
     )
     assert verdict_d["decision"] == "BLOCK"
-    assert verdict_d["tier"] == "T3"
+    assert verdict_d["tier"] == "T4"
     assert verdict_d["quality"] == pytest.approx(0.80)
 
 
@@ -164,12 +164,12 @@ def test_apply_quality_gate_payload_and_waiting():
     assert qq["signal"] == "BUY"
     assert qq["confidence"] > 0.0
     assert qq["tier"] == "T1"
-    assert qq["quality"] >= 0.965  # clears the STRICT T1 bar
+    assert qq["quality"] >= 0.95  # clears the STRICT T1 bar
     assert set(qq["factors"].keys()) == set(FACTOR_ORDER)
     assert qq["market_waiting"] is False
     assert qq["reason"] == "ALL_FACTORS_ALIGNED"
 
-    # 0.65 < 0.965 (STRICT bar) → BLOCK: signal null + confidence 0.0, direction
+    # 0.65 < 0.95 (STRICT bar) → BLOCK: signal null + confidence 0.0, direction
     # kept as market_waiting (never coerced to HOLD). Only 5/5 emits under T1.
     weak_inputs = _aligned_inputs()
     weak_inputs["atr"] = 0.1              # outside the volatility band → vol 0

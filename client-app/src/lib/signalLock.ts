@@ -28,7 +28,7 @@ import { MIN_EXECUTABLE_TIER, TIER_THRESHOLDS } from "./signalTiers";
 /**
  * Execution gate in PERCENT (0..100), matching the scale the store's
  * `predictionData.confidence` and `applyLiveSignal`'s `conf100` use.
- * TIER_THRESHOLDS is 0..1 (T1 = 0.965) — convert once, here, so the two scales
+ * TIER_THRESHOLDS is 0..1 (T1 = 0.95) — convert once, here, so the two scales
  * can never be silently compared against each other.
  */
 export const LOCK_MIN_CONFIDENCE_PCT = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER] * 100;

@@ -38,11 +38,11 @@ import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 describe("tier ladder mirrors the engine", () => {
   it("exposes the canonical T1..T5 ladder", () => {
     expect(TIER_ORDER).toEqual(["T1", "T2", "T3", "T4", "T5"]);
-    expect(TIER_THRESHOLDS.T1).toBeCloseTo(0.965, 5);
+    expect(TIER_THRESHOLDS.T1).toBeCloseTo(0.95, 5);
     expect(TIER_THRESHOLDS.T2).toBeCloseTo(0.9, 5);
-    expect(TIER_THRESHOLDS.T3).toBeCloseTo(0.8, 5);
-    expect(TIER_THRESHOLDS.T4).toBeCloseTo(0.7, 5);
-    expect(TIER_THRESHOLDS.T5).toBeCloseTo(0.0, 5);
+    expect(TIER_THRESHOLDS.T3).toBeCloseTo(0.85, 5);
+    expect(TIER_THRESHOLDS.T4).toBeCloseTo(0.8, 5);
+    expect(TIER_THRESHOLDS.T5).toBeCloseTo(0.75, 5);
     expect(DEFAULT_EXECUTION_TIER).toBe("T1");
     expect(LOWEST_TRADABLE_TIER).toBe("T4");
   });
@@ -62,10 +62,10 @@ describe("tier ladder mirrors the engine", () => {
 
 describe("resolveExecutionFloor", () => {
   it("maps each selection onto its own threshold", () => {
-    expect(resolveExecutionFloor("T1").barFrac).toBeCloseTo(0.965, 5);
+    expect(resolveExecutionFloor("T1").barFrac).toBeCloseTo(0.95, 5);
     expect(resolveExecutionFloor("T2").barFrac).toBeCloseTo(0.9, 5);
-    expect(resolveExecutionFloor("T3").barFrac).toBeCloseTo(0.8, 5);
-    expect(resolveExecutionFloor("T4").barFrac).toBeCloseTo(0.7, 5);
+    expect(resolveExecutionFloor("T3").barFrac).toBeCloseTo(0.85, 5);
+    expect(resolveExecutionFloor("T4").barFrac).toBeCloseTo(0.8, 5);
   });
 
   it("never lowers the bar past the lowest tradable tier", () => {
@@ -80,7 +80,7 @@ describe("resolveExecutionFloor", () => {
     const floor = resolveExecutionFloor("T5");
     expect(floor.floored).toBe(true);
     expect(floor.effective).toBe("T4");
-    expect(floor.barFrac).toBeCloseTo(0.7, 5);
+    expect(floor.barFrac).toBeCloseTo(0.8, 5);
     // The SELECTION is still reported honestly — we never pretend the user
     // chose T4.
     expect(floor.selected).toBe("T5");
@@ -103,7 +103,7 @@ describe("resolveExecutionFloor", () => {
     for (const bad of [null, undefined, "", "T9", "premium", 3, {}]) {
       const floor = resolveExecutionFloor(bad as never);
       expect(floor.effective).toBe(DEFAULT_EXECUTION_TIER);
-      expect(floor.barFrac).toBeCloseTo(0.965, 5);
+      expect(floor.barFrac).toBeCloseTo(0.95, 5);
     }
   });
 });

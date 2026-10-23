@@ -9,15 +9,14 @@
 export type SignalTier = "T1" | "T2" | "T3" | "T4" | "T5";
 
 export const TIER_THRESHOLDS: Record<SignalTier, number> = {
-  T1: 0.965, // PREMIUM
+  T1: 0.95, // PREMIUM
   T2: 0.9, // HIGH
-  T3: 0.8, // MEDIUM
-  // Lowest tradable floor (70%). A user MAY select T4 to trade this band.
-  T4: 0.7, // LOW
-  // WEAK: a real, EMITTED band that the trader can see and monitor. It has a
-  // 0% floor, so selecting T5 never widens the executable bar past T4 (see
-  // resolveExecutionFloor).
-  T5: 0.0, // WEAK
+  T3: 0.85, // MEDIUM
+  // Lowest tradable floor (80%). A user MAY select T4 to trade this band.
+  T4: 0.8, // LOW
+  // WEAK: a real, EMITTED band that the trader can see and monitor. It is
+  // never executable because resolveExecutionFloor clamps T5 to T4.
+  T5: 0.75, // WEAK
 };
 
 export const TIER_ORDER: SignalTier[] = ["T1", "T2", "T3", "T4", "T5"];
@@ -38,7 +37,7 @@ export const TIER_RANK: Record<SignalTier, number> = {
   T5: 0,
 };
 
-/** Default strict bar: only T1 (96.5%) is executable unless the user widens it. */
+/** Default strict bar: only T1 (95%) is executable unless the user widens it. */
 export const MIN_EXECUTABLE_TIER = "T1" as SignalTier;
 
 /** The floor the engine applies when the user has not chosen one. */
@@ -61,7 +60,7 @@ export function normalizeTierConfidence(raw: number): number {
 }
 
 /** Map a genuine confidence onto its honest tier label (T1…T5).
- *  Mirrors engine resolve_tier(): <0.70 → T5 WEAK. */
+ *  Mirrors engine resolve_tier(): <0.80 → T5 WEAK. */
 export function resolveTier(confidence: number): SignalTier {
   const frac = normalizeTierConfidence(Number(confidence) || 0);
   for (const tier of ["T1", "T2", "T3", "T4"] as SignalTier[]) {
@@ -160,8 +159,8 @@ export const MIN_EXECUTABLE_FLOOR_PCT = TIER_THRESHOLDS[LOWEST_TRADABLE_TIER] * 
 /** True when ``tier`` clears the trader's selected floor.
  *
  *  This is the filter predicate for "show me signals I would actually trade".
- *  A T5 band never clears it, because T5's threshold is 0% and the floor is
- *  never lower than T4's 70%. */
+ *  A T5 band never clears it, because resolveExecutionFloor clamps the
+ *  executable bar to T4 or stronger. */
 export function tierClearsFloor(
   tier: string | null | undefined,
   selection: TierSelection | null | undefined,

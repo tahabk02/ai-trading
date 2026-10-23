@@ -13,28 +13,30 @@ import {
 } from "@/lib/signalTiers";
 
 describe("signalTiers — client mirror of the engine's multi-tier ladder (PART 6)", () => {
-  it("threshold ladder EXACTLY mirrors signal_gatekeeper.py (T1 .965 / T2 .90 / T3 .80 / T4 .70)", () => {
-    expect(TIER_THRESHOLDS.T1).toBe(0.965);
+  it("threshold ladder EXACTLY mirrors signal_gatekeeper.py (T1 .95 / T2 .90 / T3 .85 / T4 .80 / T5 .75)", () => {
+    expect(TIER_THRESHOLDS.T1).toBe(0.95);
     expect(TIER_THRESHOLDS.T2).toBe(0.9);
-    expect(TIER_THRESHOLDS.T3).toBe(0.8);
-    expect(TIER_THRESHOLDS.T4).toBe(0.7);
+    expect(TIER_THRESHOLDS.T3).toBe(0.85);
+    expect(TIER_THRESHOLDS.T4).toBe(0.8);
+    expect(TIER_THRESHOLDS.T5).toBe(0.75);
     expect(TIER_ORDER).toEqual(["T1", "T2", "T3", "T4", "T5"]);
-    expect(MIN_EXECUTABLE_TIER).toBe("T1"); // STRICT 96.5% bar
+    expect(MIN_EXECUTABLE_TIER).toBe("T1"); // STRICT 95% bar
     expect(TARGET_CANDLES_MIN_TIER).toBe("T3");
   });
 
   it("resolveTier maps fractional and percent confidence identically", () => {
-    expect(resolveTier(0.97)).toBe("T1"); // ≥ 0.965
-    expect(resolveTier(0.965)).toBe("T1");
-    expect(resolveTier(96.5)).toBe("T1");
+    expect(resolveTier(0.97)).toBe("T1"); // ≥ 0.95
+    expect(resolveTier(0.95)).toBe("T1");
+    expect(resolveTier(95.0)).toBe("T1");
     expect(resolveTier(0.93)).toBe("T2");
     expect(resolveTier(90.0)).toBe("T2");
-    expect(resolveTier(0.85)).toBe("T3");
-    expect(resolveTier(80.0)).toBe("T3");
-    expect(resolveTier(0.75)).toBe("T4");
-    expect(resolveTier(0.7)).toBe("T4"); // exactly at the T4 floor
-    expect(resolveTier(70.0)).toBe("T4");
-    expect(resolveTier(0.69)).toBe("T5"); // below T4 → WEAK
+    expect(resolveTier(0.86)).toBe("T3");
+    expect(resolveTier(85.0)).toBe("T3");
+    expect(resolveTier(0.81)).toBe("T4");
+    expect(resolveTier(0.8)).toBe("T4"); // exactly at the T4 floor
+    expect(resolveTier(80.0)).toBe("T4");
+    expect(resolveTier(0.79)).toBe("T5"); // below T4 → WEAK
+    expect(resolveTier(0.75)).toBe("T5"); // exactly at the T5 floor
     expect(resolveTier(60.0)).toBe("T5");
     expect(resolveTier(0.29)).toBe("T5"); // far below T4 → WEAK
     expect(resolveTier(25)).toBe("T5");

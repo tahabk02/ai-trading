@@ -1,17 +1,17 @@
 """
 test_min_confidence_filter.py — USER-SET MINIMUM CONFIDENCE FILTER.
 
-The dashboard's Confidence Filter (default 96.5%, range 50..99) sends a
+The dashboard's Confidence Filter (default 95.0%, range 50..99) sends a
 ``min_confidence`` field on /predict. This suite proves the engine honors it:
 
   1. ``_resolve_execution_bar`` — the effective executable bar:
-       * absent        -> engine default STRICT_EXECUTION_CONFIDENCE (96.5),
+       * absent        -> engine default STRICT_EXECUTION_CONFIDENCE (95.0),
        * user value    -> the user's pct (50..99),
-       * never floored below T4 (70%) so sub-tradable-tier verdicts can never
+       * never floored below T4 (80%) so sub-tradable-tier verdicts can never
          become executable by lowering the filter.
   2. ``apply_strict_execution_gate`` — a verdict below the USER bar is demoted
-     to SCORED-ONLY even if it would pass the 96.5% default; one at/above the
-     user bar is tradable even if below the 96.5% default.
+     to SCORED-ONLY even if it would pass the 95.0% default; one at/above the
+     user bar is tradable even if below the 95.0% default.
   3. ``build_execution_surface`` (full OTC path) — threshold_pct / bar_source
      ride the surface and the executable verdict follows the effective bar.
   4. POST /api/v1/predict — accepts ``min_confidence``, echoes the effective
@@ -70,7 +70,7 @@ def make_candles(closes, base_spread=0.0008, volume=None):
 def test_bar_default_when_filter_absent():
     frac, pct, source = _resolve_execution_bar(None)
     assert frac == pytest.approx(STRICT_EXECUTION_CONFIDENCE)
-    assert pct == pytest.approx(96.5)
+    assert pct == pytest.approx(95.0)
     assert source == "default"
 
 
@@ -81,17 +81,17 @@ def test_bar_user_override():
     assert source == "user"
 
 
-def test_bar_floored_at_t4_when_user_dips_below_70():
-    for low in (50.0, 55.0, 69.9, 0.0):
+def test_bar_floored_at_t4_when_user_dips_below_80():
+    for low in (50.0, 55.0, 79.9, 0.0):
         frac, pct, source = _resolve_execution_bar(low)
-        assert frac == pytest.approx(0.70), low
-        assert pct == pytest.approx(70.0), low
+        assert frac == pytest.approx(0.80), low
+        assert pct == pytest.approx(80.0), low
         assert source == "floored", low
 
 
 def test_bar_exactly_t4_is_user_not_floored():
-    frac, pct, source = _resolve_execution_bar(70.0)
-    assert frac == pytest.approx(0.70)
+    frac, pct, source = _resolve_execution_bar(80.0)
+    assert frac == pytest.approx(0.80)
     assert source == "user"
 
 
@@ -128,22 +128,22 @@ def test_gate_at_the_user_bar_is_executable():
 
 
 def test_gate_user_bar_floored_never_unlocks_sub_t4():
-    # User asks 55% but the effective bar is floored at T4 (70%): a 65%
-    # verdict must stay SCORED-ONLY; a 70% one becomes tradable.
+    # User asks 55% but the effective bar is floored at T4 (80%): a 65%
+    # verdict must stay SCORED-ONLY; a 80% one becomes tradable.
     low = apply_strict_execution_gate("BUY", 65.0, min_confidence=55.0)
     assert low["executable"] is False
-    assert low["threshold_pct"] == pytest.approx(70.0)
+    assert low["threshold_pct"] == pytest.approx(80.0)
     assert low["bar_source"] == "floored"
 
-    at_floor = apply_strict_execution_gate("BUY", 70.0, min_confidence=55.0)
+    at_floor = apply_strict_execution_gate("BUY", 80.0, min_confidence=55.0)
     assert at_floor["executable"] is True
     assert at_floor["bar_source"] == "floored"
 
 
 def test_gate_default_bar_unchanged_when_filter_absent():
-    out = apply_strict_execution_gate("BUY", 96.5)
+    out = apply_strict_execution_gate("BUY", 95.0)
     assert out["executable"] is True
-    assert out["threshold_pct"] == pytest.approx(96.5)
+    assert out["threshold_pct"] == pytest.approx(95.0)
     assert out["bar_source"] == "default"
 
 
@@ -193,12 +193,12 @@ def test_surface_otc_user_bar_floored():
         live_price=series[-1], timeframe="1m", min_confidence=55.0,
     )
     assert low["executable"] is False
-    assert low["threshold_pct"] == pytest.approx(70.0)
+    assert low["threshold_pct"] == pytest.approx(80.0)
     assert low["bar_source"] == "floored"
 
     at_floor = build_execution_surface(
         symbol="EUR/USD", closes=series, direction="BUY",
-        confidence_pct=70.0, bid=series[-1] * 0.9999, ask=series[-1],
+        confidence_pct=80.0, bid=series[-1] * 0.9999, ask=series[-1],
         live_price=series[-1], timeframe="1m", min_confidence=55.0,
     )
     assert at_floor["executable"] is True
@@ -209,11 +209,11 @@ def test_surface_default_bar_when_no_filter():
     series = _otc_clean_trend()
     surface = build_execution_surface(
         symbol="EUR/USD", closes=series, direction="BUY",
-        confidence_pct=96.5, bid=series[-1] * 0.9999, ask=series[-1],
+        confidence_pct=95.0, bid=series[-1] * 0.9999, ask=series[-1],
         live_price=series[-1], timeframe="1m",
     )
     assert surface["executable"] is True
-    assert surface["threshold_pct"] == pytest.approx(96.5)
+    assert surface["threshold_pct"] == pytest.approx(95.0)
     assert surface["bar_source"] == "default"
 
 
@@ -262,13 +262,13 @@ def test_predict_accepts_min_confidence_and_stamps_bar_source():
     floored = client.post("/api/v1/predict", json={**base, "min_confidence": 55.0})
     assert floored.status_code == 200
     body = floored.json()
-    assert body["threshold_pct"] == pytest.approx(70.0)
+    assert body["threshold_pct"] == pytest.approx(80.0)
     assert body["bar_source"] == "floored"
 
     default = client.post("/api/v1/predict", json=base)
     assert default.status_code == 200
     body = default.json()
-    assert body["threshold_pct"] == pytest.approx(96.5)
+    assert body["threshold_pct"] == pytest.approx(95.0)
     assert body["bar_source"] == "default"
 
 

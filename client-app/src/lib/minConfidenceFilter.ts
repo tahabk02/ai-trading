@@ -4,13 +4,13 @@
  * PART 31 [309]/[311] — the confidence bar is NO LONGER an independently
  * draggable value. It is a READ-OUT of the selected tier's executable floor:
  *
- *   T1 → 96.5%   T2 → 90.0%   T3 → 80.0%   T4 → 70.0%   T5 → 70.0% (clamped)
+ *   T1 → 95.0%   T2 → 90.0%   T3 → 85.0%   T4 → 80.0%   T5 → 75.0% (clamped to 80.0%)
  *
  * Previously the operator could drag the slider anywhere in 50..99 and that
  * value was forwarded as `min_confidence` verbatim, while the tier selector
  * independently decided `min_tier`. Two controls, one safety intent, two
  * answers — and a slider parked at 60% while T4 was selected would ask the
- * engine for a bar BELOW LOWEST_TRADABLE_TIER (70%), which is exactly the
+ * engine for a bar BELOW LOWEST_TRADABLE_TIER (80%), which is exactly the
  * bypass [311] flags: the same category of hazard as PART 34's force-override
  * finding, one layer up in the UI.
  *
@@ -18,7 +18,7 @@
  * `resolveExecutionFloor(minTier)`, and this module's only remaining job is to
  * HARD-FLOOR any value that reaches it at MIN_EXECUTABLE_FLOOR_PCT so no
  * interaction path (persisted key, direct store poke, hand-edited request) can
- * express a sub-70% executable bar. LOWEST_TRADABLE_TIER stays the single
+ * express a sub-80% executable bar. LOWEST_TRADABLE_TIER stays the single
  * source of truth for that floor.
  */
 
@@ -40,7 +40,7 @@ export const LS_MIN_CONFIDENCE_KEY = "terminal_min_confidence_pct";
 
 /**
  * The bar control used to span 50..99% freely; 50.0% is no longer reachable
- * because `clampMinConfidencePct` floors at MIN_EXECUTABLE_FLOOR_PCT (70.0%).
+ * because `clampMinConfidencePct` floors at MIN_EXECUTABLE_FLOOR_PCT (80.0%).
  */
 export const MIN_CONFIDENCE_HIGH_PCT = 99;
 export const MIN_CONFIDENCE_DEFAULT_PCT = TIER_THRESHOLDS.T1 * 100;
@@ -50,9 +50,9 @@ export const LS_HIDE_BELOW_THRESHOLD_KEY = "terminal_hide_below_threshold";
 /**
  * Clamp a confidence bar into `MIN_EXECUTABLE_FLOOR_PCT .. 99`.
  *
- * The floor is a HARD floor, not a default: a value below T4 (70%) is raised
- * to 70% rather than honoured. This is what makes [312]'s "can never display
- * below 70.0% regardless of interaction path" true even for callers that
+ * The floor is a HARD floor, not a default: a value below T4 (80%) is raised
+ * to 80% rather than honoured. This is what makes [312]'s "can never display
+ * below 80.0% regardless of interaction path" true even for callers that
  * bypass the store.
  */
 export function clampMinConfidencePct(

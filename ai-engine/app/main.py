@@ -53,7 +53,7 @@ from .services.signal_gatekeeper import (
 _configured_threshold = float(settings.CONFIDENCE_THRESHOLD)
 if _configured_threshold <= 1:
     _configured_threshold *= 100.0
-_min_exec_pct = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER] * 100.0, 2)
+_min_exec_pct = round(TIER_THRESHOLDS[MIN_EXECUTABLE_TIER], 2)
 if (
     _configured_threshold < _min_exec_pct
     or _configured_threshold > 100.0

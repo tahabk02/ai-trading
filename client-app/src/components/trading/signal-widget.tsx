@@ -169,17 +169,17 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
   const booksA = signal?.book_agreement_detail?.aligned_count ?? null;
   const booksN = signal?.book_agreement_detail?.active_count ?? null;
   // ── PART 6 TIER-COLORED CONFIDENCE — palette mirrors the engine ladder ──
-  // T1 emerald (>=96.5), T2 teal (>=90), T3 amber (>=80), T4 orange (>=70),
+  // T1 emerald (>=95), T2 teal (>=90), T3 amber (>=85), T4 orange (>=80),
   // T5 gray. Replaces the old ad-hoc >90/>80/>72 bands with the canonical
   // T1-T5 tiers the engine dispatches.
   const unknownTierColor =
-    displayConfidence >= 96.5
+    displayConfidence >= 95
       ? "text-st-pos"
       : displayConfidence >= 90
         ? "text-st-teal"
-        : displayConfidence >= 80
+        : displayConfidence >= 85
           ? "text-st-warn"
-          : displayConfidence >= 70
+          : displayConfidence >= 80
             ? "text-st-caution"
             : "text-slate-400";
 

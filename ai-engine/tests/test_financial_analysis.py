@@ -117,7 +117,7 @@ def test_analyze_with_pre_resolved_verdict_uses_it():
     )
     assert report.direction == "BUY"
     assert report.confidence == 99.0
-    assert report.tier == "T1"  # 99% clears T1 PREMIUM (96.5)
+    assert report.tier == "T1"  # 99% clears T1 PREMIUM (95.0)
 
 
 def test_analyze_to_dict_contract():
@@ -131,7 +131,7 @@ def test_analyze_to_dict_contract():
     payload = svc.to_dict(report)
     assert payload["symbol"] == "EUR/USD"
     assert payload["direction"] == "SELL"
-    assert payload["tier"] == "T4"  # 72% → T4 LOW (>=30 temp)
+    assert payload["tier"] == "T5"  # 72% is below the T4 80% floor
     assert payload["executable"] is not None
     assert payload["indicators"]["adx"] >= 0.0
     assert "book_confluence" in payload
@@ -156,17 +156,17 @@ def test_analyze_to_dict_contract():
 
 def test_tier_boundaries():
     svc = FinancialAnalysisService()
-    # T1 PREMIUM  >= 96.5
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=97.0).tier == "T1"
+    # T1 PREMIUM  >= 95
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=95.0).tier == "T1"
     # T2 HIGH     >= 90
     assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=92.0).tier == "T2"
-    # T3 MEDIUM   >= 80
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=82.0).tier == "T3"
-    # T4 LOW      >= 70 (restored strict floor)
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=72.0).tier == "T4"
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=70.0).tier == "T4"
-    # T5 WEAK     < 70
-    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=69.0).tier == "T5"
+    # T3 MEDIUM   >= 85
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=85.0).tier == "T3"
+    # T4 LOW      >= 80 (lowest tradable floor)
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=82.0).tier == "T4"
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=80.0).tier == "T4"
+    # T5 WEAK     < 80
+    assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=79.0).tier == "T5"
     assert svc.analyze(symbol="X", candles=_candles(), direction="BUY", confidence=20.0).tier == "T5"
 
 

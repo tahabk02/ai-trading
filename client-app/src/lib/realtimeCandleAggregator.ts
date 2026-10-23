@@ -212,10 +212,10 @@ export function historyBarCheck(
 // ── Signal Gate (AI-confidence parity) ──
 
 /** Hard confidence threshold for directional signals (PO AI parity).
- *  STRICT 96.5% HIGH-PRECISION BAR (2026-09-24): restored 0.30 → 0.965,
- *  mirroring engine signal_gatekeeper.MIN_EXECUTABLE_TIER (T1 PREMIUM).
+ *  STRICT 95.0% HIGH-PRECISION BAR (2026-10-23): 0.95 mirrors the engine
+ *  signal_gatekeeper.MIN_EXECUTABLE_TIER (T1 PREMIUM).
  *  Quick Trade BUY/SELL unlocks only at the strict executable bar. */
-export const SIGNAL_CONFIDENCE_THRESHOLD = 0.965;
+export const SIGNAL_CONFIDENCE_THRESHOLD = 0.95;
 
 /** Normalize a confidence value (0..1 or 0..100) into 0..1. */
 export function normalizeConfidence(raw: number): number {

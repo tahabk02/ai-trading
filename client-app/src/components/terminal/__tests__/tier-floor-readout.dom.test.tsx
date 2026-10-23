@@ -55,26 +55,26 @@ describe("PART 31 — tier button drives the CONF read-out", () => {
   });
   afterEach(cleanup);
 
-  it("[312] clicking T5 reads 70.0% — not 0%, not the previously shown value", () => {
+  it("[312] clicking T5 reads 80.0% — not 0%, not the previously shown value", () => {
     render(<Toolbar />);
-    expect(readout()).toBe("96.5%");
+    expect(readout()).toBe("95.0%");
 
     clickTier("T3");
-    expect(readout()).toBe("80.0%");
+    expect(readout()).toBe("85.0%");
 
     clickTier("T5");
-    expect(readout()).toBe("70.0%");
-    expect(meter()).toHaveAttribute("aria-valuenow", "70");
+    expect(readout()).toBe("80.0%");
+    expect(meter()).toHaveAttribute("aria-valuenow", "80");
   });
 
   it("[312] T1–T4 each read their own threshold", () => {
     render(<Toolbar />);
     const expected: Record<string, string> = {
-      T1: "96.5%",
+      T1: "95.0%",
       T2: "90.0%",
-      T3: "80.0%",
-      T4: "70.0%",
-      T5: "70.0%",
+      T3: "85.0%",
+      T4: "80.0%",
+      T5: "80.0%",
     };
     for (const [tier, text] of Object.entries(expected)) {
       clickTier(tier);
@@ -94,11 +94,11 @@ describe("PART 31 — tier button drives the CONF read-out", () => {
     expect(document.querySelector('input[type="range"]')).toBeNull();
     // The read-out is a meter: it REPORTS a position, it does not offer one.
     expect(meter().tagName).toBe("SPAN");
-    expect(meter()).toHaveAttribute("aria-valuenow", "70");
-    expect(meter().getAttribute("aria-valuetext")).toContain("70.0 percent");
+    expect(meter()).toHaveAttribute("aria-valuenow", "80");
+    expect(meter().getAttribute("aria-valuetext")).toContain("80.0 percent");
   });
 
-  it("[311] keyboard/programmatic attempts to move the bar cannot go below 70.0%", () => {
+  it("[311] keyboard/programmatic attempts to move the bar cannot go below 80.0%", () => {
     render(<Toolbar />);
     clickTier("T5");
 
@@ -108,8 +108,8 @@ describe("PART 31 — tier button drives the CONF read-out", () => {
 
     // Even the coarsest bypass available in the DOM — mutating the meter by
     // hand — leaves the store holding the floor the tier implies.
-    expect(useMarketTerminalStore.getState().minConfidencePct).toBeCloseTo(70, 5);
-    expect(meter()).toHaveAttribute("aria-valuenow", "70");
+    expect(useMarketTerminalStore.getState().minConfidencePct).toBeCloseTo(80, 5);
+    expect(meter()).toHaveAttribute("aria-valuenow", "80");
   });
 
   it("[310] T5 explains the clamp in visible copy, not just a tooltip", () => {
@@ -117,7 +117,7 @@ describe("PART 31 — tier button drives the CONF read-out", () => {
     clickTier("T5");
 
     const notice = screen.getByText(
-      /T5 selected — floor clamped to T4 \(70\.0%\) · WEAK signals are visible but never executable/i,
+      /T5 selected — floor clamped to T4 \(80\.0%\) · WEAK signals are visible but never executable/i,
     );
     expect(notice).toBeInTheDocument();
     // The same sentence is BOTH the visible chip text and the TierSelector
@@ -149,6 +149,6 @@ describe("PART 31 — tier button drives the CONF read-out", () => {
     clickTier("T4");
     fireEvent.click(screen.getByRole("button", { name: /Hide</ }));
     expect(useMarketTerminalStore.getState().hideBelowThreshold).toBe(true);
-    expect(useMarketTerminalStore.getState().minConfidencePct).toBeCloseTo(70, 5);
+    expect(useMarketTerminalStore.getState().minConfidencePct).toBeCloseTo(80, 5);
   });
 });

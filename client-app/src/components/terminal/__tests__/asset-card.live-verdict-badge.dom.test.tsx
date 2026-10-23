@@ -9,8 +9,8 @@
  *   1. the badge lived only in the `interactive` branch, and `interactive`
  *      requires `filterConf >= minConfidencePct` — with no horizon prediction
  *      on mount (multi-predict is event-driven only) `filterConf` falls back to
- *      the micro-quant confidence, which sits under the 96.5% T1 bar almost
- *      always, so the card demoted to "BELOW 96.5% BAR" and printed NO
+ *      the micro-quant confidence, which sits under the 95.0% T1 bar almost
+ *      always, so the card demoted to "BELOW 95.0% BAR" and printed NO
  *      direction at all;
  *   2. `demotedByTier` fires when `tierClearsSelection(cardTier, minTier)` is
  *      false — and `cardTier` was null for every live verdict because neither
@@ -82,7 +82,7 @@ describe("[377] the LIVE direction stays visible on a below-bar card", () => {
 
     // THE FIX: the direction is no longer swallowed by the demotion strip.
     expect(screen.getByText("CALL")).toBeInTheDocument();
-    expect(screen.getByText(/BELOW 96\.5% BAR/)).toBeInTheDocument();
+    expect(screen.getByText(/BELOW 95\.0% BAR/)).toBeInTheDocument();
     expect(screen.getByText("62.4%")).toBeInTheDocument();
 
     // The bar still means what it meant: no trade action from this card.
@@ -163,7 +163,7 @@ describe("[377] the LIVE direction stays visible on a below-bar card", () => {
 
     // The horizon confidence (71.5%) is what drives the bar decision…
     expect(screen.getByText("71.5%")).toBeInTheDocument();
-    expect(screen.getByText(/BELOW 96\.5% BAR/)).toBeInTheDocument();
+    expect(screen.getByText(/BELOW 95\.0% BAR/)).toBeInTheDocument();
     // …but both directions stay on screen.
     expect(screen.getByText("CALL")).toBeInTheDocument();
     expect(screen.getByText(/H\d+m PUT/)).toBeInTheDocument();

@@ -5,8 +5,8 @@ A second, INDEPENDENT layer on top of the confidence gate. Where
 signal_gatekeeper's multi-tier ladder prices how STRONG the dynamic confluence
 is, this watershed prices how ALIGNED the trade is across five independent
 microstructure factors — and refuses to release any signal unless the
-weighted ensemble clears the STRICT emission bar (T1 PREMIUM = 0.965,
-QUALITY_EMIT_BAR = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER], 2026-09-24):
+weighted ensemble clears the STRICT emission bar (T1 PREMIUM = 0.95,
+QUALITY_EMIT_BAR = tier_min_confidence(MIN_EXECUTABLE_TIER), 2026-09-24):
 
   * mtf        (0.25) — EMA-20 > EMA-50 > EMA-200 structure on EVERY provided
                         timeframe (with ≥ 2 timeframes, else 0 — a one-legged
@@ -29,11 +29,11 @@ PART 33 [239] splits that vector per asset type
 weights, learned only from their OWN resolved signals and only once >= 30
 (``MIN_RESOLVED_SIGNALS``) exist. Because every vector still sums to 1.0, the
 invariant that matters is preserved and is unit-tested: NO single-factor miss
-can reach the 0.965 emission bar under ANY profile — the split changes which
+can reach the 0.95 emission bar under ANY profile — the split changes which
 factor a borderline tape fails, never whether one miss is enough to block. The
 quality score is then resolved onto the SAME canonical TIER_THRESHOLDS ladder as
-the confidence gate (T1 ≥ 0.965 … T4 ≥ 0.70); the emission bar is the STRICT
-executable tier (T1 = 0.965), and the resolved tier is reported alongside the
+the confidence gate (T1 ≥ 0.95 … T4 ≥ 0.80); the emission bar is the STRICT
+executable tier (T1 = 0.95), and the resolved tier is reported alongside the
 price it corresponds to.
 
 Payload contract::
@@ -57,11 +57,11 @@ import math
 from typing import Any, Dict, List, Optional
 
 from .signal_gatekeeper import (
-    TIER_THRESHOLDS,
     TIER_LABELS,
     MIN_EXECUTABLE_TIER,
     resolve_tier,
     is_dispatchable_tier,
+    tier_min_confidence,
 )
 from .accuracy_tracker import get_accuracy_tracker
 
@@ -75,10 +75,10 @@ GATE_WEIGHTS: Dict[str, float] = {
 FACTOR_ORDER: List[str] = ["mtf", "momentum", "volatility", "volume", "pressure"]
 REQUIRED_FACTOR_COUNT = 5
 
-# Emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 96.5%, derived from
+# Emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 95.0%, derived from
 # the canonical ladder as confluence — 2026-09-24 strict upgrade; was the
 # LIVE-TEST T4-LOW 0.30 floor). Always in lockstep with signal_gatekeeper.
-QUALITY_EMIT_BAR = TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
+QUALITY_EMIT_BAR = tier_min_confidence(MIN_EXECUTABLE_TIER)
 
 ATR_MIN_RATIO = 0.0008   # below this — volatility crushed, tradeable? no
 ATR_MAX_RATIO = 0.0050   # above this — volatility wild
@@ -293,7 +293,7 @@ def quality_score(
 
 
 def current_hard_gate() -> float:
-    """Effective emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 0.965).
+    """Effective emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 0.95).
 
     Kept for API compatibility; the tier ladder (signal_gatekeeper) is the
     single source of truth and is always in lockstep.
@@ -309,13 +309,13 @@ def evaluate_quality(
 
     Returns {quality, tier, tier_label, decision, gate, reason}.
 
-    * quality clears T1 (0.965) -> decision "EMIT" at resolved tier
+    * quality clears T1 (0.95) -> decision "EMIT" at resolved tier
     * quality below T1          -> decision "BLOCK", reason names the
                                    first (highest-weighted) failed factor.
 
     PART 33 [239]: ``weights`` carries the calling asset type's profile vector.
     The emission bar is NOT affected — only the score. Because every profile
-    still sums to 1.0, no single-factor miss can clear 0.965, so the T1 strict
+    still sums to 1.0, no single-factor miss can clear 0.95, so the T1 strict
     contract survives the per-type split.
     """
     factors = {name: (1 if int(factors.get(name, 0)) >= 1 else 0) for name in FACTOR_ORDER}

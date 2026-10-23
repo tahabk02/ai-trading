@@ -71,7 +71,7 @@ export const AIExplanation: React.FC = () => {
     setIsMounted(true);
   }, []);
 
-  // ── SHARED 96.5% SIGNAL GATE ──
+  // ── SHARED 95.0% SIGNAL GATE ──
   // The SAME buildSignalView + SIGNAL_CONFIDENCE_THRESHOLD the trading panel
   // and chart use. Below the gate a raw BUY/SELL is demoted to NO SIGNAL so
   // this widget never surfaces a directional call the rest of the app blocks.
@@ -176,7 +176,7 @@ export const AIExplanation: React.FC = () => {
     // Book-agreement level statement (PART 19.2 — a confluence score, not a
     // probability; PART 35.3 — "strategy books" so it cannot be read as the
     // order book).
-    if (confidenceNum >= 96.5)
+    if (confidenceNum >= 95.0)
       reasons.push(
         "Strong strategy book agreement — all strategy books aligned",
       );
@@ -190,7 +190,7 @@ export const AIExplanation: React.FC = () => {
       );
 
     // ── GATED-DIRECTION NOTICE ──
-    // When the engine emitted a raw BUY/SELL below the 96.5% gate, say so
+    // When the engine emitted a raw BUY/SELL below the 95.0% gate, say so
     // explicitly instead of quietly showing nothing.
     if (signalView.gated && confidenceNum > 0) {
       reasons.push(

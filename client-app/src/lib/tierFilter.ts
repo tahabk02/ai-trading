@@ -14,7 +14,7 @@
  * never rewrites a tier to fake a decision.
  *
  * Mirrors the engine's floor rules (ai-engine/app/services/signal_gatekeeper.py):
- * the effective bar can never fall below LOWEST_TRADABLE_TIER (T4 / 70%), so
+ * the effective bar can never fall below LOWEST_TRADABLE_TIER (T4 / 80%), so
  * selecting T5 monitors WEAK verdicts without ever making them executable.
  */
 
@@ -79,13 +79,13 @@ export function tierSelectionLabel(selection: TierSelection): string {
  * PART 31 [310] — the sentence the UI must SHOW when a selection was widened
  * for safety, or "" when the selection stands as chosen.
  *
- * Selecting T5 looks like a no-op on a bar that reads 70.0%: the trader clicks
+ * Selecting T5 looks like a no-op on a bar that reads 80.0%: the trader clicks
  * WEAK and the number does not move, with nothing on screen saying why. Left
  * unexplained that reads as a broken control or a silently ignored click. The
  * copy names both the clamp and its consequence, so the design choice is legible
  * instead of merely happening.
  *
- *   "T5 selected — floor clamped to T4 (70.0%) · WEAK signals are visible but
+ *   "T5 selected — floor clamped to T4 (80.0%) · WEAK signals are visible but
  *    never executable"
  */
 export function tierFloorClampNotice(selection: TierSelection): string {
@@ -102,13 +102,13 @@ export function tierFloorClampNotice(selection: TierSelection): string {
 export function tierSelectionHint(selection: TierSelection): string {
   switch (clampTierSelection(selection)) {
     case "T1":
-      return "Premium only (96.5%+) — the strictest, unchanged default.";
+      return "Premium only (95.0%+) — the strictest, unchanged default.";
     case "T2":
       return "High (90%+) — includes T2 signals.";
     case "T3":
-      return "Medium (80%+) — includes T3 signals.";
+      return "Medium (85%+) — includes T3 signals.";
     case "T4":
-      return "Low (70%+) — the most permissive band that can trade.";
+      return "Low (80%+) — the most permissive band that can trade.";
     case "T5":
       // T5 is emitted and monitorable, but the bar never drops below T4.
       return "Monitor WEAK too — all tiers are displayed, but only T1–T4 can trade.";

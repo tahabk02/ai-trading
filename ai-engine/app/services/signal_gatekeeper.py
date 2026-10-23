@@ -5,25 +5,25 @@ STRICT HIGH-PRECISION EXECUTION BAR (PRINCIPAL QUALITY UPGRADE 2026-09-24):
 
   TIER   LABEL    FRACTIONAL   PERCENTAGE   ROLE
   ────────────────────────────────────────────────────────────────
-  T1     PREMIUM  >= 0.965     >= 96.5      EXECUTABLE — flagship convergence
+  T1     PREMIUM  >= 0.95      >= 95.0      EXECUTABLE — flagship convergence
   T2     HIGH     >= 0.90      >= 90.0      SCORED-ONLY under the strict bar
-  T3     MEDIUM   >= 0.80      >= 80.0      SCORED-ONLY under the strict bar
-  T4     LOW      >= 0.70      >= 70.0      SCORED-ONLY under the strict bar
-  T5     WEAK     <  0.70      <  70.0      NO SIGNAL — never dispatched
+  T3     MEDIUM   >= 0.85      >= 85.0      SCORED-ONLY under the strict bar
+  T4     LOW      >= 0.80      >= 80.0      SCORED-ONLY under the strict bar
+  T5     WEAK     >= 0.75      >= 75.0      NO SIGNAL — never dispatched
 
 Contract:
   * A directional BUY/SELL verdict is EXECUTABLE only when its genuine
-    confidence clears STRICT_EXECUTION_CONFIDENCE (0.965 = T1 PREMIUM). This
+    confidence clears STRICT_EXECUTION_CONFIDENCE (0.95 = T1 PREMIUM). This
     REVERSES the LIVE-TEST relaxation (2026-09-23: default bar T4 = 0.30) —
-    default MINIMUM EXECUTABLE TIER is now ``T1`` (96.5%) to safeguard
+    default MINIMUM EXECUTABLE TIER is now ``T1`` (95.0%) to safeguard
     capital behind high-probability setups only.
-  * Any asset BELOW 96.5% defaults to SCORED-ONLY: ``executable=False``,
+  * Any asset BELOW 95.0% defaults to SCORED-ONLY: ``executable=False``,
     ``regime_gate="pending_high_precision"``,
     ``regime_status="PENDING_HIGH_PRECISION"``. Direction is KEPT
     (never coerced to HOLD) but never dispatched.
   * ``apply_strict_execution_gate`` is the single wrapper both /predict
     paths use (the "predictSignal / signal_gatekeeper" upgrade): it combines
-    the 96.5% confidence bar with the per-asset-class filter verdict
+    the 95.0% confidence bar with the per-asset-class filter verdict
     (OTC HF quality / REAL liquidity gate) and emits the full
     executable/regime/status surface plus audit metrics.
   * Confidence is cross-scale normalized defensively (1.0..100 → 0.01..1.0).
@@ -50,23 +50,30 @@ _logger = structlog.get_logger(__name__)
 
 # ── THE MULTI-TIER LADDER — one canonical value, one source of truth ──
 TIER_THRESHOLDS: Dict[str, float] = {
-    "T1": 0.965,   # PREMIUM  — 96.5%
-    "T2": 0.90,    # HIGH     — 90.0%
-    "T3": 0.80,    # MEDIUM   — 80.0%
-    "T4": 0.70,    # LOW      — 70.0% (restored 2026-09-24; was 0.30 LIVE-TEST)
-    # T5 became a FIRST-CLASS rung (2026-09-30) instead of an implicit
-    # "everything below T4" catch-all. It is emitted honestly like any other
-    # tier and is never a silent discard bucket. Its threshold is 0.0, so
-    # T5 is reached only once the genuine confluence falls below T4.
-    "T5": 0.0,     # WEAK     — <70.0%
+    "T1": 95.0,    # PREMIUM
+    "T2": 90.0,    # HIGH
+    "T3": 85.0,    # MEDIUM
+    "T4": 80.0,    # LOW — weakest tradable band
+    "T5": 75.0,    # WEAK — emitted, never executable
 }
+
+
+def _threshold_frac(value: Any) -> float:
+    """Normalize a ladder threshold to the fractional 0..1 scale.
+
+    The canonical table is expressed in PERCENT (95.0, 90.0, ...), while the
+    confidence pipeline works fractionally (0.95, 0.90, ...). This helper is
+    the one place that conversion happens, so the two scales cannot drift.
+    """
+    v = float(value)
+    return v / 100.0 if v > 1.0 else v
 
 # Strongest first. T5 is now an explicit rung, not a fallback label.
 TIER_ORDER = ["T1", "T2", "T3", "T4", "T5"]
 MAX_TIER = "T1"
 
 # STRICT HIGH-PRECISION EXECUTION BAR — the ONLY executable tier. T1 PREMIUM
-# (96.5%). Everything below is SCORED-ONLY (pending_high_precision). This
+# (95.0%). Everything below is SCORED-ONLY (pending_high_precision). This
 # restores strictness over the LIVE-TEST default of T4 = 0.30.
 MIN_EXECUTABLE_TIER = "T1"
 
@@ -96,32 +103,32 @@ LOWEST_TRADABLE_TIER = "T4"
 # against MIN_EXECUTABLE_TIER ("T1") — testing it against T1 turned a designed
 # demotion into a total veto, so every blockered-but-strong confluence became
 # market_waiting and no verdict could ever be dispatched. The EXECUTED signal
-# still faces the full T1 96.5% bar in apply_strict_execution_gate; this
+# still faces the full T1 95.0% bar in apply_strict_execution_gate; this
 # constant only governs whether a direction is allowed to be emitted.
 CONFLUENCE_DISPATCH_TIER = "T2"
 
 # STRICT_EXECUTION_CONFIDENCE — fractional bar any verdict must clear before
 # it is marked executable (mirrors TIER_THRESHOLDS["T1"]). Single source of
-# truth for the 96.5% enterprise gate.
-STRICT_EXECUTION_CONFIDENCE: float = TIER_THRESHOLDS["T1"]
+# truth for the 95.0% enterprise gate.
+STRICT_EXECUTION_CONFIDENCE: float = _threshold_frac(TIER_THRESHOLDS["T1"])
 
 # ── DYNAMIC PER-ASSET-CLASS FLOOR (REAL quote-proxy mode) ────────────────
 # When a REAL asset is evaluated in quote-proxy mode (no L2 bid/ask arms;
 # the approved "Spread/ATR + flow + MTF proxies" fallback) AND the proxied
 # class gate passes (every candle-proxy factor green) AND no user confidence
 # filter is set, the executable bar relaxes to REAL_PROXY_EXECUTABLE_FLOOR
-# (default 80.0% = T3 MEDIUM) instead of the strict 96.5% default. This is the
+# (default 80.0% = T4 LOW) instead of the strict 95.0% default. This is the
 # "never permanently stuck" clause: with only candle proxies available a fully
 # green gate at T3-level confluence is actionable evidence, and the decision is
 # stamped bar_source="real_proxy_floor" + a dynamic_floor metric for audit.
 # Tunable via env AI_ENGINE_REAL_PROXY_FLOOR_PCT; 0 disables the relaxation
-# (strict 96.5% everywhere). Clamped to [T4, T1] so it can never unlock below
+# (strict 95.0% everywhere). Clamped to [T4, T1] so it can never unlock below
 # the lowest tradable tier nor exceed the strict default.
 _REAL_PROXY_FLOOR_PCT_RAW = float(os.getenv("AI_ENGINE_REAL_PROXY_FLOOR_PCT") or 80.0) \
     if os.getenv("AI_ENGINE_REAL_PROXY_FLOOR_PCT") else 80.0
 _REAL_PROXY_FLOOR_ENABLED = _REAL_PROXY_FLOOR_PCT_RAW > 0.0
 REAL_PROXY_EXECUTABLE_FLOOR_FRAC: Optional[float] = (
-    float(min(max(_REAL_PROXY_FLOOR_PCT_RAW / 100.0, TIER_THRESHOLDS["T4"]), STRICT_EXECUTION_CONFIDENCE))
+    float(min(max(_REAL_PROXY_FLOOR_PCT_RAW / 100.0, _threshold_frac(TIER_THRESHOLDS["T4"])), STRICT_EXECUTION_CONFIDENCE))
     if _REAL_PROXY_FLOOR_ENABLED
     else None
 )
@@ -135,7 +142,7 @@ for _i in range(1, len(TIER_ORDER)):
         f"{TIER_ORDER[_i - 1]}={TIER_THRESHOLDS[TIER_ORDER[_i - 1]]} "
         f"<= {TIER_ORDER[_i]}={TIER_THRESHOLDS[TIER_ORDER[_i]]}"
     )
-assert 0.0 < TIER_THRESHOLDS["T4"] <= 1.0
+assert 0.0 < TIER_THRESHOLDS["T4"] <= 100.0
 
 # Tier rank map — higher rank = stronger tier. T1 rank 4 … T5 rank 0.
 TIER_RANK: Dict[str, int] = {"T1": 4, "T2": 3, "T3": 2, "T4": 1, "T5": 0}
@@ -260,10 +267,10 @@ def normalize_confidence(confidence: Any) -> float:
 
 
 def tier_min_confidence(tier: str) -> float:
-    """Fractional threshold for a tier label; T5 returns 0.0."""
+    """Fractional threshold for a tier label (T1 0.95 … T5 0.75)."""
     t = str(tier or "").strip().upper()
     if t in TIER_THRESHOLDS:
-        return float(TIER_THRESHOLDS[t])
+        return _threshold_frac(TIER_THRESHOLDS[t])
     return 0.0
 
 
@@ -338,14 +345,14 @@ def resolve_execution_floor(min_tier: Any = None) -> Dict[str, Any]:
 def resolve_tier(confidence: Any) -> str:
     """Map a genuine confidence onto its honest tier label (T1…T5).
 
-    T1 PREMIUM (>=0.965) … T4 LOW (>=0.70) … T5 WEAK (below T4). Every band is
+    T1 PREMIUM (>=0.95) … T4 LOW (>=0.80) … T5 WEAK (below T4). Every band is
     a real, emittable tier: the ladder labels confidence, it does not decide
     whether a verdict may be seen. Tradability is `executable`, resolved
     separately against the user's floor via `resolve_execution_floor`.
     """
     frac = normalize_confidence(confidence)
     for tier in TIER_ORDER:
-        if frac >= TIER_THRESHOLDS[tier]:
+        if frac >= tier_min_confidence(tier):
             return tier
     return "T5"
 
@@ -391,7 +398,9 @@ def apply_gate(
     pct = round(frac * 100.0, 2)
     tier = resolve_tier(frac)
     rank_bar = TIER_RANK.get(str(min_tier or "").strip().upper(), TIER_RANK[MIN_EXECUTABLE_TIER])
-    threshold_frac = tier_min_confidence(min_tier) or TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
+    threshold_frac = tier_min_confidence(min_tier) or _threshold_frac(
+        TIER_THRESHOLDS[MIN_EXECUTABLE_TIER]
+    )
     executable = direction in ("BUY", "SELL") and tier_rank(tier) >= rank_bar
 
     return {
@@ -761,8 +770,8 @@ def apply_time_gate(
 # verdict is EXECUTABLE only when:
 #   1. direction is BUY/SELL,
 #   2. its genuine confidence clears the executable bar — the platform's
-#      STRICT_EXECUTION_CONFIDENCE (0.965) default, overridable per-request by
-#      a user min_confidence filter (floored at T4 = 0.70), AND
+#      STRICT_EXECUTION_CONFIDENCE (0.95) default, overridable per-request by
+#      a user min_confidence filter (floored at T4 = 0.80), AND
 #   3. the per-asset-class filter gate (OTC HF quality / REAL liquidity) passes.
 # Everything below the bar defaults to SCORED-ONLY (regime_gate
 # "pending_high_precision", executable False), while the honest `regime`
@@ -814,11 +823,11 @@ def _resolve_execution_bar(
     expresses "which classes of setup do I trade", not "what percentage").
 
     - ``min_tier`` supplied -> the tier's own threshold
-      (T1 96.5 / T2 90 / T3 80 / T4 70), floored never below T4.
+      (T1 95.0 / T2 90 / T3 85 / T4 80), floored never below T4.
     - ``min_confidence`` supplied (a 50.0..99.0 percentage) -> the user's
       filter IS the executable bar, floored at T4 (70%) so the filter can never
       mark a sub-tier verdict tradable.
-    - neither -> the engine default strict bar (96.5%, T1).
+    - neither -> the engine default strict bar (95.0%, T1).
 
     Provenance is returned as "user" | "floored" | "default" so the decision is
     auditable in the response.
@@ -830,7 +839,7 @@ def _resolve_execution_bar(
         bar_frac = STRICT_EXECUTION_CONFIDENCE
         return bar_frac, round(bar_frac * 100.0, 2), "default"
     user_frac = normalize_confidence(min_confidence)
-    floor_frac = TIER_THRESHOLDS[LOWEST_TRADABLE_TIER]
+    floor_frac = tier_min_confidence(LOWEST_TRADABLE_TIER)
     effective = max(user_frac, floor_frac)
     source = "floored" if effective > user_frac else "user"
     return effective, round(effective * 100.0, 2), source
@@ -848,7 +857,7 @@ def apply_strict_execution_gate(
 ) -> Dict[str, Any]:
     """Strict execution surface for a single signal evaluation.
 
-    The executable bar is the engine's 96.5% default unless the caller
+    The executable bar is the engine's 95.0% default unless the caller
     supplies ``min_confidence`` (a user-selected 50.0..99.0% filter), which
     overrides the bar — floored at T4 (70%) so nothing under the lowest
     tradable tier can ever be marked executable.
@@ -863,7 +872,7 @@ def apply_strict_execution_gate(
         regime_type: honest regime classification (None when unknown yet).
         spread_status: "tight" | "wide" | "no_quotes" | "synthetic" | None.
         min_confidence: optional user-set minimum executable confidence pct
-            (50.0..99.0); None = engine's 96.5% strict default.
+            (50.0..99.0); None = engine's 95.0% strict default.
         min_tier: optional user-set minimum tier "T1".."T4" (see
             :func:`resolve_execution_floor`). Takes precedence over
             ``min_confidence`` when valid. T5 is accepted but floored to T4 —
@@ -881,7 +890,7 @@ def apply_strict_execution_gate(
           "status": "active",
           "tier": "T1" … "T5" (honest resolved tier, never overwritten),
           "tier_label": "PREMIUM" …,
-          "threshold_pct": 96.5 (or the effective user bar),
+          "threshold_pct": 95.0 (or the effective user bar),
           "min_tier": "T1" … "T4",   # the floor actually applied
           "bar_source": "default" | "user" | "floored",
           "asset_class": "OTC" | "REAL",
@@ -906,7 +915,7 @@ def apply_strict_execution_gate(
     class_reason = class_gate.get("reason")
     class_metrics = class_gate.get("metrics") or {}
 
-    # Effective executable bar: engine default T1/96.5%, or the user's tier
+    # Effective executable bar: engine default T1/95.0%, or the user's tier
     # selector (`min_tier`), or their numeric filter (`min_confidence`).
     # >= so EXACTLY the bar IS executable.
     bar_frac, bar_pct, bar_source = _resolve_execution_bar(min_confidence, min_tier)
@@ -956,7 +965,7 @@ def apply_strict_execution_gate(
         regime_status = REGIME_STATUS_PENDING_HIGH_PRECISION
         suppressed_reason = SUPPRESSED_REASON_HIGH_PRECISION
     else:
-        # Below the effective executable bar (96.5% default or the user's
+        # Below the effective executable bar (95.0% default or the user's
         # min_confidence filter) → SCORED-ONLY, high-precision gate pending.
         regime_gate = REGIME_GATE_PENDING_HIGH_PRECISION
         regime_status = REGIME_STATUS_PENDING_HIGH_PRECISION
@@ -1001,7 +1010,7 @@ def apply_strict_execution_gate(
             "floor_pct": bar_pct,
             "precondition": "real_quote_proxy_gate_green",
             "reason": "no L2 books — spread/ATR + flow + MTF proxies all green; "
-                      "strict 96.5% bar relaxed so a fully-proxied REAL pair is "
+                      "strict 95.0% bar relaxed so a fully-proxied REAL pair is "
                       "never permanently blocked.",
         }
 

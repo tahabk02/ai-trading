@@ -6,7 +6,7 @@ when the L2 order book is absent:
   * OTC tape keeps its HF synthetic price-action loop untouched.
   * REAL assets fall back to the approved "Spread/ATR + flow + MTF proxies"
     validator (spread_status="synthetic_proxy", quote_proxy=True), and the
-    strict 96.5% bar relaxes to the dynamic per-class floor
+    strict 95.0% bar relaxes to the dynamic per-class floor
     (bar_source="real_proxy_floor"; default 80.0% = T3) ONLY when the proxied
     gate is fully green and no user filter is set — never below T4, never a
     fabricated executable.
@@ -137,15 +137,15 @@ def test_user_filter_overrides_dynamic_floor():
     assert out["threshold_pct"] == 90.0
 
 
-# ── 9 ── NON-REAL classes never relax (OTC stays strict 96.5%) ──
+# ── 9 ── NON-REAL classes never relax (OTC stays strict 95.0%) ──
 def test_otc_never_relaxes():
     class_gate = {"passes": True, "metrics": {"quote_proxy": True}}
     out = apply_strict_execution_gate(
         "BUY", 90.0, asset_class="OTC", class_gate=class_gate,
     )
-    assert out["executable"] is False  # 90 < 96.5 strict bar
+    assert out["executable"] is False  # 90 < 95.0 strict bar
     assert out["bar_source"] == "default"
-    assert out["threshold_pct"] == 96.5
+    assert out["threshold_pct"] == 95.0
     assert "dynamic_floor" not in out["metrics"]
 
 

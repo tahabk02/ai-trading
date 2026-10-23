@@ -282,7 +282,7 @@ def test_a_failing_class_gate_always_vetoes_at_any_confidence():
 def test_a_passing_class_gate_is_necessary_but_not_sufficient():
     """Green gate + below-bar confidence is still not executable: the gate
     cannot substitute for the independent high-precision bar."""
-    surface = _surface(confidence_pct=96.4, class_gate=_green_otc_gate())
+    surface = _surface(confidence_pct=94.9, class_gate=_green_otc_gate())
     assert surface["class_gate"]["passes"] is True
     assert surface["executable"] is False
     assert surface["regime_gate"] == REGIME_GATE_PENDING_HIGH_PRECISION

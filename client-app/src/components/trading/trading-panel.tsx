@@ -183,7 +183,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   }, [lastTradeResult, clearTradeResult]);
 
   // ── SINGLE SIGNAL GATE ──
-  // The 96.5% hard gate (PO AI parity) is applied EXACTLY ONCE here through
+  // The 95.0% hard gate (PO AI parity) is applied EXACTLY ONCE here through
   // `buildSignalView` — the same single source the chart and analysis use.
   // A below-threshold verdict yields NO gated signal: the buttons are
   // disabled/neutral and the badge shows the waiting state. The gate is never
@@ -195,7 +195,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   const gatedSignal = signalView.gatedSignal;
   const isCall = gatedSignal === "BUY";
   const isPut = gatedSignal === "SELL";
-  // NO gated direction (awaiting prediction OR below the 96.5% threshold) → the
+  // NO gated direction (awaiting prediction OR below the 95.0% threshold) → the
   // execution buttons stay locked/neutral until the gate passes.
   const signalLocked = gatedSignal === null;
   // NEVER display HOLD — the engine always resolves BUY/SELL. Before the first
@@ -445,7 +445,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
               : selectedExpiryState.reason === "regime_scored_only"
                 ? "SCORED-ONLY — RANDOM WALK: no expiry is actionable on this symbol"
                 : selectedExpiryState.reason === "regime_pending_high_precision"
-                  ? "BELOW THE STRICT 96.5% BAR: no expiry is actionable yet"
+                  ? "BELOW THE STRICT 95.0% BAR: no expiry is actionable yet"
                   : selectedExpiryState.reason === "no_tier"
                     ? "Evaluating — awaiting the first verdict for this expiry"
                     : "Below the executable tier for any expiry on this symbol"}

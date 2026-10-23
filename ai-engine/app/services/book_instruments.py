@@ -71,7 +71,6 @@ from typing import Dict, Any, Optional, Tuple
 
 from .signal_gatekeeper import (
     DEFINITIVE_CONFIDENCE_MIN,
-    TIER_THRESHOLDS,
     tier_min_confidence,
 )
 
@@ -872,8 +871,8 @@ def resolve_confluence_tier(score: float, blockers: list) -> str:
 def compute_confluence_tier_by_score(score: float) -> str:
     """Continuous score → tier label using the canonical TIER_THRESHOLDS."""
     frac = float(score) / 100.0
-    for _tier, _bar in (("T1", 0.965), ("T2", 0.90), ("T3", 0.80), ("T4", 0.70)):
-        if frac >= _bar:
+    for _tier in ("T1", "T2", "T3", "T4"):
+        if frac >= tier_min_confidence(_tier):
             return _tier
     return "T5"
 

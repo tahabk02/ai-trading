@@ -1706,7 +1706,7 @@ const lastRealtimePublish = new Map<string, number>();
       // boundary). The engine is the authority: it already marks a verdict
       // `executable=false` when the confidence is below the floor the
       // operator selected. This guard mirrors that SAME operator-chosen
-      // floor rather than a hardcoded 96.5%, so selecting T2/T3/T4 actually
+      // floor rather than a hardcoded 95.0%, so selecting T2/T3/T4 actually
       // lets those bands trade — which is the whole point of the
       // flexible-tier architecture. It still protects against an
       // ENGINE-VERIFIED directional signal that somehow carries a

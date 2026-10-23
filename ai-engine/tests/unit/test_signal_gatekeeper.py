@@ -1,9 +1,9 @@
 """Unit tests for the multi-tier signal gate (signal_gatekeeper parity).
 
-Strict high-precision execution bar (2026-09-24):
-  T1 >= 0.965, T2 >= 0.90, T3 >= 0.80, T4 >= 0.70, below T4 is T5 (never
-  dispatched). The default MIN_EXECUTABLE_TIER is T1 (96.5%), so a verdict
-  is executable ONLY when its genuine confidence clears the 96.5% floor
+Strict high-precision execution bar (2026-10-23):
+  T1 >= 0.95, T2 >= 0.90, T3 >= 0.85, T4 >= 0.80, below T4 is T5 (never
+  dispatched). The default MIN_EXECUTABLE_TIER is T1 (95%), so a verdict
+  is executable ONLY when its genuine confidence clears the 95% floor
   (AND the per-asset-class filter passes — covered separately).
   HARD_GATE = 0.98 / DEFINITIVE_CONFIDENCE_MIN = 98.0 remain as LEGACY
   aliases for old imports — the tier ladder is the dispatch source of truth.
@@ -51,22 +51,22 @@ from app.services.signal_gatekeeper import (
 def test_tier_ladder_canonical_constants():
     # T5 is a REAL, emitted band (the flexible-tier ladder): every computed
     # tier T1..T5 is reported with its true confidence. T5 is monitor-only, so
-    # it sits at 0.0 confidence and can never be an executable floor.
+    # it can never be an executable floor.
     assert TIER_ORDER == ["T1", "T2", "T3", "T4", "T5"]
-    assert TIER_THRESHOLDS["T1"] == pytest.approx(0.965)
-    assert TIER_THRESHOLDS["T2"] == pytest.approx(0.90)
-    assert TIER_THRESHOLDS["T3"] == pytest.approx(0.80)
-    assert TIER_THRESHOLDS["T4"] == pytest.approx(0.70)  # lowest tradable floor
-    assert TIER_THRESHOLDS["T5"] == pytest.approx(0.0)  # emitted, never executable
-    assert MIN_EXECUTABLE_TIER == "T1"  # default strict 96.5% executable bar
+    assert TIER_THRESHOLDS["T1"] == pytest.approx(95.0)
+    assert TIER_THRESHOLDS["T2"] == pytest.approx(90.0)
+    assert TIER_THRESHOLDS["T3"] == pytest.approx(85.0)
+    assert TIER_THRESHOLDS["T4"] == pytest.approx(80.0)  # lowest tradable floor
+    assert TIER_THRESHOLDS["T5"] == pytest.approx(75.0)  # emitted, never executable
+    assert MIN_EXECUTABLE_TIER == "T1"  # default strict 95% executable bar
     assert DEFAULT_EXECUTION_TIER == "T1"
     # T5 WEAK is deliberately NOT tradable: the effective floor tops out at T4.
     assert LOWEST_TRADABLE_TIER == "T4"
     # Strictly monotonic (strongest first), as enforced at import time.
     for i in range(1, len(TIER_ORDER)):
         assert TIER_THRESHOLDS[TIER_ORDER[i - 1]] > TIER_THRESHOLDS[TIER_ORDER[i]]
-    # T5 sits strictly below the weakest tier.
-    assert tier_min_confidence("T5") == pytest.approx(0.0)
+    # T5 is the weakest rung, below T4.
+    assert tier_min_confidence("T5") == pytest.approx(0.75)
 
 
 # ── FLEXIBLE-TIER EXECUTION FLOOR (2026-09-30) ───────────────────────────
@@ -77,20 +77,21 @@ def test_tier_ladder_canonical_constants():
 @pytest.mark.parametrize(
     "raw,tier,bar_pct,source",
     [
-        (None, "T1", 96.5, "default"),
-        ("", "T1", 96.5, "default"),
-        ("   ", "T1", 96.5, "default"),
-        ("garbage", "T1", 96.5, "default"),
-        ("T9", "T1", 96.5, "default"),
-        ("T1", "T1", 96.5, "user"),
-        ("t1", "T1", 96.5, "user"),   # case-insensitive
+        (None, "T1", 95.0, "default"),
+        ("", "T1", 95.0, "default"),
+        ("   ", "T1", 95.0, "default"),
+        ("garbage", "T1", 95.0, "default"),
+        ("T9", "T1", 95.0, "default"),
+        ("T1", "T1", 95.0, "user"),
+        ("t1", "T1", 95.0, "user"),   # case-insensitive
         ("T2", "T2", 90.0, "user"),
-        ("t3", "T3", 80.0, "user"),
-        ("T4", "T4", 70.0, "user"),
-        # T5 is a valid SELECTION but its 0% bar is unsafe, so the BAR is
-        # floored to T4's 70% while the selection is reported honestly.
-        ("T5", "T5", 70.0, "floored"),
-        ("t5", "T5", 70.0, "floored"),
+        ("t3", "T3", 85.0, "user"),
+        ("T4", "T4", 80.0, "user"),
+        # T5 is a valid SELECTION but its 75% bar is below the tradable floor,
+        # so the BAR is floored to T4's 80% while the selection is reported
+        # honestly.
+        ("T5", "T5", 80.0, "floored"),
+        ("t5", "T5", 80.0, "floored"),
     ],
 )
 def test_resolve_execution_floor(raw, tier, bar_pct, source):
@@ -141,7 +142,7 @@ def test_tier_ranks_and_labels():
 
 
 def test_is_dispatchable_tier():
-    # Default bar is the STRICT 96.5% floor (MIN_EXECUTABLE_TIER=T1): ONLY T1.
+    # Default bar is the STRICT 95% floor (MIN_EXECUTABLE_TIER=T1): ONLY T1.
     assert is_dispatchable_tier("T1") is True
     assert is_dispatchable_tier("T2") is False
     assert is_dispatchable_tier("T3") is False
@@ -156,16 +157,16 @@ def test_is_dispatchable_tier():
 
 
 def test_resolve_tier_maps_confidence_to_honest_tier():
-    assert resolve_tier(0.965) == "T1"
+    assert resolve_tier(0.95) == "T1"
     assert resolve_tier(0.99) == "T1"
-    assert resolve_tier(96.5) == "T1"
+    assert resolve_tier(95.0) == "T1"
     assert resolve_tier(0.90) == "T2"
     assert resolve_tier(0.89) == "T3"
-    assert resolve_tier(0.80) == "T3"
-    assert resolve_tier(0.79) == "T4"
-    assert resolve_tier(0.70) == "T4"
-    assert resolve_tier(0.69) == "T5"   # below T4 = 0.70 → WEAK
-    assert resolve_tier(0.30) == "T5"   # below T4 = 0.70 → WEAK
+    assert resolve_tier(0.85) == "T3"
+    assert resolve_tier(0.84) == "T4"
+    assert resolve_tier(0.80) == "T4"
+    assert resolve_tier(0.79) == "T5"   # below T4 = 0.80 → WEAK
+    assert resolve_tier(0.30) == "T5"   # below T4 = 0.80 → WEAK
     assert resolve_tier(0.29) == "T5"   # far below the strict floor
     assert resolve_tier(0.0) == "T5"
     assert resolve_tier(None) == "T5"
@@ -201,14 +202,14 @@ def test_normalize_confidence_cross_scale():
     assert normalize_confidence(float("inf")) == pytest.approx(0.0)
 
 
-def test_is_executable_default_t4_bar():
+def test_is_executable_default_t1_bar():
     assert is_executable("BUY", 0.98) is True
     assert is_executable("BUY", 98.0) is True
-    assert is_executable("SELL", 0.965) is True     # exactly at the strict bar
+    assert is_executable("SELL", 0.95) is True      # exactly at the strict bar
     assert is_executable("SELL", 0.97) is True
-    assert is_executable("SELL", 0.96) is False     # sub-96.5 → not executable
-    assert is_executable("SELL", 0.70) is False     # strict bar = T1
-    assert is_executable("SELL", 0.69) is False
+    assert is_executable("SELL", 0.94) is False     # sub-95 → not executable
+    assert is_executable("SELL", 0.80) is False     # strict bar = T1
+    assert is_executable("SELL", 0.79) is False
     assert is_executable("BUY", 0.3) is False
     assert is_executable("BUY", 60) is False
     assert is_executable("BUY", 0.29) is False
@@ -220,13 +221,13 @@ def test_is_executable_default_t4_bar():
 
 
 def test_is_executable_custom_min_tier():
-    assert is_executable("BUY", 0.70, min_tier="T1") is False
+    assert is_executable("BUY", 0.80, min_tier="T1") is False
     assert is_executable("BUY", 0.97, min_tier="T1") is True
     assert is_executable("BUY", 0.90, min_tier="T2") is True
     assert is_executable("BUY", 0.89, min_tier="T2") is False
     assert is_executable("BUY", 0.89, min_tier="T3") is True
-    assert is_executable("BUY", 0.79, min_tier="T3") is False
-    assert is_executable("BUY", 0.79, min_tier="T4") is True
+    assert is_executable("BUY", 0.84, min_tier="T3") is False
+    assert is_executable("BUY", 0.80, min_tier="T4") is True
 
 
 def test_apply_gate_executable_verdict():
@@ -238,15 +239,15 @@ def test_apply_gate_executable_verdict():
     assert result["executable"] is True
     assert result["market_waiting"] is False
     assert result["gate"] is None
-    assert result["threshold_pct"] == pytest.approx(96.5)  # strict T1 bar
+    assert result["threshold_pct"] == pytest.approx(95.0)  # strict T1 bar
 
 
 def test_apply_gate_reports_honest_tier_at_each_bar():
     assert apply_gate("BUY", 0.98)["tier"] == "T1"
     assert apply_gate("BUY", 0.94)["tier"] == "T2"
-    assert apply_gate("BUY", 0.85)["tier"] == "T3"
-    assert apply_gate("BUY", 0.75)["tier"] == "T4"
-    assert apply_gate("BUY", 0.69)["tier"] == "T5"  # below T4 = 0.70
+    assert apply_gate("BUY", 0.86)["tier"] == "T3"
+    assert apply_gate("BUY", 0.81)["tier"] == "T4"
+    assert apply_gate("BUY", 0.79)["tier"] == "T5"  # below T4 = 0.80
     assert apply_gate("BUY", 0.25)["tier"] == "T5"  # far below the strict bar
 
 

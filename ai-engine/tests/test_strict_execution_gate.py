@@ -1,13 +1,13 @@
 """
-test_strict_execution_gate.py — STRICT 96.5% HIGH-PRECISION EXECUTION BAR
-(PRINCIPAL QUALITY UPGRADE 2026-09-24)
+test_strict_execution_gate.py — STRICT 95.0% HIGH-PRECISION EXECUTION BAR
+(PRINCIPAL QUALITY UPGRADE 2026-10-23)
 
 Proves the enterprise contract end-to-end through the unified surface:
 
-  * A directional verdict at EXACTLY 96.5% (and above) IS executable; any
+  * A directional verdict at EXACTLY 95.0% (and above) IS executable; any
     value below the bar is demoted to SCORED-ONLY
     (regime_gate="pending_high_precision", executable=False).
-  * The per-asset-class filter VETOES even a >= 96.5% confluence when the
+  * The per-asset-class filter VETOES even a >= 95.0% confluence when the
     micro-market is weak: OTC HF quality (price-action/flow/vol/m-r) and the
     REAL institutional liquidity gate (spread-to-ATR margin, order flow,
     M1/M5/H1 alignment, vol stress).
@@ -87,21 +87,21 @@ def _with_glitches(series: list, n_nan: int = 3, n_inf: int = 2, n_neg: int = 1)
     return out
 
 
-# ── 1 ── the strict confidence bar (EXACT 96.5% boundary) ──────────────────
+# ── 1 ── the strict confidence bar (EXACT 95.0% boundary) ──────────────────
 
 def test_apply_gate_exactly_at_the_bar_is_executable():
-    assert STRICT_EXECUTION_CONFIDENCE == pytest.approx(0.965)
-    for confidence in (96.5, 0.965, 97.0, 99.9, 100.0):
+    assert STRICT_EXECUTION_CONFIDENCE == pytest.approx(0.95)
+    for confidence in (95.0, 0.95, 96.5, 97.0, 99.9, 100.0):
         out = apply_strict_execution_gate("BUY", confidence)
         assert out["executable"] is True, confidence
         assert out["regime_gate"] == REGIME_GATE_TRADABLE
         assert out["regime_status"] == "CONFIRMED"
         assert out["suppressed_reason"] is None
-        assert out["threshold_pct"] == pytest.approx(96.5)
+        assert out["threshold_pct"] == pytest.approx(95.0)
 
 
 def test_apply_gate_below_the_bar_is_pending_high_precision_scored_only():
-    for confidence in (96.4, 0.964, 95.0, 0.95, 70.0, 30.0, 0.0):
+    for confidence in (94.9, 0.949, 90.0, 0.90, 70.0, 30.0, 0.0):
         out = apply_strict_execution_gate("BUY", confidence)
         assert out["executable"] is False, confidence
         assert out["regime_gate"] == REGIME_GATE_PENDING_HIGH_PRECISION
@@ -306,7 +306,7 @@ def test_surface_otc_pass_at_strict_bar():
     series = _otc_clean_trend()
     surface = build_execution_surface(
         symbol="EUR/USD", closes=series, direction="BUY",
-        confidence_pct=96.5, bid=series[-1] * 0.9999, ask=series[-1],
+        confidence_pct=95.0, bid=series[-1] * 0.9999, ask=series[-1],
         live_price=series[-1], timeframe="1m",
     )
     assert surface["executable"] is True
@@ -316,20 +316,20 @@ def test_surface_otc_pass_at_strict_bar():
     assert surface["class_filter"] == "otc_hf_quality"
     assert surface["status"] == "active"
     assert surface["regime_status"] == "CONFIRMED"
-    assert surface["threshold_pct"] == pytest.approx(96.5)
+    assert surface["threshold_pct"] == pytest.approx(95.0)
 
 
 def test_surface_otc_below_bar_demoted_even_though_filter_passes():
     series = _otc_clean_trend()
     surface = build_execution_surface(
         symbol="EUR/USD", closes=series, direction="BUY",
-        confidence_pct=96.4, bid=series[-1] * 0.9999, ask=series[-1],
+        confidence_pct=94.9, bid=series[-1] * 0.9999, ask=series[-1],
         live_price=series[-1], timeframe="1m",
     )
     assert surface["executable"] is False
     assert surface["regime_gate"] == REGIME_GATE_PENDING_HIGH_PRECISION
     assert surface["suppressed_reason"] == SUPPRESSED_REASON_HIGH_PRECISION
-    assert surface["tier"] == "T2"  # honest tier below the strict bar (T1 needs 96.5)
+    assert surface["tier"] == "T2"  # honest tier below the strict bar (T1 needs 95.0)
     assert surface["signal"] == "BUY"
 
 

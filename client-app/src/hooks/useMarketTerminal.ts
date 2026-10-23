@@ -42,7 +42,7 @@ export function useMarketTerminal() {
   const latestSymbolsRef = useRef<string[]>(ALL_MARKET_SYMBOLS);
 
   // ── HYDRATION SAFETY (Confidence Filter — P1-2026-09-24) ──
-  // The store initializes DETERMINISTICALLY to the engine default (T1 / 96.5%)
+  // The store initializes DETERMINISTICALLY to the engine default (T1 / 95.0%)
   // on server AND client so React can always hydrate a matching DOM tree. The
   // persisted localStorage TIER (e.g. "T4") is layered on ONLY here — after
   // first paint — and the confidence bar is re-derived from it, so SSR/client

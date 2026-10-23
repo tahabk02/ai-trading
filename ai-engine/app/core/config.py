@@ -54,11 +54,11 @@ if _PARENT_DOTENV.is_file() and os.environ.get("AI_ENGINE_ALLOW_PARENT_DOTENV") 
 
 # Multi-tier dispatch floors — single source of truth (signal_gatekeeper).
 # STRICT HIGH-PRECISION BAR (2026-09-24): the executable floor is now the
-# PREMIUM T1 bar (96.5%) and the weakest tier T4 is restored to 70.0. The
+# PREMIUM T1 bar (95.0%) and the weakest tradable tier T4 is 80.0. The
 # validator never lets a configured value drop below MIN_EXECUTABLE_CONFIDENCE_PCT,
-# and since MIN_EXECUTABLE_TIER == "T1", the effective floor is 96.5.
-DEFAULT_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T1"] * 100.0, 2)          # 96.5
-MIN_EXECUTABLE_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T4"] * 100.0, 2)   # 70.0 (was 30.0 LIVE-TEST)
+# and since MIN_EXECUTABLE_TIER == "T1", the effective floor is 95.0.
+DEFAULT_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T1"], 2)          # 95.0
+MIN_EXECUTABLE_CONFIDENCE_PCT = round(TIER_THRESHOLDS["T4"], 2)   # 80.0
 
 class Settings(BaseSettings):
     """
@@ -78,11 +78,11 @@ class Settings(BaseSettings):
     # MULTI-TIER DISPATCH FLOOR — SINGLE SOURCE OF TRUTH (signal_gatekeeper)
     # ══════════════════════════════════════════════════════════════════
     # STRICT HIGH-PRECISION BAR (2026-09-24): the engine is gated to the
-    # PREMIUM T1 floor (96.5%) — the only dispatchable tier. A BUY/SELL
-    # verdict below 96.5% is surfaced SCORED-ONLY (executable=False,
+    # PREMIUM T1 floor (95.0%) — the only dispatchable tier. A BUY/SELL
+    # verdict below 95.0% is surfaced SCORED-ONLY (executable=False,
     # regime_gate="pending_high_precision"). Direction is ALWAYS KEPT --
     # a sub-bar verdict is honest, merely never dispatched. The weakest
-    # tier T4 is restored to 70.0 (was 30.0 during LIVE-TEST).
+    # tier T4 is 80.0 (was 30.0 during LIVE-TEST).
     # Values configured below MIN_EXECUTABLE_CONFIDENCE_PCT are clamped to
     # that floor at boot; the floor can never weaken past the strict bar.
     CONFIDENCE_THRESHOLD: float = DEFAULT_CONFIDENCE_PCT
