@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 /**
  * kill-switch-banner.tsx — ADVANCED RISK MANAGEMENT UI (ALPHA 5 PRO)
@@ -66,12 +66,12 @@ export const KillSwitchBanner: React.FC = () => {
   return (
     <div
       className={cn(
-        "mx-2 lg:mx-3 mt-2 rounded-xl border px-4 py-3 flex flex-col gap-2 transition-colors",
+        "mx-2 lg:mx-3 mt-2 rounded-card border px-4 py-3 flex flex-col gap-2 transition-colors",
         isKillSwitchLocked
-          ? "bg-rose-950/60 border-rose-600/50"
+          ? "bg-st-neg/10 border-st-neg/40"
           : nearLimit
-            ? "bg-amber-950/40 border-amber-600/40"
-            : "bg-slate-900/60 border-slate-700/50",
+            ? "bg-st-warn/10 border-st-warn/40"
+            : "bg-surface border-line",
       )}
       role="status"
       aria-live="polite"
@@ -80,12 +80,12 @@ export const KillSwitchBanner: React.FC = () => {
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           {isKillSwitchLocked ? (
-            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 animate-pulse" />
+            <ShieldAlert className="w-4 h-4 text-st-neg shrink-0 animate-pulse" />
           ) : (
             <ShieldCheck
               className={cn(
                 "w-4 h-4 shrink-0",
-                nearLimit ? "text-amber-400" : "text-emerald-400",
+                nearLimit ? "text-st-warn" : "text-st-pos",
               )}
             />
           )}
@@ -93,10 +93,10 @@ export const KillSwitchBanner: React.FC = () => {
             className={cn(
               "text-[11px] font-black uppercase tracking-widest truncate",
               isKillSwitchLocked
-                ? "text-rose-300"
+                ? "text-st-neg"
                 : nearLimit
-                  ? "text-amber-300"
-                  : "text-slate-300",
+                  ? "text-st-warn"
+                  : "text-ink-muted",
             )}
           >
             {isKillSwitchLocked
@@ -110,7 +110,7 @@ export const KillSwitchBanner: React.FC = () => {
           <button
             type="button"
             onClick={() => void resetKillSwitch()}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold uppercase tracking-wider transition-colors"
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-st-neg hover:brightness-110 text-white text-[10px] font-bold uppercase tracking-wider transition-colors"
           >
             <RotateCcw className="w-3 h-3" />
             {t("reset")}
@@ -123,7 +123,7 @@ export const KillSwitchBanner: React.FC = () => {
                 void engageKillSwitch("Operator emergency stop");
                 setConfirmLock(false);
               }}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold uppercase tracking-wider transition-colors"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-st-neg hover:brightness-110 text-white text-[10px] font-bold uppercase tracking-wider transition-colors"
             >
               <Lock className="w-3 h-3" />
               Confirm Lock
@@ -131,7 +131,7 @@ export const KillSwitchBanner: React.FC = () => {
             <button
               type="button"
               onClick={() => setConfirmLock(false)}
-              className="inline-flex items-center px-2 py-1.5 rounded-lg border border-slate-600 text-slate-300 text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition-colors"
+              className="inline-flex items-center px-2 py-1.5 rounded-lg border border-slate-600 text-ink-muted text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition-colors"
             >
               Cancel
             </button>
@@ -141,7 +141,7 @@ export const KillSwitchBanner: React.FC = () => {
             type="button"
             onClick={() => setConfirmLock(true)}
             title="Emergency stop — instantly locks ALL live trading"
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-700/60 text-rose-400 hover:bg-rose-950/60 text-[10px] font-bold uppercase tracking-wider transition-colors"
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-st-neg/50 text-st-neg hover:bg-st-neg/10 text-[10px] font-bold uppercase tracking-wider transition-colors"
           >
             <Lock className="w-3 h-3" />
             Emergency Stop
@@ -155,10 +155,10 @@ export const KillSwitchBanner: React.FC = () => {
           className={cn(
             "h-full rounded-full transition-all duration-500",
             isKillSwitchLocked
-              ? "bg-rose-500"
+              ? "bg-st-neg"
               : nearLimit
-                ? "bg-amber-500"
-                : "bg-emerald-500",
+                ? "bg-st-warn"
+                : "bg-st-pos",
           )}
           style={{ width: `${usagePct}%` }}
         />
@@ -166,22 +166,22 @@ export const KillSwitchBanner: React.FC = () => {
 
       {/* ── Equity stats row ── */}
       <div className="flex items-center justify-between gap-4 text-[10px] font-mono">
-        <span className="flex items-center gap-1 text-slate-400">
+        <span className="flex items-center gap-1 text-ink-muted">
           <TrendingDown className="w-3 h-3" />
           DD {drawdown.toFixed(2)}% / {limit}%
         </span>
-        <span className="text-slate-400">
+        <span className="text-ink-muted">
           P&L{" "}
           <span
             className={
-              riskState.realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"
+              riskState.realizedPnl >= 0 ? "text-st-pos" : "text-st-neg"
             }
           >
             {riskState.realizedPnl >= 0 ? "+" : ""}
             {formatPairPrice(riskState.realizedPnl, "USD/USD")}
           </span>
         </span>
-        <span className="text-slate-500 hidden sm:inline">
+        <span className="text-ink-faint hidden sm:inline">
           {t("tradesLabel")} {riskState.tradesToday} · W{riskState.winsToday}/L
           {riskState.lossesToday}
         </span>
@@ -189,7 +189,7 @@ export const KillSwitchBanner: React.FC = () => {
 
       {/* ── Lock reason ── */}
       {isKillSwitchLocked && killSwitchReason && (
-        <p className="text-[10px] text-rose-300/90 font-mono leading-relaxed">
+        <p className="text-[10px] text-st-neg/90 font-mono leading-relaxed">
           {killSwitchReason}
         </p>
       )}

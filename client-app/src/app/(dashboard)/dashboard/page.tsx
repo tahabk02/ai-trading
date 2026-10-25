@@ -13,7 +13,7 @@ import { MarketTerminal } from "@/components/terminal/market-terminal";
  */
 export default function DashboardPage() {
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-obsidian text-slate-300 font-sans selection:bg-emerald-500/30 transition-colors duration-200">
+    <div className="flex h-screen w-full overflow-hidden bg-app text-ink-muted font-sans selection:bg-primary/30 transition-colors duration-200">
       <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden">
         <Header />
         <main className="flex-1 min-h-0 overflow-hidden">

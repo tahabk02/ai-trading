@@ -159,6 +159,7 @@ class SignalGenerator:
             order_book_imbalance=data.get("order_book_imbalance"),
             bid=data.get("bid"),
             ask=data.get("ask"),
+            symbol=symbol,
         )
 
         # The quant matrix ALWAYS resolves BUY/SELL (never HOLD). Keep the true
@@ -356,7 +357,10 @@ def generate_unbiased_prediction(
         )
 
     verdict = evaluate_quant_matrix(
-        candles=candles, live_price=live_price, timeframe=timeframe
+        candles=candles,
+        live_price=live_price,
+        timeframe=timeframe,
+        symbol=symbol,
     )
 
     closes = [float(c["close"]) for c in candles]

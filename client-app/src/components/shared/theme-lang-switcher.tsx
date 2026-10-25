@@ -1,13 +1,14 @@
 "use client";
 
 /**
- * theme-lang-switcher.tsx — HEADER CONTROLS FOR THE THEME & LANGUAGE ENGINES
+ * theme-lang-switcher.tsx - HEADER CONTROLS FOR THE THEME & LANGUAGE ENGINES
  *
- *  • Theme: a one-tap Dark ⇄ Light toggle. The choice persists under
- *    THEME_STORAGE_KEY and drives the `<html class>` owned by useTheme. Every
- *    color resolves through the design-system theme object in globals.css.
- *  • Language: EN / FR / AR / ES segmented control. Selecting Arabic flips the
- *    entire terminal to RTL via the <html dir="rtl"> attribute.
+ * Theme: a one-tap Dark / Light toggle. The choice persists under
+ * THEME_STORAGE_KEY and drives the `<html class>` owned by useTheme. Every
+ * color resolves through the design-system theme object in globals.css.
+ *
+ * Language: EN / FR / AR / ES segmented control. Selecting Arabic flips the
+ * entire terminal to RTL via the <html dir="rtl"> attribute.
  */
 
 import React from "react";
@@ -17,15 +18,13 @@ import { useLangContext } from "@/hooks/useLangContext";
 import type { Lang } from "@/utils/i18n";
 import { cn } from "@/utils/cn";
 
-// ── THEME TOGGLE (dark ⇄ light, persisted) ──
 export const ThemeSwitcher: React.FC = () => {
   const { mounted, resolvedTheme, toggleTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
 
-  // Render a stable placeholder until hydration to avoid SSR mismatch.
   if (!mounted) {
     return (
-      <div className="w-8 h-8 rounded-lg border border-line flex items-center justify-center opacity-40">
+      <div className="w-10 h-10 sm:w-9 sm:h-9 rounded-control border border-line bg-elevated flex items-center justify-center opacity-40">
         <Moon className="w-3.5 h-3.5" />
       </div>
     );
@@ -39,26 +38,25 @@ export const ThemeSwitcher: React.FC = () => {
       aria-pressed={!isDark}
       title={isDark ? "Light theme" : "Dark theme"}
       className={cn(
-        "w-8 h-8 rounded-lg border flex items-center justify-center transition-all duration-150 active:scale-95",
+        "w-10 h-10 sm:w-9 sm:h-9 rounded-control border flex items-center justify-center transition-all duration-150 active:scale-95",
         "border-line text-ink-muted hover:text-ink hover:border-line-strong",
         "bg-elevated hover:bg-surface",
       )}
     >
       {isDark ? (
-        <Sun className="w-3.5 h-3.5" />
+        <Sun className="w-4 h-4" />
       ) : (
-        <Moon className="w-3.5 h-3.5" />
+        <Moon className="w-4 h-4" />
       )}
     </button>
   );
 };
 
-// ── LANGUAGE SWITCHER (EN / FR / AR / ES) ──
-const LANG_LABELS: Array<{ code: Lang; label: string }> = [
-  { code: "en", label: "EN" },
-  { code: "fr", label: "FR" },
-  { code: "ar", label: "ع" },
-  { code: "es", label: "ES" },
+const LANG_LABELS: Array<{ code: Lang; label: string; title: string }> = [
+  { code: "en", label: "EN", title: "English" },
+  { code: "fr", label: "FR", title: "Français" },
+  { code: "ar", label: "AR", title: "العربية (RTL)" },
+  { code: "es", label: "ES", title: "Español" },
 ];
 
 export const LanguageSwitcher: React.FC = () => {
@@ -66,37 +64,29 @@ export const LanguageSwitcher: React.FC = () => {
 
   if (!mounted) {
     return (
-      <div className="h-8 w-[92px] rounded-lg border border-slate-700/50 bg-slate-900/60 animate-pulse" />
+      <div className="h-10 sm:h-9 w-[104px] rounded-control border border-line bg-elevated animate-pulse" />
     );
   }
 
   return (
     <div
-      className="flex items-center gap-0.5 p-0.5 rounded-lg border border-slate-700/50 bg-slate-900/60"
+      className="flex items-center gap-0.5 p-0.5 rounded-control border border-line bg-elevated"
       role="group"
       aria-label="Language selection"
     >
-      <Languages className="w-3 h-3 mx-1 text-slate-500 shrink-0" />
-      {LANG_LABELS.map(({ code, label }) => (
+      <Languages className="w-3 h-3 mx-1 text-ink-faint shrink-0" />
+      {LANG_LABELS.map(({ code, label, title }) => (
         <button
           key={code}
           type="button"
           onClick={() => setLang(code)}
           aria-pressed={lang === code}
-          title={
-            code === "en"
-              ? "English"
-              : code === "fr"
-                ? "Français"
-                : code === "ar"
-                  ? "العربية (RTL)"
-                  : "Español"
-          }
+          title={title}
           className={cn(
-            "px-1.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide transition-all",
+            "px-1.5 min-h-[32px] rounded-md text-[10px] font-bold uppercase tracking-wide transition-all",
             lang === code
-              ? "bg-blue-600 text-white shadow-sm shadow-blue-600/40"
-              : "text-slate-500 hover:text-white hover:bg-slate-800",
+              ? "bg-primary text-white shadow-sm shadow-primary/30"
+              : "text-ink-faint hover:text-ink hover:bg-surface",
           )}
         >
           {label}

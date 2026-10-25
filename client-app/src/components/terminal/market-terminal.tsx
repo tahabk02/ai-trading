@@ -59,8 +59,7 @@ export const MarketTerminal: React.FC = () => {
     refreshNow,
     setMinTier,
     toggleHideBelowThreshold,
-  } = useMarketTerminal();
-  const globalHorizon = useMarketTerminalStore(selectGlobalHorizon);
+  } = useMarketTerminal();  const globalHorizon = useMarketTerminalStore(selectGlobalHorizon);
   const assetClasses = useMarketTerminalStore(selectAssetClasses);
   const favorites = useMarketTerminalStore(selectFavorites);
   const hiddenSymbols = useMarketTerminalStore(selectHiddenSymbols);
@@ -134,30 +133,33 @@ export const MarketTerminal: React.FC = () => {
   return (
     <div className="flex flex-col h-full min-h-0 bg-term-canvas text-term-ink">
       {/* ── TERMINAL TOOLBAR ── */}
-      <nav className="border-b border-term-line bg-term-canvas/85 backdrop-blur-md sticky top-0 z-30 shrink-0">
+      <nav className="border-b border-term-line bg-term-canvas/90 backdrop-blur-md sticky top-0 z-30 shrink-0">
         <div className="max-w-full mx-auto px-3 sm:px-4 md:px-6 min-h-14 py-2 flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-term-ink font-bold text-[11px] sm:text-xs tracking-tight whitespace-nowrap">
               Market terminal
             </h2>
+            <span className="inline-flex items-center rounded-full border border-term-line bg-term-panel px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-term-ink-dim">
+              {symbols.length} pairs
+            </span>
             <div className="w-px h-4 bg-term-line hidden sm:block" />
             <div className="flex items-center gap-1.5">
               <div
                 className={cn(
-                  "w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full",
+                  "w-2 h-2 rounded-full",
                   live ? "bg-bull animate-pulse" : "bg-bear",
                 )}
               />
               <span className="num-fig text-[9px] sm:text-[10px] text-term-ink-dim uppercase tracking-tighter">
                 {live
                   ? `Streaming ${ALL_MARKET_SYMBOLS.length} pairs`
-                  : "Connecting…"}
+                  : "Connecting..."}
               </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3">
-            {/* Asset filtering is NEVER gated on feed health, tier, or tradability —
+          <div className="flex items-center justify-end gap-2 sm:gap-3 flex-wrap">
+            {/* Asset filtering is NEVER gated on feed health, tier, or tradability -
                 a disabled filter reads as "this data is unavailable". */}
             <AssetSymbolSearch />
             <AssetClassFilterPills />
@@ -177,7 +179,8 @@ export const MarketTerminal: React.FC = () => {
             />
             <button
               onClick={() => refreshNow()}
-              className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-chip border border-term-line text-term-ink-dim hover:text-term-ink hover:border-term-ink-faint cursor-pointer transition-[transform,background-color,color] duration-75 active:scale-90 whitespace-nowrap"
+              aria-label="Refresh market terminal"
+              className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider min-h-[32px] px-3 rounded-control border border-term-line bg-term-panel text-term-ink-dim hover:text-term-ink hover:border-term-gold/50 cursor-pointer transition-colors duration-150 active:scale-95 whitespace-nowrap"
             >
               Refresh
             </button>
@@ -186,8 +189,8 @@ export const MarketTerminal: React.FC = () => {
       </nav>
 
       {/* ── Grid ── */}
-      <main className="flex-1 p-3 sm:p-4 md:p-5 overflow-y-auto custom-scrollbar min-h-0">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
+      <main className="flex-1 p-3 sm:p-4 md:p-6 overflow-y-auto custom-scrollbar min-h-0">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-8">
           {symbols.map((sym) => (
             <AssetCard
               key={sym}
@@ -197,10 +200,10 @@ export const MarketTerminal: React.FC = () => {
           ))}
         </div>
         <p className="mt-4 text-center text-[8px] text-term-ink-faint num-fig uppercase tracking-widest">
-          All {ALL_MARKET_SYMBOLS.length} · OTC 32 · Real 10 · Crypto 2 —
-          live micro-quant verdicts · 60% definitive gate · Conf bar{" "}
-          {minConfidencePct.toFixed(1)}% ({minTier} floor) · {symbols.length} shown
-          {hiddenCount > 0 ? ` · ${hiddenCount} below bar hidden` : ""}
+          All {ALL_MARKET_SYMBOLS.length} - OTC 32 - Real 10 - Crypto 2 -
+          live micro-quant verdicts - 60% definitive gate - Conf bar{" "}
+          {minConfidencePct.toFixed(1)}% ({minTier} floor) - {symbols.length} shown
+          {hiddenCount > 0 ? ` - ${hiddenCount} below bar hidden` : ""}
         </p>
       </main>
     </div>

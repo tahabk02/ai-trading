@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useMemo, useState, useEffect } from "react";
 import { useTradingStore } from "@/store/useTradingStore";
@@ -226,36 +226,36 @@ export const AIExplanation: React.FC = () => {
     if (atr !== null && currentPrice > 0) {
       const atrPct = (atr / currentPrice) * 100;
       if (atrPct > 2)
-        return { label: "High", color: "text-rose-400", bg: "bg-rose-500/20" };
+        return { label: "High", color: "text-st-neg", bg: "bg-st-neg/20" };
       if (atrPct > 1)
         return {
           label: "Medium",
-          color: "text-amber-400",
-          bg: "bg-amber-500/20",
+          color: "text-st-warn",
+          bg: "bg-st-warn/20",
         };
       return {
         label: "Low",
-        color: "text-emerald-400",
-        bg: "bg-emerald-500/20",
+        color: "text-st-pos",
+        bg: "bg-st-pos/20",
       };
     }
-    return { label: "—", color: "text-slate-400", bg: "bg-slate-500/20" };
+    return { label: "—", color: "text-ink-muted", bg: "bg-slate-500/20" };
   }, [atr, currentPrice]);
 
   // ── SSR/CSR HYDRATION GUARD ──
   // All hooks called above. Early return HERE is safe.
   if (!isMounted) {
     return (
-      <div className="bg-obsidian-900/60 border border-slate-800/80 rounded-2xl p-5 animate-pulse" />
+      <div className="bg-surface border border-line rounded-card p-5 animate-pulse" />
     );
   }
 
   if (!predictionData) {
     return (
-      <div className="bg-obsidian-900/60 border border-slate-800/80 rounded-2xl p-5 backdrop-blur-sm">
+      <div className="bg-surface border border-line rounded-card p-5 backdrop-blur-sm">
         <div className="flex items-center gap-2 mb-4">
-          <Brain className="w-4 h-4 text-blue-400" />
-          <h3 className="text-white font-bold text-xs uppercase tracking-wider">
+          <Brain className="w-4 h-4 text-primary" />
+          <h3 className="text-ink font-bold text-xs uppercase tracking-wider">
             AI Analysis
           </h3>
         </div>
@@ -265,27 +265,27 @@ export const AIExplanation: React.FC = () => {
         {/* recoverable 503 / live-quote timeout is NOT an outage: it shows the */}
         {/* calm waiting banner while the store re-polls with backoff. */}
         {quoteStreamWaiting ? (
-          <div className="py-4 px-3 bg-amber-500/10 border border-amber-800/40 rounded-lg">
-            <p className="text-[10px] text-amber-300 font-black uppercase tracking-wider mb-1 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+          <div className="py-4 px-3 bg-st-warn/10 border border-st-warn/30 rounded-lg">
+            <p className="text-[10px] text-st-warn font-black uppercase tracking-wider mb-1 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse" />
               Live Asset Stream
             </p>
-            <p className="text-[11px] text-amber-300/90 font-mono break-words">
+            <p className="text-[11px] text-st-warn/90 font-mono break-words">
               Waiting for live asset stream...
             </p>
           </div>
         ) : engineError ? (
-          <div className="py-4 px-3 bg-rose-500/10 border border-rose-800/50 rounded-lg">
-            <p className="text-[10px] text-rose-300 font-black uppercase tracking-wider mb-1 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+          <div className="py-4 px-3 bg-st-neg/10 border border-st-neg/30 rounded-lg">
+            <p className="text-[10px] text-st-neg font-black uppercase tracking-wider mb-1 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-st-neg animate-pulse" />
               AI Engine Unavailable
             </p>
-            <p className="text-[11px] text-rose-400 font-mono break-words">
+            <p className="text-[11px] text-st-neg font-mono break-words">
               {engineError}
             </p>
           </div>
         ) : (
-          <p className="text-slate-500 text-xs font-mono text-center py-4">
+          <p className="text-ink-faint text-xs font-mono text-center py-4">
             Awaiting prediction data for analysis...
           </p>
         )}
@@ -318,12 +318,12 @@ export const AIExplanation: React.FC = () => {
     !seeded && (signal === "BUY" || signal === "SELL");
 
   return (
-    <div className="bg-obsidian-900/60 border border-slate-800/80 rounded-2xl p-5 backdrop-blur-sm">
+    <div className="bg-surface border border-line rounded-card p-5 backdrop-blur-sm">
       {/* ── Header ── */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <Brain className="w-4 h-4 text-blue-400" />
-          <h3 className="text-white font-bold text-xs uppercase tracking-wider">
+          <Brain className="w-4 h-4 text-primary" />
+          <h3 className="text-ink font-bold text-xs uppercase tracking-wider">
             AI Analysis
           </h3>
         </div>
@@ -332,9 +332,9 @@ export const AIExplanation: React.FC = () => {
             "text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
             executableSign
               ? signal === "BUY"
-                ? "bg-emerald-500/20 text-emerald-400"
-                : "bg-rose-500/20 text-rose-400"
-              : "bg-slate-500/20 text-slate-300",
+                ? "bg-st-pos/20 text-st-pos"
+                : "bg-st-neg/20 text-st-neg"
+              : "bg-elevated text-ink-muted",
           )}
         >
           {signal === "BUY"
@@ -357,7 +357,7 @@ export const AIExplanation: React.FC = () => {
           <span
             data-testid="ai-verdict-seed-marker"
             title="In-store snapshot — non-executable until a fresh evaluation lands"
-            className="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-amber-500/15 text-amber-400 border border-amber-500/40"
+            className="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-st-warn/15 text-st-warn border border-st-warn/30"
           >
             <Clock className="w-3 h-3" />
             Seeded · {seededAgeSec}s
@@ -368,15 +368,15 @@ export const AIExplanation: React.FC = () => {
       {/* ── Signal + Strategy Book Agreement Bar ── */}
       <div className="mb-4">
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
+          <span className="text-[10px] text-ink-faint font-mono uppercase tracking-wider">
             Strategy Book Agreement
           </span>
           <span
             className={cn(
               "text-sm font-black font-mono",
               signal === "BUY" || signal === "SELL"
-                ? "text-emerald-400"
-                : "text-slate-400",
+                ? "text-st-pos"
+                : "text-ink-muted",
             )}
           >
             {confidenceStr}%
@@ -388,7 +388,7 @@ export const AIExplanation: React.FC = () => {
             className={cn(
               "h-full rounded-full transition-all duration-500",
               signal === "BUY" || signal === "SELL"
-                ? "bg-emerald-500"
+                ? "bg-st-pos"
                 : "bg-slate-600",
             )}
             style={{ width: `${confidenceNum}%` }}
@@ -403,8 +403,8 @@ export const AIExplanation: React.FC = () => {
       {/* ── Reasoning List ── */}
       <div className="mb-4">
         <div className="flex items-center gap-1.5 mb-2">
-          <Activity className="w-3 h-3 text-slate-400" />
-          <span className="text-[9px] text-slate-500 uppercase font-bold tracking-wider">
+          <Activity className="w-3 h-3 text-ink-muted" />
+          <span className="text-[9px] text-ink-faint uppercase font-bold tracking-wider">
             Technical Reasoning
           </span>
         </div>
@@ -413,15 +413,15 @@ export const AIExplanation: React.FC = () => {
             {reasoning.map((reason, i) => (
               <li
                 key={i}
-                className="flex items-start gap-2 text-[11px] text-slate-300 font-mono leading-relaxed"
+                className="flex items-start gap-2 text-[11px] text-ink-muted font-mono leading-relaxed"
               >
-                <span className="text-blue-400 mt-0.5 shrink-0">→</span>
+                <span className="text-primary mt-0.5 shrink-0">→</span>
                 <span>{reason}</span>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-slate-600 text-xs font-mono">
+          <p className="text-ink-faint text-xs font-mono">
             Analyzing technical indicators...
           </p>
         )}
@@ -458,33 +458,33 @@ export const AIExplanation: React.FC = () => {
       </div>
 
       {/* ── Key Levels ── */}
-      <div className="bg-black/30 rounded-xl border border-slate-800/40 p-3">
-        <span className="text-[9px] text-slate-600 uppercase font-bold tracking-wider block mb-2">
+      <div className="bg-well rounded-card border border-line p-3">
+        <span className="text-[9px] text-ink-faint uppercase font-bold tracking-wider block mb-2">
           Key Levels
         </span>
         <div className="grid grid-cols-3 gap-2 text-center">
           <div>
-            <p className="text-[8px] text-slate-600 uppercase font-mono">
+            <p className="text-[8px] text-ink-faint uppercase font-mono">
               Entry
             </p>
-            <p className="text-xs font-bold font-mono text-white">
+            <p className="text-xs font-bold font-mono text-ink">
               {currentPrice > 0
                 ? `$${formatPairPrice(currentPrice, activeSymbol)}`
                 : "—"}
             </p>
           </div>
           <div>
-            <p className="text-[8px] text-slate-600 uppercase font-mono">
+            <p className="text-[8px] text-ink-faint uppercase font-mono">
               Target
             </p>
             <p
               className={cn(
                 "text-xs font-bold font-mono",
                 signal === "BUY"
-                  ? "text-emerald-400"
+                  ? "text-st-pos"
                   : signal === "SELL"
-                    ? "text-rose-400"
-                    : "text-slate-400",
+                    ? "text-st-neg"
+                    : "text-ink-muted",
               )}
             >
               {predictionData.target_price > 0
@@ -498,17 +498,17 @@ export const AIExplanation: React.FC = () => {
           {/* from the backend risk engine; until it exposes one we render */}
           {/* an honest em-dash — never a fabricated price. */}
           <div>
-            <p className="text-[8px] text-slate-600 uppercase font-mono">
+            <p className="text-[8px] text-ink-faint uppercase font-mono">
               Stop
             </p>
-            <p className="text-xs font-bold font-mono text-slate-400">—</p>
+            <p className="text-xs font-bold font-mono text-ink-muted">—</p>
           </div>
         </div>
       </div>
 
       {/* ── Footer ── */}
-      <div className="mt-3 pt-3 border-t border-slate-800/40">
-        <div className="flex items-center justify-between text-[9px] text-slate-600 font-mono">
+      <div className="mt-3 pt-3 border-t border-line">
+        <div className="flex items-center justify-between text-[9px] text-ink-faint font-mono">
           <span className="flex items-center gap-1.5">
             {getPairLabel(activeSymbol)}
             <AssetClassBadge symbol={activeSymbol} />
@@ -532,7 +532,7 @@ function MetricItem({
   icon,
   label,
   value,
-  valueColor = "text-white",
+  valueColor = "text-ink",
   valueBg,
 }: {
   icon: React.ReactNode;
@@ -542,10 +542,10 @@ function MetricItem({
   valueBg?: string;
 }) {
   return (
-    <div className="bg-black/30 rounded-xl border border-slate-800/30 p-3 flex items-center gap-2.5">
-      <div className="text-slate-500 shrink-0">{icon}</div>
+    <div className="bg-well rounded-card border border-line p-3 flex items-center gap-2.5">
+      <div className="text-ink-faint shrink-0">{icon}</div>
       <div className="min-w-0">
-        <p className="text-[9px] text-slate-600 uppercase font-bold tracking-wider">
+        <p className="text-[9px] text-ink-faint uppercase font-bold tracking-wider">
           {label}
         </p>
         <span

@@ -71,6 +71,9 @@ from .signal_gatekeeper import (
     MIN_EXECUTABLE_TIER,
     CONFLUENCE_DISPATCH_TIER,
 )
+from .microstructure import analyze_candle_microstructure
+from .regime_adaptation import profile_market_regime
+from .bayesian_ensemble import get_ensemble
 
 EPS = 1e-12
 
@@ -508,6 +511,121 @@ class QuantVerdict:
 # THE UNBIASED QUANT MATRIX
 # ════════════════════════════════════════════════════════════════════
 
+def _predictive_diagnostics(
+    *,
+    symbol: Optional[str],
+    candles: list,
+    spot: float,
+    bid: Optional[float],
+    ask: Optional[float],
+    factors: Dict[str, float],
+    order_book_imbalance: Optional[float] = None,
+    event_times: Optional[list] = None,
+) -> Dict[str, Any]:
+    """Build the additive microstructure / regime / Bayesian diagnostic layer.
+
+    This function is intentionally fail-soft: the authoritative confluence gate
+    has already produced a verdict, so a bug in the DIAGNOSTIC layer must not
+    destroy a valid signal. On failure the block is reported as unavailable
+    with the real exception type, never as fabricated numbers.
+    """
+    resolved_symbol = (symbol or "").strip().upper() or "UNKNOWN"
+    micro = analyze_candle_microstructure(
+        candles,
+        tick=spot if spot and spot > 0 else None,
+        bid_depth=None,
+        ask_depth=None,
+    )
+    regime = profile_market_regime(
+        symbol=resolved_symbol,
+        candles=candles,
+        bid=bid,
+        ask=ask,
+        event_times=event_times,
+    )
+
+    depth_imbalance = micro.get("order_flow", {}).get("depth_imbalance")
+    if depth_imbalance is None and order_book_imbalance is not None:
+        depth_imbalance = float(order_book_imbalance)
+
+    momentum = float(
+        np.mean(
+            [
+                factors.get("micro_momentum", 0.0),
+                factors.get("tick_velocity", 0.0),
+                factors.get("tick_velocity_acceleration", 0.0),
+            ]
+        )
+    )
+    liquidity = micro.get("liquidity", {})
+    sweep_score = 0.0
+    if liquidity.get("last_sweep") == "high":
+        sweep_score = -float(liquidity.get("sweep_strength", 0.0))
+    elif liquidity.get("last_sweep") == "low":
+        sweep_score = float(liquidity.get("sweep_strength", 0.0))
+    micro_score = float(
+        np.mean(
+            [
+                factors.get("bid_ask_pressure", 0.0),
+                factors.get("spread_quality", 0.0),
+                float(micro.get("sri", 0.0)),
+                sweep_score,
+            ]
+        )
+    )
+    flow = micro.get("order_flow", {})
+    flow_scores = [
+        factors.get("order_flow_imbalance", 0.0),
+        float(flow.get("aggression", 0.0)),
+    ]
+    if depth_imbalance is not None:
+        flow_scores.append(float(np.clip(depth_imbalance, -1.0, 1.0)))
+    flow_score = float(np.mean(flow_scores))
+    volatility_score = float(factors.get("volatility", 0.0))
+    regime_score = float(regime.get("directional_bias", 0.0))
+
+    regime_suppression = regime.get("suppression", {})
+    suppression_reasons = list(
+        dict.fromkeys(
+            [
+                *(regime_suppression.get("reasons") or []),
+                *(micro.get("suppression_reasons") or []),
+            ]
+        )
+    )
+    ensemble = get_ensemble().combine(
+        {
+            "momentum": momentum,
+            "microstructure": micro_score,
+            "order_flow": flow_score,
+            "volatility": volatility_score,
+            "regime": regime_score,
+        },
+        regime=str(regime.get("regime", "range")),
+        asset_class=str(regime.get("asset_class", "OTC")),
+        suppressed=bool(
+            regime_suppression.get("active", False) or micro.get("suppressed", False)
+        ),
+        suppression_reasons=suppression_reasons,
+        low_volatility=bool(micro.get("low_volatility") and micro.get("flat_zone")),
+        news_active=bool(regime.get("news", {}).get("active", False)),
+    )
+
+    return {
+        "available": True,
+        "layer": "predictive_microstructure_v1",
+        "symbol": resolved_symbol,
+        "microstructure": micro,
+        "regime": regime,
+        "ensemble": ensemble,
+        "authority": {
+            "thermal_gate_unchanged": True,
+            "ensemble_can_only_annotate": True,
+            "threshold": ensemble.get("threshold"),
+        },
+    }
+
+
 def evaluate_quant_matrix(
     candles: list,
     live_price: Optional[float] = None,
@@ -515,6 +633,8 @@ def evaluate_quant_matrix(
     order_book_imbalance: Optional[float] = None,
     bid: Optional[float] = None,
     ask: Optional[float] = None,
+    symbol: Optional[str] = None,
+    event_times: Optional[list] = None,
 ) -> QuantVerdict:
     """Score REAL market structure into an unbiased CALL/PUT/HOLD verdict.
 
@@ -930,6 +1050,30 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
             "confluence": confluence,
         },
     }
+
+    try:
+        diagnostics["predictive"] = _predictive_diagnostics(
+            symbol=symbol,
+            candles=candles,
+            spot=spot,
+            bid=bid,
+            ask=ask,
+            factors=factors,
+            order_book_imbalance=order_book_imbalance,
+            event_times=event_times,
+        )
+    except Exception as _predictive_error:  # noqa: BLE001 - diagnostics are additive
+        logger.warning(
+            "PREDICTIVE_DIAGNOSTICS_FAILED",
+            symbol=symbol,
+            error_type=type(_predictive_error).__name__,
+            error=str(_predictive_error)[:200],
+        )
+        diagnostics["predictive"] = {
+            "available": False,
+            "layer": "predictive_microstructure_v1",
+            "reason": f"diagnostics_failed: {type(_predictive_error).__name__}",
+        }
 
     return QuantVerdict(
         direction=direction,

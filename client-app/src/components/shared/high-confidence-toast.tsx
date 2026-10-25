@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 /**
  * high-confidence-toast.tsx — HIGH-PRIORITY SIGNAL NOTIFICATION UI
@@ -283,20 +283,20 @@ export const HighConfidenceToast: React.FC = () => {
       {toasts.length > 0 && (
         <div className="flex flex-col items-start gap-2">
           {isOpen && (
-            <div className="pointer-events-auto flex max-h-[min(70vh,32rem)] w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-950/80 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl animate-in slide-in-from-bottom-3 fade-in duration-300">
-              <div className="flex items-center justify-between border-b border-white/10 px-3 py-2.5">
+            <div className="pointer-events-auto flex max-h-[min(70vh,32rem)] w-full flex-col overflow-hidden rounded-card border border-line bg-surface shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl animate-in slide-in-from-bottom-3 fade-in duration-300">
+              <div className="flex items-center justify-between border-b border-line px-3 py-2.5">
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-400/15 text-amber-300">
+                  <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-st-warn/15 text-st-warn">
                     <Bell className="h-3.5 w-3.5" />
-                    <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-300 px-1 text-[9px] font-black text-slate-950">
+                    <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-st-warn px-1 text-[9px] font-black text-black">
                       {toasts.length}
                     </span>
                   </span>
                   <div className="min-w-0">
-                    <p className="truncate text-[10px] font-black uppercase tracking-[0.18em] text-slate-300">
+                    <p className="truncate text-[10px] font-black uppercase tracking-[0.18em] text-ink-muted">
                       {t("highConfidenceTitle")}
                     </p>
-                    <p className="text-[10px] font-mono text-slate-500">
+                    <p className="text-[10px] font-mono text-ink-faint">
                       {t("highConfidenceBody")}
                     </p>
                   </div>
@@ -305,7 +305,7 @@ export const HighConfidenceToast: React.FC = () => {
                   type="button"
                   onClick={() => setIsOpen(false)}
                   aria-label={t("dismiss")}
-                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
                 >
                   <ChevronDown className="h-4 w-4" />
                 </button>
@@ -319,11 +319,11 @@ export const HighConfidenceToast: React.FC = () => {
                       role="alert"
                       aria-live="assertive"
                       className={cn(
-                        "pointer-events-auto overflow-hidden rounded-xl border shadow-lg backdrop-blur-xl",
+                        "pointer-events-auto overflow-hidden rounded-card border shadow-lg backdrop-blur-xl",
                         "animate-in slide-in-from-bottom-2 fade-in duration-300",
                         isBuy
-                          ? "bg-emerald-950/85 border-emerald-500/60"
-                          : "bg-rose-950/85 border-rose-500/60",
+                          ? "bg-st-pos/10 border-st-pos/40"
+                          : "bg-st-neg/10 border-st-neg/40",
                       )}
                     >
                       {/* Priority accent bar */}
@@ -331,8 +331,8 @@ export const HighConfidenceToast: React.FC = () => {
                         className={cn(
                           "h-1 w-full",
                           isBuy
-                            ? "bg-gradient-to-r from-emerald-400 to-emerald-600"
-                            : "bg-gradient-to-r from-rose-400 to-rose-600",
+                            ? "bg-st-pos"
+                            : "bg-st-neg",
                         )}
                       />
 
@@ -344,17 +344,17 @@ export const HighConfidenceToast: React.FC = () => {
                               className={cn(
                                 "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
                                 isBuy
-                                  ? "bg-emerald-500/20 text-emerald-300"
-                                  : "bg-rose-500/20 text-rose-300",
+                                  ? "bg-st-pos/20 text-st-pos"
+                                  : "bg-st-neg/20 text-st-neg",
                               )}
                             >
                               <Zap className="w-4 h-4" />
                             </span>
                             <div className="min-w-0">
-                              <p className="text-[10px] font-black uppercase tracking-widest text-slate-300 truncate">
+                              <p className="text-[10px] font-black uppercase tracking-widest text-ink-muted truncate">
                                 {t("highConfidenceTitle")}
                               </p>
-                              <p className="text-xs font-bold text-white font-mono truncate">
+                              <p className="text-xs font-bold text-ink font-mono truncate">
                                 {toast.symbol} · {toast.timeframe.toUpperCase()}
                               </p>
                             </div>
@@ -364,7 +364,7 @@ export const HighConfidenceToast: React.FC = () => {
                             type="button"
                             onClick={() => dismiss(toast.id)}
                             aria-label={t("dismiss")}
-                            className="shrink-0 h-6 w-6 inline-flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                            className="shrink-0 h-6 w-6 inline-flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-elevated transition-colors"
                           >
                             <X className="w-3.5 h-3.5" />
                           </button>
@@ -377,8 +377,8 @@ export const HighConfidenceToast: React.FC = () => {
                               className={cn(
                                 "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-black uppercase",
                                 isBuy
-                                  ? "bg-emerald-500/20 text-emerald-300"
-                                  : "bg-rose-500/20 text-rose-300",
+                                  ? "bg-st-pos/20 text-st-pos"
+                                  : "bg-st-neg/20 text-st-neg",
                               )}
                             >
                               {isBuy ? (
@@ -388,23 +388,23 @@ export const HighConfidenceToast: React.FC = () => {
                               )}
                               {isBuy ? "BUY" : "SELL"}
                             </span>
-                            <span className="text-lg font-black text-white font-mono tabular-nums">
+                            <span className="text-lg font-black text-ink font-mono tabular-nums">
                               {toast.confidence.toFixed(1)}%
                             </span>
                           </div>
 
                           <div className="text-right font-mono text-[11px] leading-tight">
-                            <p className="text-slate-400">
+                            <p className="text-ink-muted">
                               @{" "}
-                              <span className="text-slate-200">
+                              <span className="text-ink">
                                 {formatPairPrice(toast.price, toast.symbol)}
                               </span>
                             </p>
-                            <p className="text-slate-400">
+                            <p className="text-ink-muted">
                               →{" "}
                               <span
                                 className={cn(
-                                  isBuy ? "text-emerald-300" : "text-rose-300",
+                                  isBuy ? "text-st-pos" : "text-st-neg",
                                 )}
                               >
                                 {formatPairPrice(
@@ -416,7 +416,7 @@ export const HighConfidenceToast: React.FC = () => {
                           </div>
                         </div>
 
-                        <p className="mt-2 text-[10px] text-slate-400 uppercase tracking-wider">
+                        <p className="mt-2 text-[10px] text-ink-muted uppercase tracking-wider">
                           {t("highConfidenceBody")}
                         </p>
                       </div>
@@ -431,21 +431,21 @@ export const HighConfidenceToast: React.FC = () => {
             onClick={() => setIsOpen((open) => !open)}
             aria-expanded={isOpen}
             aria-label={t("highConfidenceTitle")}
-            className="pointer-events-auto inline-flex min-h-10 items-center gap-2 rounded-full border border-white/10 bg-slate-950/85 px-3 py-2 text-left shadow-[0_12px_35px_rgba(0,0,0,0.35)] backdrop-blur-xl transition-all duration-300 hover:border-amber-300/40 hover:bg-slate-900/95 animate-in slide-in-from-bottom-3 fade-in"
+            className="pointer-events-auto inline-flex min-h-10 items-center gap-2 rounded-full border border-line bg-surface px-3 py-2 text-left shadow-[0_12px_35px_rgba(0,0,0,0.35)] backdrop-blur-xl transition-all duration-300 hover:border-st-warn/40 hover:bg-elevated animate-in slide-in-from-bottom-3 fade-in"
           >
-            <span className="relative flex h-6 w-6 items-center justify-center rounded-full bg-amber-400/15 text-amber-300">
+            <span className="relative flex h-6 w-6 items-center justify-center rounded-full bg-st-warn/15 text-st-warn">
               <Bell className="h-3.5 w-3.5" />
-              <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-300 px-0.5 text-[8px] font-black text-slate-950">
+              <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-st-warn px-0.5 text-[8px] font-black text-black">
                 {toasts.length}
               </span>
             </span>
-            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-300">
+            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-ink-muted">
               {isOpen ? "Hide signals" : "Signal center"}
             </span>
             {isOpen ? (
-              <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+              <ChevronDown className="h-3.5 w-3.5 text-ink-faint" />
             ) : (
-              <ChevronUp className="h-3.5 w-3.5 text-slate-500" />
+              <ChevronUp className="h-3.5 w-3.5 text-ink-faint" />
             )}
           </button>
         </div>

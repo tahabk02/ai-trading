@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React from "react";
 
@@ -64,18 +64,18 @@ export class ErrorBoundary extends React.Component<
       return (
         <div
           role="alert"
-          className="flex flex-col items-center justify-center gap-2 min-h-[160px] w-full rounded-xl border border-rose-600/40 bg-rose-950/20 p-4 text-center"
+          className="flex flex-col items-center justify-center gap-2 min-h-[160px] w-full rounded-card border border-st-neg/40 bg-st-neg/10 p-4 text-center"
         >
-          <p className="text-[11px] font-mono text-rose-300 uppercase tracking-widest">
+          <p className="text-[11px] font-mono text-st-neg uppercase tracking-widest">
             This panel could not be rendered
           </p>
-          <p className="text-[10px] font-mono text-slate-400 max-w-sm break-words">
+          <p className="text-[10px] font-mono text-ink-muted max-w-sm break-words">
             {this.state.error?.message ?? "Unknown render error"}
           </p>
           <button
             type="button"
             onClick={() => this.setState({ hasError: false, error: null })}
-            className="mt-2 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold uppercase tracking-wider"
+            className="mt-2 px-3 py-1.5 rounded-lg bg-st-neg hover:brightness-110 text-white text-[10px] font-bold uppercase tracking-wider"
           >
             Retry
           </button>

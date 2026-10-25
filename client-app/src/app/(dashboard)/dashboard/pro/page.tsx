@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { Suspense, useEffect, useCallback, useRef, useState } from "react";
 import dynamic from "next/dynamic";
@@ -29,9 +29,9 @@ const FinancialChart = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="w-full h-full min-h-[300px] rounded-xl border border-slate-800 bg-obsidian flex flex-col items-center justify-center gap-2">
-        <div className="w-8 h-8 rounded-full border-2 border-slate-600/60 border-t-blue-400 animate-spin" />
-        <p className="text-xs font-mono text-slate-400 uppercase tracking-widest">
+      <div className="w-full h-full min-h-[300px] rounded-card border border-line bg-surface flex flex-col items-center justify-center gap-2">
+        <div className="w-8 h-8 rounded-full border-2 border-line-strong border-t-primary animate-spin" />
+        <p className="text-xs font-mono text-ink-muted uppercase tracking-widest">
           Loading Live Chart
         </p>
       </div>
@@ -72,12 +72,12 @@ export default function ProTerminalPage() {
 
 function ProTerminalShell() {
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-obsidian text-slate-300 font-sans selection:bg-emerald-500/30 transition-colors duration-200">
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-obsidian text-slate-300 font-sans selection:bg-primary/30 transition-colors duration-200">
       <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden">
         <Header />
         <div className="flex-1 min-h-[300px] rounded-xl bg-obsidian flex items-center justify-center gap-2">
-          <div className="w-8 h-8 rounded-full border-2 border-slate-600/60 border-t-blue-400 animate-spin" />
-          <p className="text-xs font-mono text-slate-400 uppercase tracking-widest">
+          <div className="w-8 h-8 rounded-full border-2 border-line-strong border-t-primary animate-spin" />
+          <p className="text-xs font-mono text-ink-muted uppercase tracking-widest">
             Opening Terminal…
           </p>
         </div>
@@ -306,10 +306,10 @@ function ProTerminalInner() {
   const enginePending =
     socketStatus === "connecting" || socketStatus === "reconnecting";
   const engineColor = engineLive
-    ? "bg-emerald-500"
+    ? "bg-st-pos"
     : enginePending
-      ? "bg-amber-400"
-      : "bg-rose-500";
+      ? "bg-st-warn"
+      : "bg-st-neg";
   const engineLabel = engineLive
     ? "ACTIVE"
     : socketStatus === "reconnecting"
@@ -321,27 +321,27 @@ function ProTerminalInner() {
     enginePending && lastError ? lastError : undefined;
 
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-obsidian text-slate-300 font-sans selection:bg-emerald-500/30 transition-colors duration-200">
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-obsidian text-slate-300 font-sans selection:bg-primary/30 transition-colors duration-200">
 
       <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden">
         {/* ═══ UNIFIED TOP NAVBAR (logo, links, status, theme, language) ═══ */}
         <Header />
 
         {/* ═══ TERMINAL TOOLBAR (engine status + symbol submit + sync) ═══ */}
-        <nav className="border-b border-slate-800/80 bg-obsidian/80 backdrop-blur-md sticky top-0 z-30 shrink-0">
+        <nav className="border-b border-line bg-obsidian/80 backdrop-blur-md sticky top-0 z-30 shrink-0">
           <div className="max-w-full mx-auto px-3 sm:px-4 md:px-6 h-14 sm:h-16 flex items-center justify-between">
             <div className="flex items-center gap-2 sm:gap-4">
-              <h2 className="text-slate-100 font-bold text-[10px] sm:text-xs md:text-sm tracking-widest uppercase hidden xs:inline">
+              <h2 className="text-ink font-bold text-[10px] sm:text-xs md:text-sm tracking-widest uppercase hidden xs:inline">
                 Pro Terminal
               </h2>
-              <div className="w-px h-4 bg-slate-800 hidden xs:block" />
+              <div className="w-px h-4 bg-line hidden xs:block" />
               <div className="flex items-center gap-1.5 sm:gap-2">
                 <div
                   className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${engineColor} ${enginePending ? "animate-pulse" : ""}`}
                   title={statusDetail}
                 />
                 <span
-                  className="text-[9px] sm:text-[10px] font-mono text-slate-500 uppercase tracking-tighter"
+                  className="text-[9px] sm:text-[10px] font-mono text-ink-faint uppercase tracking-tighter"
                   title={statusDetail}
                 >
                   <span className="hidden xs:inline">
@@ -365,12 +365,12 @@ function ProTerminalInner() {
                   placeholder="BTC/USDT"
                   value={selectedSymbol}
                   onChange={(e) => setSelectedSymbol(e.target.value)}
-                  className="w-20 sm:w-24 md:w-28 bg-obsidian-950/80 border border-slate-700 rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs text-slate-100 font-mono placeholder-slate-500 focus:outline-none focus:border-emerald-500 min-h-[36px] sm:min-h-[40px]"
+                  className="w-20 sm:w-24 md:w-28 bg-well border border-line-strong rounded-control px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs text-ink font-mono placeholder-ink-faint focus:outline-none focus:border-primary min-h-[36px] sm:min-h-[40px]"
                 />
                 <button
                   type="submit"
                   disabled={predictionLoading}
-                  className="text-[10px] bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-bold px-2 sm:px-3 py-1.5 rounded-lg transition-all min-h-[36px] sm:min-h-[40px]"
+                  className="text-[10px] bg-primary hover:bg-brand-hover disabled:bg-slate-700 text-white font-bold px-2 sm:px-3 py-1.5 rounded-control transition-all min-h-[36px] sm:min-h-[40px]"
                 >
                   {predictionLoading ? (
                     <span className="flex items-center gap-1">
@@ -405,8 +405,8 @@ function ProTerminalInner() {
                 className={
                   "text-[10px] font-bold px-2 sm:px-3 py-1.5 rounded-lg transition-all min-h-[36px] sm:min-h-[40px] shrink-0 " +
                   (focusMode
-                    ? "bg-emerald-600 text-white hover:bg-emerald-500"
-                    : "bg-obsidian-950/80 border border-slate-700 text-slate-300 hover:border-emerald-500/60 hover:text-emerald-400")
+                    ? "bg-primary text-white hover:bg-brand-hover"
+                    : "bg-well border border-line-strong text-ink-muted hover:border-primary hover:text-primary")
                 }
               >
                 <span className="hidden xs:inline">
@@ -424,11 +424,11 @@ function ProTerminalInner() {
                   title={statusDetail}
                 >
                   {engineLive ? (
-                    <span className="text-emerald-400">Sync</span>
+                    <span className="text-st-pos">Sync</span>
                   ) : enginePending ? (
-                    <span className="text-amber-400">Syncing</span>
+                    <span className="text-st-warn">Syncing</span>
                   ) : (
-                    <span className="text-rose-400">Err</span>
+                    <span className="text-st-neg">Err</span>
                   )}
                 </span>
               </div>
@@ -509,7 +509,7 @@ function ProTerminalInner() {
                 fallback={
                   <>
                     <div className="min-h-[44px] w-full tp-card animate-pulse" />
-                    <div className="w-full rounded-xl border border-[var(--tp-border)] bg-[var(--tp-surface)] animate-pulse h-[320px] xl:h-full min-h-0" />
+                    <div className="w-full rounded-card border border-line bg-surface animate-pulse h-[320px] xl:h-full min-h-0" />
                     {/* Reserves the matrix's footprint so the swap on hydrate
                         does not shift the scrollport. Must mirror the real
                         component's own height exactly (clamp 200-300px,
@@ -517,7 +517,7 @@ function ProTerminalInner() {
                     {!focusMode && (
                       <div
                         data-testid="neural-matrix-fallback"
-                        className="shrink-0 w-full min-w-0 h-[clamp(200px,24vh,300px)] rounded-xl border border-[var(--tp-border)] bg-[var(--tp-surface)] animate-pulse"
+                        className="shrink-0 w-full min-w-0 h-[clamp(200px,24vh,300px)] rounded-card border border-line bg-surface animate-pulse"
                       />
                     )}
                   </>

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React from "react";
 import { TrendingUp, TrendingDown, Activity } from "lucide-react";
@@ -321,7 +321,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
             e.stopPropagation(); // Bash ma-t-dirch double trigger m3a div
             handleViewChart();
           }}
-          className="shrink-0 text-[10px] sm:text-xs bg-blue-600 hover:bg-blue-500 text-white font-bold py-1.5 sm:py-2 px-2.5 sm:px-3 rounded-md transition-colors min-h-[36px] sm:min-h-[40px]"
+          className="shrink-0 text-[10px] sm:text-xs bg-primary hover:bg-brand-hover text-white font-bold py-1.5 sm:py-2 px-2.5 sm:px-3 rounded-md transition-colors min-h-[36px] sm:min-h-[40px]"
         >
           View Chart
         </button>

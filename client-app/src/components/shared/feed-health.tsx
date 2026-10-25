@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { getLastPriceReceiveAtMs } from "@/store/useTradingStore";
 import { useFeedHealth, type FeedFreshness } from "@/hooks/useFeedHealth";

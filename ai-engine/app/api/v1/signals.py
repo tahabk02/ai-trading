@@ -810,6 +810,8 @@ async def tick_signal(data: Dict[str, Any]):
             ask=ask,
             bid_depth=bid_depth,
             ask_depth=ask_depth,
+            symbol=symbol,
+            event_times=data.get("event_times"),
         )
 
         # Genuine ATR from the verdict's real Wilder ATR diagnostics (robust on
@@ -1185,10 +1187,11 @@ async def predict_signal(data: PredictRequest):
         )
 
         try:
-            # Positional order matches evaluate_live_tick_signal's signature:
-            # (prices, tick, highs, lows, timeframe, bid, ask). Passing symbol
-            # or the dict list here (as an older mapping did) blew up as
-            # float('EUR/USD') — this now feeds REAL closes/highs/lows arrays.
+            # Positional order matches evaluate_live_tick_signal's full
+            # signature: (prices, tick, highs, lows, timeframe, bid, ask,
+            # bid_depth, ask_depth, symbol, event_times). Passing symbol or the
+            # dict list in the wrong slot blew up as float('EUR/USD') — this
+            # feeds REAL closes/highs/lows plus the explicit metadata tail.
             #
             # run_inference (not raw run_in_executor) so this structural step
             # runs on the INFERENCE pool with a bounded admission wait: an RF
@@ -1202,6 +1205,10 @@ async def predict_signal(data: PredictRequest):
                 timeframe,
                 bid,
                 ask,
+                None,   # bid_depth (not supplied on the candle fast path)
+                None,   # ask_depth
+                symbol,
+                data.event_times,
             )
         except InferenceAdmissionTimeout as e:
             logger.error(
@@ -1301,9 +1308,12 @@ async def predict_signal(data: PredictRequest):
                 [float(c["high"]) for c in candles_raw[-30:]],
                 [float(c["low"]) for c in candles_raw[-30:]],
             ),
-        "market_waiting": market_waiting,
-        "waiting_reason": getattr(verdict, "waiting_reason", None) if market_waiting else None,
-        "waiting_detail": getattr(verdict, "waiting_detail", None) if market_waiting else None,
+            "factors": verdict.factors,
+            "diagnostics": verdict.diagnostics,
+            "predictive": verdict.diagnostics.get("predictive", {}),
+            "market_waiting": market_waiting,
+            "waiting_reason": getattr(verdict, "waiting_reason", None) if market_waiting else None,
+            "waiting_detail": getattr(verdict, "waiting_detail", None) if market_waiting else None,
             "regime": _surface_regime_gate([float(c["close"]) for c in candles_raw]).get("regime"),
             **_strict_execution_surface(
                 symbol=symbol,
@@ -1385,6 +1395,8 @@ async def predict_signal(data: PredictRequest):
             None,   # order_book_imbalance (not forwarded)
             bid,
             ask,
+            symbol,
+            data.event_times,
         )
     except InferenceAdmissionTimeout as e:
         logger.error(
@@ -1612,6 +1624,7 @@ async def predict_signal(data: PredictRequest):
         },
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
+        "predictive": verdict.diagnostics.get("predictive", {}),
         **quality_fields,
         "market_waiting": market_waiting,
         "waiting_reason": verdict.waiting_reason if market_waiting else None,

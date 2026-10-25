@@ -356,6 +356,7 @@ class FinancialAnalysisService:
                 order_book_imbalance=order_book_imbalance,
                 bid=bid,
                 ask=ask,
+                symbol=symbol,
             )
             resolved_direction = resolved.direction
             resolved_confidence = float(resolved.confidence)

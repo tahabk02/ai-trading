@@ -71,6 +71,39 @@ describe("[374] chart timeframe selector", () => {
   });
 });
 
+describe("[474] timeframe dropdown disclosure", () => {
+  beforeEach(() => resetAll());
+
+  it("collapses the whole frame ladder behind one compact trigger", () => {
+    render(<TimeframeSelector value="H1" onChange={vi.fn()} />);
+    const trigger = screen.getByTestId("tf-trigger");
+    const menu = screen.getByTestId("tf-selector");
+
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.textContent).toContain("H1");
+    expect(menu.className).toContain("invisible");
+  });
+
+  it("opens on the trigger and closes after a pick without losing state", () => {
+    const onChange = vi.fn();
+    render(<TimeframeSelector value="M1" onChange={onChange} />);
+    const trigger = screen.getByTestId("tf-trigger");
+    const menu = screen.getByTestId("tf-selector");
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(menu.className).not.toContain("invisible");
+
+    fireEvent.click(screen.getByTestId("tf-option-M15"));
+    expect(onChange).toHaveBeenCalledWith("M15");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(menu.className).toContain("invisible");
+    expect(
+      screen.getByTestId("tf-option-M15").getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+});
+
 describe("[376] timeframe-switch regression", () => {
   beforeEach(() => resetAll());
 

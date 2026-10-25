@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React from "react";
 import { useRouter } from "next/navigation";
@@ -287,17 +287,17 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
       onClick={openPro}
       onKeyDown={handleCardKeyDown}
       className={cn(
-        "group relative flex flex-col rounded-cell px-2 py-1 min-w-0 select-none",
+        "group relative flex flex-col rounded-lg px-2.5 py-2 min-w-0 select-none transition-all duration-150",
         interactive
-          ? "border border-term-line bg-term-panel cursor-pointer transition-colors duration-150 hover:border-bull/40"
-          : "border border-term-line bg-term-panel/80 cursor-not-allowed",
+          ? "border border-term-line bg-term-panel cursor-pointer hover:border-primary/50 hover:shadow-lg hover:shadow-black/10"
+          : "border border-term-line bg-term-panel/70 cursor-not-allowed",
       )}
     >
       {/* ── PART 16 [66] 2px left-lead ALIGN STRIP — hover only, tradable only ── */}
       {interactive && (
         <span
           aria-hidden
-          className="absolute left-0 top-0 bottom-0 w-[2px] bg-bull opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          className="absolute left-0 top-0 bottom-0 w-[2px] bg-primary opacity-0 transition-opacity duration-150 group-hover:opacity-100"
         />
       )}
 
@@ -442,7 +442,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
             {liveBadge}
             {horizonBadge}
             <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-amber-400 bg-amber-500/10 border border-amber-500/40"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[9px] leading-none text-st-warn bg-st-warn/10 border border-st-warn/40"
               title={nonInteractiveTitle}
             >
               <Filter size={10} />
@@ -553,7 +553,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
                 "num-fig text-[8px] font-bold uppercase tracking-tight truncate",
                 cardTargetState.reason === "scored_only"
                   ? "text-gold"
-                  : "text-amber-400",
+                  : "text-st-warn",
               )}
               title={cardTargetCopy.hint}
             >
@@ -577,7 +577,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
               suppressCardNav(e);
               openPro();
             }}
-            className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-tight text-term-ink-dim hover:text-bull transition-colors shrink-0 cursor-pointer"
+            className="inline-flex items-center gap-0.5 text-[9px] font-bold uppercase tracking-tight text-term-ink-dim hover:text-primary transition-colors shrink-0 cursor-pointer"
           >
             PRO <ChevronDown size={9} />
           </button>

@@ -1,10 +1,18 @@
-"use client";
+﻿"use client";
 
 import React, { useEffect, useState, useCallback } from "react";
 import apiClient from "@/services/api";
 import { useTradingStore, startRiskPolling, stopRiskPolling } from "@/store/useTradingStore";
 import { useLangContext } from "@/hooks/useLangContext";
-import { RotateCcw, Lock } from "lucide-react";
+import {
+  RotateCcw,
+  Lock,
+  ShieldAlert,
+  TrendingDown,
+  Percent,
+  Gauge,
+  ShieldCheck,
+} from "lucide-react";
 import { Header } from "@/components/shared/header";
 import { formatNumber } from "@/utils/format";
 
@@ -144,15 +152,15 @@ export default function RiskRulesPage() {
   const getRuleIcon = (type: string) => {
     switch (type) {
       case "max_drawdown":
-        return "📉";
+        return <TrendingDown className="w-5 h-5 text-danger" />;
       case "stop_loss":
-        return "🛑";
+        return <ShieldAlert className="w-5 h-5 text-warning" />;
       case "position_size":
-        return "📐";
+        return <Percent className="w-5 h-5 text-primary" />;
       case "max_leverage":
-        return "⚡";
+        return <Gauge className="w-5 h-5 text-success" />;
       default:
-        return "🔒";
+        return <ShieldCheck className="w-5 h-5 text-ink-muted" />;
     }
   };
 
@@ -173,7 +181,7 @@ export default function RiskRulesPage() {
 
   return (
     <div
-      className="flex h-screen w-full overflow-hidden bg-obsidian text-slate-200 font-sans transition-colors duration-200"
+      className="flex h-screen w-full overflow-hidden bg-app text-ink-muted font-sans transition-colors duration-200"
       dir={rtl ? "rtl" : "ltr"}
     >
 
@@ -184,17 +192,17 @@ export default function RiskRulesPage() {
           <div className="max-w-7xl mx-auto w-full space-y-6">
             <header className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div>
-                <h1 className="text-2xl sm:text-3xl font-black tracking-wider uppercase">
-                  <span className="text-amber-500">{t("riskRules")}</span>
+                <h1 className="text-2xl sm:text-3xl font-black tracking-wider uppercase text-ink">
+                  <span className="text-warning">{t("riskRules")}</span>
                 </h1>
-                <p className="text-slate-400 mt-1 text-xs sm:text-sm max-w-2xl">
+                <p className="text-ink-muted mt-1 text-xs sm:text-sm max-w-2xl">
                   {t("riskRulesSubtitle")}
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-2.5 shadow-sm">
-                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.7)]" />
-                <span className="text-xs text-slate-300 font-bold tracking-wider uppercase">
+              <div className="flex items-center gap-2 rounded-control border border-line bg-surface px-4 py-2.5 shadow-sm">
+                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_12px_rgba(245,158,11,0.7)]" />
+                <span className="text-xs text-ink-muted font-bold tracking-wider uppercase">
                   {t("engineEnforced")}
                 </span>
               </div>
@@ -203,21 +211,21 @@ export default function RiskRulesPage() {
             {/* ═══ LIVE KILL-SWITCH / DRAWDOWN PANEL ═══ */}
             {riskState && (
               <section
-                className={`rounded-xl border p-5 shadow-sm transition-colors duration-200 ${
+                className={`tp-card p-5 transition-colors duration-200 ${
                   isKillSwitchLocked
-                    ? "bg-rose-500/10 border-rose-500/40"
-                    : "bg-slate-900/80 border-slate-800"
+                    ? "border-danger/40 bg-danger/5"
+                    : ""
                 }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                  <h2 className="text-base sm:text-lg font-bold text-slate-200 uppercase tracking-wider">
+                  <h2 className="text-base sm:text-lg font-bold text-ink uppercase tracking-wider">
                     {t("killSwitchMonitor")}
                   </h2>
                   {isKillSwitchLocked ? (
                     <button
                       type="button"
                       onClick={() => void resetKillSwitch()}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider transition-all active:scale-[0.98] shadow-sm"
+                      className="tp-btn tp-btn-success"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
                       {t("unlockTrading")}
@@ -228,7 +236,7 @@ export default function RiskRulesPage() {
                       onClick={() =>
                         void engageKillSwitch("Operator emergency stop (risk page)")
                       }
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-rose-500/50 bg-rose-500/10 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20 text-xs font-bold uppercase tracking-wider transition-all active:scale-[0.98]"
+                      className="tp-btn tp-btn-danger"
                     >
                       <Lock className="w-3.5 h-3.5" />
                       {t("emergencyLock")}
@@ -237,9 +245,9 @@ export default function RiskRulesPage() {
                 </div>
 
                 {/* Drawdown Limit Slider */}
-                <div className="space-y-3 mb-5 p-4 rounded-xl bg-slate-950/60 border border-slate-800">
+                <div className="space-y-3 mb-5 p-4 rounded-control bg-well border border-line">
                   <div className="flex items-center justify-between gap-3">
-                    <label className="text-xs uppercase tracking-wider text-slate-400 font-bold">
+                    <label className="text-xs uppercase tracking-wider text-ink-muted font-bold">
                       {t("dailyMaxDrawdownLimit")}
                     </label>
                     <div className="flex items-center gap-2">
@@ -255,9 +263,9 @@ export default function RiskRulesPage() {
                           )
                         }
                         disabled={ddAdjusting}
-                        className="w-20 text-right text-sm font-mono text-slate-200 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 focus:outline-none focus:border-amber-500 font-bold"
+                        className="tp-input w-20 py-1.5 text-right font-mono font-bold"
                       />
-                      <span className="text-xs text-slate-400 font-bold">%</span>
+                      <span className="text-xs text-ink-muted font-bold">%</span>
                     </div>
                   </div>
                   <input
@@ -268,7 +276,7 @@ export default function RiskRulesPage() {
                     value={ddLimitDraft ?? riskState.maxDailyDrawdownPct}
                     onChange={(e) => setDdLimitDraft(parseFloat(e.target.value))}
                     aria-label={t("dailyMaxDrawdownLimit")}
-                    className="w-full cursor-pointer accent-amber-500"
+                    className="w-full cursor-pointer accent-warning"
                   />
                   {ddDirty && (
                     <button
@@ -277,64 +285,64 @@ export default function RiskRulesPage() {
                         void applyDrawdownLimit(ddLimitDraft ?? riskState.maxDailyDrawdownPct)
                       }
                       disabled={ddAdjusting}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 text-slate-950 hover:bg-amber-400 text-xs font-bold uppercase tracking-wider transition-all active:scale-[0.98] shadow-sm disabled:opacity-60"
+                      className="tp-btn tp-btn-warning"
                     >
                       {ddAdjusting ? t("applying") : t("applyToEngine")}
                     </button>
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                  <div className="rounded-control bg-well border border-line p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-ink-faint font-bold mb-1">
                       {t("drawdownToday")}
                     </p>
                     <p
                       className={`text-xl font-black font-mono ${
                         riskState.drawdownPct >= riskState.maxDailyDrawdownPct * 0.7
-                          ? "text-rose-500 dark:text-rose-400"
-                          : "text-emerald-500 dark:text-emerald-400"
+                          ? "text-danger"
+                          : "text-success"
                       }`}
                     >
                       {riskState.drawdownPct.toFixed(2)}%
                     </p>
                   </div>
-                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
+                  <div className="rounded-control bg-well border border-line p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-ink-faint font-bold mb-1">
                       {t("maxLimit")}
                     </p>
-                    <p className="text-xl font-black font-mono text-amber-500">
+                    <p className="text-xl font-black num-fig text-warning">
                       {riskState.maxDailyDrawdownPct.toFixed(2)}%
                     </p>
                   </div>
-                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
+                  <div className="rounded-control bg-well border border-line p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-ink-faint font-bold mb-1">
                       {t("equity")}
                     </p>
-                    <p className="text-xl font-black font-mono text-slate-200">
+                    <p className="text-xl font-black num-fig text-ink">
                       ${formatNumber(riskState.equity, 2)}
                     </p>
                   </div>
-                  <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3.5">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">
+                  <div className="rounded-control bg-well border border-line p-3.5">
+                    <p className="text-[10px] uppercase tracking-wider text-ink-faint font-bold mb-1">
                       {t("tradesWinLoss")}
                     </p>
-                    <p className="text-xl font-black font-mono text-slate-200">
+                    <p className="text-xl font-black num-fig text-ink">
                       {riskState.tradesToday} ·{" "}
-                      <span className="text-emerald-500 dark:text-emerald-400">{riskState.winsToday}</span>/
-                      <span className="text-rose-500 dark:text-rose-400">{riskState.lossesToday}</span>
+                      <span className="text-success">{riskState.winsToday}</span>/
+                      <span className="text-danger">{riskState.lossesToday}</span>
                     </p>
                   </div>
                 </div>
 
-                <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
+                <div className="h-2 w-full bg-elevated rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${
                       isKillSwitchLocked
-                        ? "bg-rose-500"
+                        ? "bg-danger"
                         : riskState.drawdownPct >= riskState.maxDailyDrawdownPct * 0.7
-                          ? "bg-amber-500"
-                          : "bg-emerald-500"
+                          ? "bg-warning"
+                          : "bg-success"
                     }`}
                     style={{
                       width: `${Math.min(
@@ -349,20 +357,20 @@ export default function RiskRulesPage() {
                 {!isKillSwitchLocked && (
                   <div className="mt-4">
                     <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                      <span className="text-[10px] uppercase tracking-wider text-ink-faint font-bold">
                         {t("dailyExposure")}
                       </span>
-                      <span className="text-[10px] font-mono font-bold text-slate-300 tabular-nums">
+                      <span className="text-[10px] font-mono font-bold text-ink-muted tabular-nums">
                         {exposurePct.toFixed(1)}%
                       </span>
                     </div>
-                    <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
+                    <div className="h-2 w-full bg-elevated rounded-full overflow-hidden">
                       <div
-                        className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-blue-500 to-indigo-500 transition-all duration-500"
+                        className="h-full rounded-full bg-gradient-to-r from-success via-primary to-brand-hover transition-all duration-500"
                         style={{ width: `${exposurePct}%` }}
                       />
                     </div>
-                    <p className="mt-1.5 text-[10px] text-slate-400 font-mono">
+                    <p className="mt-1.5 text-[10px] text-ink-faint font-mono">
                       {t("realizedPnl")}: ${riskState.realizedPnl.toFixed(2)} vs {t("equity")}{" "}
                       ${riskState.equity.toFixed(2)}
                     </p>
@@ -370,7 +378,7 @@ export default function RiskRulesPage() {
                 )}
 
                 {isKillSwitchLocked && (
-                  <p className="mt-3 text-xs text-rose-600 dark:text-rose-400 font-mono font-bold">
+                  <p className="mt-3 text-xs text-danger font-mono font-bold">
                     ⛔ {t("killSwitchEngaged")} —{" "}
                     {riskState.lockedReason ?? "Daily drawdown limit breached."}
                   </p>
@@ -379,14 +387,14 @@ export default function RiskRulesPage() {
             )}
 
             {error && (
-              <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl">
-                <p className="text-xs text-rose-600 dark:text-rose-400 font-mono">{error}</p>
+              <div className="tp-banner tp-banner-error">
+                <p className="text-xs font-mono">{error}</p>
               </div>
             )}
 
             {successMsg && (
-              <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl">
-                <p className="text-xs text-emerald-600 dark:text-emerald-400 font-mono font-bold">{successMsg}</p>
+              <div className="tp-banner tp-banner-success">
+                <p className="text-xs font-mono font-bold">{successMsg}</p>
               </div>
             )}
 
@@ -396,10 +404,10 @@ export default function RiskRulesPage() {
                 {[1, 2, 3, 4].map((i) => (
                   <div
                     key={i}
-                    className="bg-slate-900/80 rounded-xl border border-slate-800 p-6 animate-pulse"
+                    className="tp-skeleton p-6"
                   >
-                    <div className="h-5 w-1/3 bg-slate-700 rounded mb-4" />
-                    <div className="h-10 bg-slate-800 rounded" />
+                    <div className="h-5 w-1/3 bg-elevated rounded mb-4" />
+                    <div className="h-10 bg-elevated rounded" />
                   </div>
                 ))}
               </div>
@@ -408,18 +416,18 @@ export default function RiskRulesPage() {
                 {rules.map((rule) => (
                   <div
                     key={rule.id}
-                    className="bg-slate-900/80 rounded-xl border border-slate-800 shadow-sm overflow-hidden"
+                    className="tp-card overflow-hidden"
                   >
-                    <div className="px-6 py-5 border-b border-slate-800 flex items-center justify-between gap-3">
+                    <div className="px-6 py-5 border-b border-line flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3">
-                        <span className="text-2xl">
+                        <span className="flex h-10 w-10 items-center justify-center rounded-control bg-elevated border border-line">
                           {getRuleIcon(rule.ruleType)}
                         </span>
                         <div>
-                          <h2 className="text-base font-bold text-slate-200">
+                          <h2 className="text-base font-bold text-ink">
                             {rule.name}
                           </h2>
-                          <p className="text-xs text-slate-400 font-mono mt-0.5">
+                          <p className="text-xs text-ink-faint font-mono mt-0.5">
                             {rule.ruleType.replace(/_/g, " ")}
                           </p>
                         </div>
@@ -433,14 +441,14 @@ export default function RiskRulesPage() {
                           }
                           className="sr-only peer"
                         />
-                        <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500 rtl:peer-checked:after:-translate-x-full" />
+                        <div className="w-11 h-6 bg-elevated border border-line peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-warning peer-checked:border-warning rtl:peer-checked:after:-translate-x-full" />
                       </label>
                     </div>
 
                     <div className="p-6 space-y-4">
                       <div className="flex items-center gap-4">
                         <div className="flex-1">
-                          <label className="block text-xs uppercase tracking-wider text-slate-400 font-bold mb-2">
+                          <label className="block text-xs uppercase tracking-wider text-ink-faint font-bold mb-2">
                             {t("thresholdValue")}
                           </label>
                           <div className="relative">
@@ -458,9 +466,9 @@ export default function RiskRulesPage() {
                                 )
                               }
                               disabled={!rule.enabled}
-                              className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-slate-100 text-sm font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="tp-input w-full pr-16 font-mono"
                             />
-                            <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-mono">
+                            <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-xs text-ink-faint font-mono">
                               {getRuleUnit(rule.ruleType)}
                             </span>
                           </div>
@@ -480,9 +488,9 @@ export default function RiskRulesPage() {
                                 )
                               }
                               disabled={!rule.enabled}
-                              className="w-full cursor-pointer accent-amber-500"
+                              className="w-full cursor-pointer accent-warning"
                             />
-                            <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mt-1">
+                            <div className="flex items-center justify-between text-[10px] text-ink-faint font-mono mt-1">
                               <span>0</span>
                               <span>1000</span>
                             </div>
@@ -490,14 +498,14 @@ export default function RiskRulesPage() {
                         </div>
 
                         <div className="text-center min-w-[80px]">
-                          <p className="text-xs text-slate-400 uppercase tracking-wider font-bold mb-1">
+                          <p className="text-xs text-ink-faint uppercase tracking-wider font-bold mb-1">
                             {t("status")}
                           </p>
                           <span
                             className={`text-xs font-bold px-2.5 py-1 rounded-full ${
                               rule.enabled
-                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                                : "bg-slate-800 text-slate-400"
+                                ? "tp-badge-success"
+                                : "tp-badge-neutral"
                             }`}
                           >
                             {rule.enabled ? t("active").toUpperCase() : t("disabled")}
@@ -505,16 +513,16 @@ export default function RiskRulesPage() {
                         </div>
                       </div>
 
-                      <div className="rounded-xl bg-slate-950/50 border border-slate-800 p-3">
+                      <div className="rounded-control bg-well border border-line p-3">
                         <div className="flex items-center gap-2">
                           <div
                             className={`h-2 w-2 rounded-full ${
                               rule.enabled
-                                ? "bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.6)]"
-                                : "bg-slate-600"
+                                ? "bg-warning shadow-[0_0_10px_rgba(245,158,11,0.6)]"
+                                : "bg-ink-faint"
                             }`}
                           />
-                          <p className="text-xs text-slate-400">
+                          <p className="text-xs text-ink-muted">
                             {rule.enabled ? t("enforcedByEngine") : t("notEnforced")}
                           </p>
                         </div>
@@ -531,16 +539,16 @@ export default function RiskRulesPage() {
                 type="button"
                 onClick={handleSaveAll}
                 disabled={isSaving}
-                className="inline-flex items-center gap-2 rounded-xl px-5 py-3 border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 text-sm font-bold uppercase tracking-wider transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                className="tp-btn tp-btn-warning"
               >
                 {isSaving ? (
                   <>
-                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="h-2 w-2 rounded-full bg-current animate-pulse" />
                     {t("savingToEngine")}
                   </>
                 ) : (
                   <>
-                    <span className="h-2 w-2 rounded-full bg-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.8)]" />
+                    <span className="h-2 w-2 rounded-full bg-current" />
                     {t("applyAllRules")}
                   </>
                 )}
@@ -549,21 +557,21 @@ export default function RiskRulesPage() {
                 type="button"
                 onClick={handleReset}
                 disabled={isSaving}
-                className="inline-flex items-center gap-2 rounded-xl px-5 py-3 border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 text-sm font-bold uppercase tracking-wider transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                className="tp-btn tp-btn-secondary"
               >
                 {t("resetDefaults")}
               </button>
             </div>
 
             {/* Enforcement Status Footer Banner */}
-            <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
+            <div className="tp-card p-4">
               <div className="flex items-start gap-3">
-                <div className="mt-1 h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.7)] shrink-0" />
+                <div className="mt-1 h-2.5 w-2.5 rounded-full bg-success shadow-[0_0_12px_rgba(16,185,129,0.7)] shrink-0" />
                 <div>
-                  <p className="text-sm text-slate-200 font-bold">
+                  <p className="text-sm text-ink font-bold">
                     {t("liveEnforcementActive")}
                   </p>
-                  <p className="text-xs text-slate-400 mt-1">
+                  <p className="text-xs text-ink-muted mt-1">
                     {t("liveEnforcementHint")}
                   </p>
                 </div>

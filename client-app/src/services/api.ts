@@ -84,6 +84,145 @@ export interface CandleDataPoint {
   projected?: boolean;
 }
 
+/**
+ * Additive predictive layer emitted by the AI engine. Every number is computed
+ * from real observed candles/ticks; missing inputs are explicitly unavailable
+ * rather than synthesized. This layer never overrides the authoritative
+ * confluence verdict - it is auditable diagnostic evidence.
+ */
+export interface PredictiveMicrostructure {
+  available?: boolean;
+  bar_count?: number;
+  brr?: number;
+  wrr_upper?: number;
+  wrr_lower?: number;
+  sri?: number;
+  body_direction?: "up" | "down";
+  atr?: number;
+  atr_relative?: number;
+  atr_percentile?: number;
+  efficiency_ratio?: number;
+  range_ratio?: number;
+  low_volatility?: boolean;
+  flat_zone?: boolean;
+  compression?: boolean;
+  suppressed?: boolean;
+  suppression_reasons?: string[];
+  liquidity?: {
+    available?: boolean;
+    last_sweep?: "high" | "low" | "none";
+    sweep_high?: boolean;
+    sweep_low?: boolean;
+    sweep_strength?: number;
+    pool_high?: number | null;
+    pool_low?: number | null;
+    pools?: Array<{
+      price: number | null;
+      side: "high" | "low";
+      distance_atr: number | null;
+      touches: number;
+      swept: boolean;
+    }>;
+  };
+  velocity?: {
+    available?: boolean;
+    velocity?: number;
+    velocity_prior?: number;
+    acceleration?: number;
+    decay?: number;
+    units?: string;
+  };
+  divergence?: { available?: boolean; score?: number; kind?: string };
+  order_flow?: {
+    available?: boolean;
+    aggression?: number;
+    aggression_source?: string;
+    depth_imbalance?: number | null;
+    depth_available?: boolean;
+  };
+  absorption?: {
+    available?: boolean;
+    absorbed?: boolean;
+    score?: number;
+    volume_ratio?: number;
+    body_ratio?: number;
+  };
+}
+
+export interface PredictiveRegime {
+  available?: boolean;
+  asset_class?: "OTC" | "REAL" | "CRYPTO" | string;
+  regime?: string;
+  directional_bias?: number;
+  source?: string;
+  features?: {
+    efficiency_ratio?: number;
+    atr_percentile?: number;
+    range_ratio?: number;
+    compression?: boolean;
+    directional_bias?: number;
+  };
+  adapter?: Record<string, unknown>;
+  session?: {
+    session?: string;
+    utc_hour?: number;
+    liquidity_multiplier?: number;
+  };
+  news?: {
+    available?: boolean;
+    active?: boolean;
+    reason?: string;
+    minutes_to_event?: number | null;
+  };
+  suppression?: { active?: boolean; reasons?: string[] };
+  adaptation?: {
+    weight_multipliers?: Record<string, number>;
+    liquidity_multiplier?: number;
+    suppression_multiplier?: number;
+  };
+  reasoning?: string;
+}
+
+export interface PredictiveEnsemble {
+  available?: boolean;
+  regime?: string;
+  asset_class?: string;
+  threshold?: number;
+  confidence?: number;
+  combined_score?: number;
+  agreement?: number;
+  expected_precision?: number;
+  release?: boolean;
+  suppressed?: boolean;
+  suppression_reasons?: string[];
+  reason?: string;
+  weights?: Record<string, number>;
+  components?: Record<
+    string,
+    {
+      score?: number;
+      weight?: number;
+      posterior_precision?: number;
+      observations?: number;
+    }
+  >;
+}
+
+export interface PredictiveLayer {
+  available?: boolean;
+  layer?: string;
+  symbol?: string;
+  reason?: string;
+  microstructure?: PredictiveMicrostructure;
+  regime?: PredictiveRegime;
+  ensemble?: PredictiveEnsemble;
+  authority?: {
+    thermal_gate_unchanged?: boolean;
+    ensemble_can_only_annotate?: boolean;
+    threshold?: number;
+  };
+}
+
 export interface PredictionResponse {
   symbol: string;
   signal: "BUY" | "SELL";
@@ -340,6 +479,8 @@ export interface PredictionResponse {
       buffer_ticks: number;
     };
   };
+  /** Additive predictive diagnostics (microstructure / regime / ensemble). */
+  predictive?: PredictiveLayer | null;
 }
 
 export interface SignalData {

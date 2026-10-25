@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -110,10 +110,10 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   const direction = signal === "BUY" ? "UP" : signal === "SELL" ? "DOWN" : "HOLD";
   const dirColor =
     signal === "BUY"
-      ? "text-emerald-400"
+      ? "text-st-pos"
       : signal === "SELL"
-        ? "text-rose-400"
-        : "text-slate-400";
+        ? "text-st-neg"
+        : "text-ink-muted";
   const dirArrow = signal === "BUY" ? "▲" : signal === "SELL" ? "▼" : "·";
 
   // PART 24 [162] — SELECTION IS NEVER GATED. The selector reports the
@@ -166,14 +166,14 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   const selectedOption = bySeconds.get(expirationSeconds as number) ?? null;
 
   return (
-    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 bg-obsidian-950/60 border border-slate-800 rounded-xl w-full">
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 bg-surface border border-line rounded-card w-full">
       <div className="flex items-center flex-wrap gap-2 sm:gap-3">
-        <span className="text-[9px] sm:text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">
+        <span className="text-[9px] sm:text-[10px] font-black text-ink-faint uppercase tracking-[0.2em]">
           Expiry
         </span>
         <span
           data-testid="pro-expiry-countdown"
-          className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-white bg-blue-600/20 border border-blue-500/40 rounded-md px-1.5 py-0.5"
+          className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-st-info bg-st-info/15 border border-st-info/40 rounded-md px-1.5 py-0.5"
         >
           {isMounted ? formatProCountdown(remainingS) : "--:--"}
         </span>
@@ -222,8 +222,8 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
                     : tooLate
                       ? // Informational, NOT a lock: an amber underline marks the
                         // option as timing-constrained while staying fully usable.
-                        "bg-obsidian-950/80 text-slate-300 hover:bg-slate-800 hover:text-white border border-amber-500/40 border-b-2"
-                      : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40"
+                        "bg-surface text-ink-muted hover:bg-elevated hover:text-ink border border-st-warn/40 border-b-2"
+                      : "bg-surface text-ink-muted hover:bg-elevated hover:text-ink border border-line"
                 }`}
               >
                 {opt.label}
@@ -244,7 +244,7 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
           data-reason={targetState.reason ?? ""}
           data-detail={targetState.detail ?? ""}
           className={`text-[10px] sm:text-[11px] font-black font-mono tabular-nums ${
-            targetShown ? dirColor : "text-amber-300"
+            targetShown ? dirColor : "text-st-warn"
           }`}
           title={targetShown ? undefined : targetCopy.hint}
         >
@@ -263,15 +263,15 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
         </span>
         <span
           data-testid="pro-anc"
-          className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-sky-400"
+          className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-st-info"
         >
           ANC {anchorPrice != null && Number.isFinite(anchorPrice) ? anchorPrice.toFixed(4) : "--"}
         </span>
         <span className="flex items-center gap-1.5">
-          <span className={`w-1.5 h-1.5 rounded-full ${live ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
+          <span className={`w-1.5 h-1.5 rounded-full ${live ? "bg-st-pos animate-pulse" : "bg-st-neg"}`} />
           <span
             data-testid="pro-live-price"
-            className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-emerald-400"
+            className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-st-pos"
           >
             {symbol} {price > 0 ? price.toFixed(4) : "--"}
           </span>
@@ -338,16 +338,16 @@ const ExpiryHorizonStatus: React.FC<{
       data-reason={option.reason ?? "unknown"}
       className={`w-full sm:w-auto flex items-center gap-1.5 rounded-lg border px-2 py-1 font-mono text-[9px] uppercase tracking-widest ${
         isAmber
-          ? "border-amber-400/30 bg-amber-500/10"
-          : "border-slate-700/50 bg-slate-800/30"
+          ? "border-st-warn/30 bg-st-warn/10"
+          : "border-line bg-elevated"
       }`}
     >
       <span
         className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-          isAmber ? "bg-amber-400" : "bg-slate-500 animate-pulse"
+          isAmber ? "bg-st-warn" : "bg-slate-500 animate-pulse"
         }`}
       />
-      <span className={isAmber ? "font-black text-amber-300" : "font-black text-slate-400"}>
+      <span className={isAmber ? "font-black text-st-warn" : "font-black text-ink-muted"}>
         {text}
       </span>
     </div>

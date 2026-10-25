@@ -23,6 +23,7 @@ verdict pinned by whichever test ran first -- which is exactly how the legacy
 probe produced order-dependent, contradictory numbers.
 """
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -135,6 +136,38 @@ def test_subthermal_target_is_a_real_projection_never_flat(client):
         % distance
     )
     assert abs(distance) > 1e-9, "target must not pin flat to the live price"
+
+
+def test_predict_carries_additive_predictive_diagnostics(client):
+    body = _predict(client, "GBP/USD", "4h", bearish_candles())
+
+    predictive = body.get("predictive")
+    assert isinstance(predictive, dict)
+    assert predictive.get("available") is True
+    assert predictive.get("layer") == "predictive_microstructure_v1"
+    assert predictive["microstructure"]["available"] is True
+    assert predictive["regime"]["available"] is True
+    assert predictive["ensemble"]["threshold"] == 85.0
+    assert predictive["authority"]["thermal_gate_unchanged"] is True
+    assert body.get("signal") in ("BUY", "SELL")
+    assert body.get("diagnostics", {}).get("predictive", {}).get("available") is True
+
+
+def test_predict_event_times_activate_predictive_blackout(client):
+    event = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+    body = _predict(
+        client,
+        "GBP/USD",
+        "4h",
+        bearish_candles(),
+        event_times=[event],
+    )
+
+    predictive = body.get("predictive") or {}
+    assert predictive.get("available") is True
+    assert predictive["regime"]["news"]["active"] is True
+    assert "event_blackout" in predictive["ensemble"]["suppression_reasons"]
+    assert predictive["ensemble"]["release"] is False
 
 
 def test_confidence_is_never_padded_above_the_confluence_score(client):

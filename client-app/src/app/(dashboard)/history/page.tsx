@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -10,6 +10,8 @@ import {
   Download,
   Filter,
   Minus,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import apiClient, {
   type SignalData,
@@ -41,6 +43,7 @@ export default function HistoryPage() {
   const [items, setItems] = useState<ExecutedTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<"ALL" | "CALL" | "PUT" | "HOLD">(
@@ -48,11 +51,14 @@ export default function HistoryPage() {
   );
   const [sortKey, setSortKey] = useState<SortKey>("createdAt");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
+      setLoading(true);
       try {
         // ── STRICT LIVE FETCH — NO SILENT EMPTY FALLBACKS ──
         // Both the settled trades feed and the live signal feed must resolve
@@ -165,7 +171,7 @@ export default function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadToken]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -185,6 +191,21 @@ export default function HistoryPage() {
     });
     return out;
   }, [items, search, typeFilter, sortKey, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageItems = useMemo(
+    () => filtered.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filtered, safePage, pageSize],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, typeFilter, pageSize]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   const stats = useMemo(() => {
     const settled = items.filter((i) => i.status !== "OPEN");
@@ -250,7 +271,7 @@ export default function HistoryPage() {
 
   return (
     <div
-      className="flex h-screen w-full overflow-hidden bg-obsidian text-slate-200 font-sans transition-colors duration-200"
+      className="flex h-screen w-full overflow-hidden bg-app text-ink-muted font-sans transition-colors duration-200"
       dir={rtl ? "rtl" : "ltr"}
     >
 
@@ -262,10 +283,10 @@ export default function HistoryPage() {
             {/* Header Title + CSV Export */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
-                <h1 className="text-slate-200 text-lg sm:text-2xl font-black tracking-wider uppercase">
+                <h1 className="text-ink text-lg sm:text-2xl font-black tracking-wider uppercase">
                   {t("tradingHistory")}
                 </h1>
-                <p className="text-slate-400 text-xs sm:text-sm mt-1">
+                <p className="text-ink-muted text-xs sm:text-sm mt-1">
                   {t("tradingHistoryDesc")}
                 </p>
               </div>
@@ -274,7 +295,7 @@ export default function HistoryPage() {
                   type="button"
                   onClick={exportCsv}
                   disabled={filtered.length === 0}
-                  className="inline-flex items-center gap-2 bg-blue-600/10 dark:bg-blue-600/20 border border-blue-500/40 text-blue-600 dark:text-blue-300 hover:bg-blue-600/20 text-xs font-bold uppercase tracking-wider px-4 py-2.5 rounded-xl transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                  className="tp-btn tp-btn-secondary"
                 >
                   <Download size={14} />
                   {t("exportCsv")}
@@ -283,73 +304,73 @@ export default function HistoryPage() {
             </div>
 
             {/* Summary Stat Tiles */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-              <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
-                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4">
+              <div className="tp-card p-4">
+                <p className="text-[10px] uppercase tracking-widest text-ink-faint font-bold">
                   {t("trades")}
                 </p>
-                <p className="text-2xl font-black text-slate-200 font-mono mt-1 tabular-nums">
+                <p className="text-2xl font-black text-ink num-fig mt-1 tabular-nums">
                   {stats.total}
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
-                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+              <div className="tp-card p-4">
+                <p className="text-[10px] uppercase tracking-widest text-ink-faint font-bold">
                   {t("winRate")}
                 </p>
-                <p className="text-2xl font-black text-emerald-500 dark:text-emerald-400 font-mono mt-1 tabular-nums">
+                <p className="text-2xl font-black text-success num-fig mt-1 tabular-nums">
                   {stats.winRate.toFixed(1)}%
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
-                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+              <div className="tp-card p-4">
+                <p className="text-[10px] uppercase tracking-widest text-ink-faint font-bold">
                   {t("netPnl")}
                 </p>
                 <p
                   className={cn(
-                    "text-2xl font-black font-mono mt-1 tabular-nums",
-                    stats.netPnl >= 0 ? "text-emerald-500 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400",
+                    "text-2xl font-black num-fig mt-1 tabular-nums",
+                    stats.netPnl >= 0 ? "text-success" : "text-danger",
                   )}
                 >
                   {stats.netPnl >= 0 ? "+" : ""}
                   {stats.netPnl.toFixed(2)}
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm">
-                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+              <div className="tp-card p-4">
+                <p className="text-[10px] uppercase tracking-widest text-ink-faint font-bold">
                   {t("winsLosses")}
                 </p>
-                <p className="text-2xl font-black font-mono mt-1 tabular-nums">
-                  <span className="text-emerald-500 dark:text-emerald-400">{stats.wins}</span>
-                  <span className="text-slate-600"> / </span>
-                  <span className="text-rose-500 dark:text-rose-400">{stats.losses}</span>
+                <p className="text-2xl font-black num-fig mt-1 tabular-nums">
+                  <span className="text-success">{stats.wins}</span>
+                  <span className="text-ink-faint"> / </span>
+                  <span className="text-danger">{stats.losses}</span>
                 </p>
               </div>
             </div>
 
             {/* Error Message */}
-            {error && (
-              <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl">
-                <p className="text-xs text-rose-600 dark:text-rose-400 font-mono">{error}</p>
+            {error && items.length > 0 && (
+              <div className="tp-banner tp-banner-error">
+                <p className="text-xs font-mono">{error}</p>
               </div>
             )}
 
             {/* Filter Toolbar */}
             {!loading && items.length > 0 && (
-              <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
+              <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center">
                 <div className="relative flex-1">
                   <Search
                     size={15}
-                    className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-faint"
                   />
                   <input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder={t("filterBySymbol")}
-                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-900/70 border border-slate-800 text-sm text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 font-mono shadow-sm"
+                    className="tp-input w-full pl-10 pr-4 font-mono"
                   />
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <Filter size={14} className="text-slate-400 mr-1" />
+                  <Filter size={14} className="text-ink-faint mr-1" />
                   {(["ALL", "CALL", "PUT", "HOLD"] as const).map((ft) => {
                     const label =
                       ft === "ALL"
@@ -365,10 +386,8 @@ export default function HistoryPage() {
                         type="button"
                         onClick={() => setTypeFilter(ft)}
                         className={cn(
-                          "px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider border transition-all active:scale-[0.98]",
-                          typeFilter === ft
-                            ? "bg-blue-600 text-white border-blue-600 shadow-sm"
-                            : "bg-slate-900/50 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800",
+                          "tp-segmented-item",
+                          typeFilter === ft && "tp-segmented-item-active",
                         )}
                       >
                         {label}
@@ -380,13 +399,13 @@ export default function HistoryPage() {
             )}
 
             {/* Trading Table Card */}
-            <div className="border border-slate-800 bg-slate-900/80 rounded-xl overflow-hidden shadow-sm">
+            <div className="tp-card overflow-hidden">
               {/* Desktop Table Header */}
-              <div className="hidden lg:grid lg:grid-cols-12 gap-2 px-6 py-4 text-xs font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">
+              <div className="hidden lg:grid lg:grid-cols-12 gap-2 px-6 py-4 text-xs font-bold text-ink-faint uppercase tracking-wider border-b border-line bg-elevated">
                 <button
                   type="button"
                   onClick={() => toggleSort("symbol")}
-                  className="col-span-2 text-left hover:text-slate-200 transition-colors"
+                  className="col-span-2 text-left hover:text-ink transition-colors"
                 >
                   {t("asset")}{dirIcon("symbol")}
                 </button>
@@ -394,7 +413,7 @@ export default function HistoryPage() {
                 <button
                   type="button"
                   onClick={() => toggleSort("entryPrice")}
-                  className="col-span-2 text-right hover:text-slate-200 transition-colors"
+                  className="col-span-2 text-right hover:text-ink transition-colors"
                 >
                   {t("entryPriceCol")}{dirIcon("entryPrice")}
                 </button>
@@ -402,14 +421,14 @@ export default function HistoryPage() {
                 <button
                   type="button"
                   onClick={() => toggleSort("createdAt")}
-                  className="col-span-2 text-left hover:text-slate-200 transition-colors"
+                  className="col-span-2 text-left hover:text-ink transition-colors"
                 >
                   {t("timestampCol")}{dirIcon("createdAt")}
                 </button>
                 <button
                   type="button"
                   onClick={() => toggleSort("pnl")}
-                  className="col-span-1 text-right hover:text-slate-200 transition-colors"
+                  className="col-span-1 text-right hover:text-ink transition-colors"
                 >
                   {t("pnlCol")}{dirIcon("pnl")}
                 </button>
@@ -419,44 +438,50 @@ export default function HistoryPage() {
               {loading ? (
                 <div className="px-6 py-12 space-y-4">
                   {[1, 2, 3, 4].map((i) => (
-                    <div
-                      key={i}
-                      className="bg-slate-800/40 rounded-xl p-5 animate-pulse"
-                    >
-                      <div className="h-4 w-1/4 bg-slate-700 rounded" />
-                      <div className="h-3 w-1/2 bg-slate-700/60 rounded mt-3" />
+                    <div key={i} className="tp-skeleton p-5">
+                      <div className="h-4 w-1/4 rounded bg-elevated" />
+                      <div className="h-3 w-1/2 rounded bg-elevated mt-3" />
                     </div>
                   ))}
                 </div>
               ) : items.length === 0 ? (
-                <div className="px-6 py-16 text-center">
-                  <div className="w-12 h-12 mx-auto mb-4 rounded-2xl bg-slate-800 flex items-center justify-center">
-                    <Clock size={22} className="text-slate-400" />
+                <div className="px-6 py-16 text-center" role="status">
+                  <div className="w-12 h-12 mx-auto mb-4 rounded-control bg-elevated border border-line flex items-center justify-center">
+                    <Clock size={22} className="text-ink-faint" />
                   </div>
-                  <p className="text-slate-300 text-base font-bold">
-                    {t("noHistoryYet")}
+                  <p className="text-ink text-base font-bold">
+                    {error ? t("error") : t("noHistoryYet")}
                   </p>
-                  <p className="text-slate-400 text-xs mt-1">
-                    {t("historyEmptyHint")}
+                  <p className="text-ink-muted text-xs mt-1 max-w-md mx-auto">
+                    {error ?? t("historyEmptyHint")}
                   </p>
+                  {error && (
+                    <button
+                      type="button"
+                      onClick={() => setReloadToken((n) => n + 1)}
+                      className="tp-btn tp-btn-primary mt-5"
+                    >
+                      {t("retry")}
+                    </button>
+                  )}
                 </div>
               ) : filtered.length === 0 ? (
                 <div className="px-6 py-16 text-center">
-                  <p className="text-slate-400 text-sm font-bold">
+                  <p className="text-ink-muted text-sm font-bold">
                     {t("noTradesMatch")}
                   </p>
                 </div>
               ) : (
-                <div className="divide-y divide-slate-800/60">
-                  {filtered.map((it) => {
+                <div className="divide-y divide-line">
+                  {pageItems.map((it) => {
                     const isCall = it.type === "CALL";
                     const isPut = it.type === "PUT";
                     const isOpen = it.status === "OPEN";
                     const badgeClass = isCall
-                      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                      ? "tp-badge-success"
                       : isPut
-                        ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
-                        : "bg-slate-500/15 text-slate-400";
+                        ? "tp-badge-danger"
+                        : "tp-badge-neutral";
                     const badgeLabel = isCall
                       ? t("filterCall")
                       : isPut
@@ -468,44 +493,42 @@ export default function HistoryPage() {
                         ? t("winStatus")
                         : t("lossStatus");
                     const statusClass = isOpen
-                      ? "bg-blue-500/15 text-blue-600 dark:text-blue-300"
+                      ? "tp-badge-info"
                       : it.status === "WIN"
-                        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
-                        : "bg-rose-500/15 text-rose-600 dark:text-rose-300";
+                        ? "tp-badge-success"
+                        : "tp-badge-danger";
                     return (
                       <div key={it.id}>
                         {/* Mobile Card */}
                         <div className="lg:hidden px-4 py-3.5 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-slate-200 font-mono text-sm font-bold flex items-center gap-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-ink font-mono text-sm font-bold flex items-center gap-2">
                               {isCall ? (
                                 <TrendingUp
                                   size={14}
-                                  className="text-emerald-500 shrink-0"
+                                  className="text-success shrink-0"
                                 />
                               ) : isPut ? (
                                 <TrendingDown
                                   size={14}
-                                  className="text-rose-500 shrink-0"
+                                  className="text-danger shrink-0"
                                 />
                               ) : (
                                 <Minus
                                   size={14}
-                                  className="text-slate-400 shrink-0"
+                                  className="text-ink-faint shrink-0"
                                 />
                               )}
                               {it.symbol}
                             </span>
-                            <span
-                              className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${badgeClass}`}
-                            >
+                            <span className={cn("tp-badge", badgeClass)}>
                               {badgeLabel}
                             </span>
                           </div>
-                          <div className="grid grid-cols-2 gap-2 text-xs text-slate-400">
+                          <div className="grid grid-cols-2 gap-2 text-xs text-ink-muted">
                             <span>
                               {t("entry")}:{" "}
-                              <span className="text-slate-200 font-mono font-bold">
+                              <span className="text-ink font-mono font-bold">
                                 {formatPairPrice(it.entryPrice, it.symbol)}
                               </span>
                             </span>
@@ -517,64 +540,57 @@ export default function HistoryPage() {
                             <span
                               className={cn(
                                 "text-sm font-bold font-mono",
-                                it.pnl >= 0 ? "text-emerald-500 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400",
+                                it.pnl >= 0 ? "text-success" : "text-danger",
                               )}
                             >
                               {it.pnl >= 0 ? "+" : ""}
                               {it.pnl.toFixed(2)}
                             </span>
-                            <span
-                              className={cn(
-                                "inline-block px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider",
-                                statusClass,
-                              )}
-                            >
+                            <span className={cn("tp-badge", statusClass)}>
                               {statusLabel}
                             </span>
                           </div>
                         </div>
 
                         {/* Desktop Row */}
-                        <div className="hidden lg:grid lg:grid-cols-12 gap-2 px-6 py-4 items-center hover:bg-slate-800/30 transition-colors">
-                          <div className="col-span-2 text-slate-200 font-mono text-sm font-bold flex items-center gap-2">
+                        <div className="hidden lg:grid lg:grid-cols-12 gap-2 px-6 py-4 items-center hover:bg-primary/5 transition-colors">
+                          <div className="col-span-2 text-ink font-mono text-sm font-bold flex items-center gap-2">
                             {isCall ? (
                               <TrendingUp
                                 size={14}
-                                className="text-emerald-500 shrink-0"
+                                className="text-success shrink-0"
                               />
                             ) : isPut ? (
                               <TrendingDown
                                 size={14}
-                                className="text-rose-500 shrink-0"
+                                className="text-danger shrink-0"
                               />
                             ) : (
                               <Minus
                                 size={14}
-                                className="text-slate-400 shrink-0"
+                                className="text-ink-faint shrink-0"
                               />
                             )}
                             {it.symbol}
                           </div>
                           <div className="col-span-1">
-                            <span
-                              className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-bold ${badgeClass}`}
-                            >
+                            <span className={cn("tp-badge", badgeClass)}>
                               {badgeLabel}
                             </span>
                           </div>
-                          <div className="col-span-2 text-right text-blue-600 dark:text-blue-400 text-sm font-bold font-mono">
+                          <div className="col-span-2 text-right text-primary text-sm font-bold font-mono">
                             {formatPairPrice(it.entryPrice, it.symbol)}
                           </div>
-                          <div className="col-span-2 text-slate-400 text-sm font-mono">
+                          <div className="col-span-2 text-ink-muted text-sm font-mono">
                             {it.expiry ? formatLocalTime(it.expiry) : "—"}
                           </div>
-                          <div className="col-span-2 text-slate-400 text-sm font-mono">
+                          <div className="col-span-2 text-ink-muted text-sm font-mono">
                             {formatLocalDateTime(it.createdAt)}
                           </div>
                           <div className="col-span-1 text-right text-sm font-mono font-bold">
                             <span
                               className={
-                                it.pnl >= 0 ? "text-emerald-500 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"
+                                it.pnl >= 0 ? "text-success" : "text-danger"
                               }
                             >
                               {it.pnl >= 0 ? "+" : ""}
@@ -582,12 +598,7 @@ export default function HistoryPage() {
                             </span>
                           </div>
                           <div className="col-span-2 text-right">
-                            <span
-                              className={cn(
-                                "inline-block px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider",
-                                statusClass,
-                              )}
-                            >
+                            <span className={cn("tp-badge", statusClass)}>
                               {statusLabel}
                             </span>
                           </div>
@@ -595,6 +606,51 @@ export default function HistoryPage() {
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {!loading && filtered.length > 0 && (
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-line px-4 py-3 bg-elevated">
+                  <p className="text-[11px] text-ink-muted font-mono">
+                    Showing {(safePage - 1) * pageSize + 1}–
+                    {Math.min(safePage * pageSize, filtered.length)} of{" "}
+                    {filtered.length}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={pageSize}
+                      onChange={(e) => setPageSize(Number(e.target.value))}
+                      aria-label="Rows per page"
+                      className="tp-input py-1.5 pr-7 text-xs font-mono"
+                    >
+                      <option value={10}>10 / page</option>
+                      <option value={25}>25 / page</option>
+                      <option value={50}>50 / page</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={safePage <= 1}
+                      aria-label="Previous page"
+                      className="tp-btn tp-btn-secondary h-9 min-h-[36px] px-2"
+                    >
+                      <ChevronLeft size={15} />
+                    </button>
+                    <span className="text-[11px] font-mono font-bold text-ink-muted min-w-[78px] text-center">
+                      {safePage} / {totalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPage((p) => Math.min(totalPages, p + 1))
+                      }
+                      disabled={safePage >= totalPages}
+                      aria-label="Next page"
+                      className="tp-btn tp-btn-secondary h-9 min-h-[36px] px-2"
+                    >
+                      <ChevronRight size={15} />
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

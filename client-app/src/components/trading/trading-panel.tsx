@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useEffect, useCallback, useRef, useState } from "react";
 import {
@@ -292,30 +292,30 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       <div className="px-3 sm:px-4 pt-3 sm:pt-4 pb-2 sm:pb-3 border-b border-slate-800/60">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-emerald-500 shrink-0" />
-            <h3 className="text-white font-black text-xs sm:text-sm uppercase tracking-wider">
+            <Zap className="w-4 h-4 text-st-pos shrink-0" />
+            <h3 className="text-ink font-black text-xs sm:text-sm uppercase tracking-wider">
               {t("quickTrade")}
             </h3>
           </div>
-          <span className="text-[9px] sm:text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 min-w-0">
+          <span className="text-[9px] sm:text-[10px] text-ink-faint font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 min-w-0">
             <span className="truncate">{getPairLabel(activeSymbol)}</span>
             <AssetClassBadge symbol={activeSymbol} />
           </span>
         </div>
         <div className="mt-1.5 sm:mt-2 flex items-center justify-between">
-          <span className="text-[9px] sm:text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+          <span className="text-[9px] sm:text-[10px] text-ink-faint uppercase font-bold tracking-wider">
             {t("price")}
           </span>
           <span className="flex items-center gap-1.5 min-w-0">
             {poOffline && (
               <span
                 data-testid="panel-po-offline-marker"
-                className="text-[9px] sm:text-[10px] text-amber-400 font-bold uppercase tracking-wider whitespace-nowrap"
+                className="text-[9px] sm:text-[10px] text-st-warn font-bold uppercase tracking-wider whitespace-nowrap"
               >
                 PO OFFLINE
               </span>
             )}
-            <span className="text-xs sm:text-sm text-white font-bold font-mono tabular-nums">
+            <span className="text-xs sm:text-sm text-ink font-bold font-mono tabular-nums">
               {currentPrice > 0 && !poOffline
                 ? `$${formatPairPrice(currentPrice, activeSymbol)}`
                 : "---"}
@@ -328,21 +328,21 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       <div className="mx-3 sm:mx-4 mt-2 sm:mt-3">
         <div
           className={cn(
-            "flex items-center justify-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl font-bold text-xs sm:text-sm uppercase tracking-wider transition-all duration-300",
+            "flex items-center justify-center gap-2 px-3 sm:px-4 py-2 sm:py-2.5 rounded-card font-bold text-xs sm:text-sm uppercase tracking-wider transition-all duration-300",
             poOffline
-              ? "bg-amber-500/10 text-amber-400 border border-amber-500/40"
+              ? "bg-st-warn/10 text-st-warn border border-st-warn/40"
               : stalePrice
-                ? "bg-amber-500/10 text-amber-400 border border-amber-500/40"
+                ? "bg-st-warn/10 text-st-warn border border-st-warn/40"
                 : isCall
-                  ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(34,197,94,0.2)]"
+                  ? "bg-st-pos/15 text-st-pos border border-st-pos/30 animate-pulse-glow shadow-[0_0_12px_rgba(34,197,94,0.2)]"
                   : isPut
-                    ? "bg-rose-500/15 text-rose-400 border border-rose-500/30 animate-pulse-glow shadow-[0_0_12px_rgba(239,68,68,0.2)]"
-                    : "bg-slate-800 text-slate-300 border border-slate-700",
+                    ? "bg-st-neg/15 text-st-neg border border-st-neg/30 animate-pulse-glow shadow-[0_0_12px_rgba(239,68,68,0.2)]"
+                    : "bg-slate-800 text-ink-muted border border-slate-700",
           )}
         >
           {poOffline ? (
             <>
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse shrink-0" />
               <span
                 data-testid="panel-po-offline-signal"
                 className="truncate"
@@ -352,7 +352,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
             </>
           ) : stalePrice ? (
             <>
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse shrink-0" />
               <span className="truncate">Connecting / Waiting</span>
             </>
           ) : (
@@ -372,13 +372,13 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       <div className="px-3 sm:px-4 pt-3 sm:pt-4 pb-2">
         <div className="flex items-center gap-2 mb-2">
           <Timer className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-          <span className="text-[9px] sm:text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+          <span className="text-[9px] sm:text-[10px] text-ink-faint uppercase font-bold tracking-wider">
             {t("expiration")}
           </span>
           {/* MASTER MISSION 7.1 — EXPIRY echoes the SELECTED contract duration
               (1|2|3|5m → mm:ss), never the chart timeframe. */}
           <span
-            className="ml-auto text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-white bg-blue-600/20 border border-blue-500/40 rounded-md px-1.5 py-0.5"
+            className="ml-auto text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-st-info bg-st-info/15 border border-st-info/40 rounded-md px-1.5 py-0.5"
             data-testid="expiry-readout"
           >
             {isMounted && expiryRemainingS != null
@@ -417,10 +417,10 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 className={cn(
                   "py-2 sm:py-1.5 px-1 rounded-lg text-[10px] font-bold font-mono transition-[transform,background-color,color] duration-75 active:scale-95 min-h-[36px] sm:min-h-[32px]",
                   expirationSeconds === opt.seconds
-                    ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                    ? "bg-primary text-white shadow-md shadow-primary/30"
                     : tooLate
-                      ? "bg-obsidian-950/80 text-slate-300 border border-amber-500/40 border-b-2 hover:bg-slate-800 hover:text-white"
-                      : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-white border border-slate-700/40",
+                      ? "bg-obsidian-950/80 text-ink-muted border border-st-warn/40 border-b-2 hover:bg-slate-800 hover:text-ink"
+                      : "bg-obsidian-950/80 text-slate-400 hover:bg-slate-800 hover:text-ink border border-slate-700/40",
                   isTradeActive && "opacity-50 cursor-not-allowed",
                 )}
               >
@@ -434,9 +434,9 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           <p
             data-testid="expiry-status"
             data-reason={selectedExpiryState.reason ?? "unknown"}
-            className="mt-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-amber-300/90 flex items-center gap-1.5"
+            className="mt-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-st-warn/90 flex items-center gap-1.5"
           >
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+            <span className="w-1.5 h-1.5 rounded-full bg-st-warn shrink-0" />
             {selectedExpiryState.reason === "too_late"
               ? `TOO LATE TO ACT ON ${selectedExpiryState.label} — NEXT BUCKET IN ${Math.max(
                   1,
@@ -454,17 +454,17 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       </div>
 
       {/* Live Candle-Close Countdown Bar */}
-      <div className="mx-3 sm:mx-4 mt-1 mb-1 px-3 sm:px-4 py-2 sm:py-2.5 bg-obsidian-950/60 border border-slate-800 rounded-xl">
+      <div className="mx-3 sm:mx-4 mt-1 mb-1 px-3 sm:px-4 py-2 sm:py-2.5 bg-obsidian-950/60 border border-slate-800 rounded-card">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[9px] sm:text-[10px] text-slate-400 uppercase font-bold tracking-wider flex items-center gap-1.5 shrink-0">
-            <Timer className="w-3 h-3 text-emerald-500" />
+            <Timer className="w-3 h-3 text-st-pos" />
             <span className="hidden xs:inline">Candle Close</span>
             <span className="xs:hidden">Close</span>
           </span>
           <span
             className={cn(
               "text-base sm:text-lg font-black font-mono tabular-nums transition-colors",
-              mounted && remainingSeconds <= 5 ? "text-rose-400" : "text-white",
+              mounted && remainingSeconds <= 5 ? "text-st-neg" : "text-ink",
             )}
           >
             {
@@ -477,7 +477,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         {/* Sweep progress toward the next barrier rollover */}
         <div className="mt-1.5 h-1 w-full rounded-full bg-slate-800 overflow-hidden">
           <div
-            className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-[width] duration-200 ease-linear"
+            className="h-full rounded-full bg-gradient-to-r from-st-pos to-teal-400 transition-[width] duration-200 ease-linear"
             style={{ width: `${(progressPct * 100).toFixed(1)}%` }}
           />
         </div>
@@ -485,13 +485,13 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
 
       {/* Active Countdown */}
       {isTradeActive && (
-        <div className="mx-3 sm:mx-4 mt-2 mb-1 px-3 sm:px-4 py-2.5 sm:py-3 bg-blue-600/10 border border-blue-500/30 rounded-xl">
+        <div className="mx-3 sm:mx-4 mt-2 mb-1 px-3 sm:px-4 py-2.5 sm:py-3 bg-st-info/10 border border-st-info/30 rounded-card">
           <div className="flex items-center justify-between">
             <span className="text-[9px] sm:text-[10px] text-blue-400 uppercase font-bold tracking-wider flex items-center gap-1.5 shrink-0">
               <Clock className="w-3 h-3" />
               {t("remaining")}
             </span>
-            <span className="text-xl sm:text-2xl font-black font-mono text-white tabular-nums">
+            <span className="text-xl sm:text-2xl font-black font-mono text-ink tabular-nums">
               {formatCountdown(countdownSeconds)}
             </span>
           </div>
@@ -500,8 +500,8 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
 
       {/* Stream Disconnected Banner — socket down or no price data yet */}
       {feedStatus === "awaiting_ssid" || feedStatus === "auth_failed" ? (
-        <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-rose-500/10 border border-rose-500/30 rounded-xl">
-          <p className="text-[9px] sm:text-[10px] text-rose-400 font-black uppercase tracking-wider">
+        <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-st-neg/10 border border-st-neg/30 rounded-card">
+          <p className="text-[9px] sm:text-[10px] text-st-neg font-black uppercase tracking-wider">
             {feedStatus === "auth_failed"
               ? "FEED OFFLINE — auth failed"
               : "FEED OFFLINE — awaiting SSID"}
@@ -509,12 +509,12 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         </div>
       ) : (
         (!socketConnected || currentPrice <= 0) && (
-          <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-rose-500/10 border border-rose-500/30 rounded-xl">
-            <p className="text-[9px] sm:text-[10px] text-rose-400 font-black uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
+          <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-st-neg/10 border border-st-neg/30 rounded-card">
+            <p className="text-[9px] sm:text-[10px] text-st-neg font-black uppercase tracking-wider flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-st-neg animate-pulse shrink-0" />
               Live Data Disconnected
             </p>
-            <p className="text-[9px] sm:text-[10px] text-rose-400/80 font-mono mt-1">
+            <p className="text-[9px] sm:text-[10px] text-st-neg/80 font-mono mt-1">
               Trade execution disabled until the real-time feed restores.
             </p>
           </div>
@@ -531,13 +531,13 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       feedStatus !== "auth_failed" ? (
         <div
           data-testid="panel-po-offline-banner"
-          className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-xl"
+          className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-st-warn/10 border border-st-warn/40 rounded-card"
         >
-          <p className="text-[9px] sm:text-[10px] text-amber-400 font-black uppercase tracking-wider flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+          <p className="text-[9px] sm:text-[10px] text-st-warn font-black uppercase tracking-wider flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse shrink-0" />
             PO Offline — Proxy Ticks
           </p>
-          <p className="text-[9px] sm:text-[10px] text-amber-400/90 font-mono mt-1">
+          <p className="text-[9px] sm:text-[10px] text-st-warn/90 font-mono mt-1">
             No Pocket Option price for this OTC pair — the market is closed or
             PO is unavailable. The proxy feed is not a tradeable execution
             price; signals and execution resume when PO quotes return.
@@ -550,12 +550,12 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         (feedStatus === "stalled" ||
           feedStatus === "degraded" ||
           (socketConnected && currentPrice > 0 && stalePrice)) && (
-        <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-xl">
-          <p className="text-[9px] sm:text-[10px] text-amber-400 font-black uppercase tracking-wider flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+        <div className="mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 bg-st-warn/10 border border-st-warn/40 rounded-card">
+          <p className="text-[9px] sm:text-[10px] text-st-warn font-black uppercase tracking-wider flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse shrink-0" />
             Connecting / Waiting for Real-time Tick
           </p>
-          <p className="text-[9px] sm:text-[10px] text-amber-400/90 font-mono mt-1">
+          <p className="text-[9px] sm:text-[10px] text-st-warn/90 font-mono mt-1">
             {formatPairPrice(currentPrice)} (
             {lastPriceUpdateShort(lastPriceUpdate)}) — no live quote for &gt;2s.
             Signal generation is paused; analysis resumes on the next real-time
@@ -567,23 +567,23 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       {/* Kill Switch Status */}
       <div
         className={cn(
-          "mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl border flex flex-col gap-2 transition-colors",
+          "mx-3 sm:mx-4 mt-2 sm:mt-3 px-3 sm:px-4 py-2 sm:py-2.5 rounded-card border flex flex-col gap-2 transition-colors",
           isKillSwitchLocked
-            ? "bg-rose-500/10 border-rose-500/40"
+            ? "bg-st-neg/10 border-st-neg/40"
             : "bg-obsidian-950/50 border border-slate-800",
         )}
       >
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {isKillSwitchLocked ? (
-              <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0 animate-pulse" />
+              <ShieldAlert className="w-4 h-4 text-st-neg shrink-0 animate-pulse" />
             ) : (
-              <ShieldCheck className="w-4 h-4 text-emerald-500 shrink-0" />
+              <ShieldCheck className="w-4 h-4 text-st-pos shrink-0" />
             )}
             <span
               className={cn(
                 "text-[9px] sm:text-[10px] font-black uppercase tracking-widest truncate",
-                isKillSwitchLocked ? "text-rose-400" : "text-slate-300",
+                isKillSwitchLocked ? "text-st-neg" : "text-ink-muted",
               )}
             >
               {isKillSwitchLocked ? t("emergencyStop") : t("riskGuardActive")}
@@ -599,7 +599,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                     void resetKillSwitch();
                     setUnlockArmed(false);
                   }}
-                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-all active:scale-95 min-h-[36px]"
+                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-st-pos hover:brightness-110 text-white text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-all active:scale-95 min-h-[36px]"
                 >
                   <Unlock className="w-3 h-3" />
                   Confirm
@@ -607,7 +607,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 <button
                   type="button"
                   onClick={() => setUnlockArmed(false)}
-                  className="inline-flex items-center px-2 py-1.5 rounded-lg border border-slate-600 text-slate-300 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition-colors min-h-[36px]"
+                  className="inline-flex items-center px-2 py-1.5 rounded-lg border border-slate-600 text-ink-muted text-[9px] sm:text-[10px] font-bold uppercase tracking-wider hover:bg-slate-800 transition-colors min-h-[36px]"
                 >
                   Cancel
                 </button>
@@ -617,7 +617,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 type="button"
                 onClick={() => setUnlockArmed(true)}
                 title="Reset kill switch — re-arm live order execution"
-                className="shrink-0 inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-all active:scale-95 min-h-[36px]"
+                className="shrink-0 inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg border border-st-pos/50 text-st-pos hover:bg-st-pos/10 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-all active:scale-95 min-h-[36px]"
               >
                 <Unlock className="w-3 h-3" />
                 {t("unlockTrading")}
@@ -631,7 +631,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           ) : null}
         </div>
         {isKillSwitchLocked && killSwitchReason && (
-          <p className="text-[9px] sm:text-[10px] text-rose-400 font-mono leading-relaxed">
+          <p className="text-[9px] sm:text-[10px] text-st-neg font-mono leading-relaxed">
             {killSwitchReason}
           </p>
         )}
@@ -659,22 +659,22 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           onClick={handleCall}
           disabled={signalLocked || isTradeActive || !streamLive || isKillSwitchLocked}
           className={cn(
-            "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-xl font-black text-sm sm:text-base uppercase tracking-wider",
+            "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-card font-black text-sm sm:text-base uppercase tracking-wider",
             "flex items-center justify-center gap-2 sm:gap-3",
             "transition-[transform,background-color,color] duration-75 active:scale-[0.98]",
-            "shadow-xl shadow-emerald-500/25",
+            "shadow-xl shadow-st-pos/25",
             "min-h-[48px] sm:min-h-[52px]",
             signalLocked || isTradeActive || !streamLive || isKillSwitchLocked
               ? "opacity-50 cursor-not-allowed"
-              : "hover:brightness-110 hover:shadow-emerald-500/40",
+              : "hover:brightness-110 hover:shadow-st-pos/40",
             isCall &&
               !signalLocked &&
               !isTradeActive &&
               streamLive &&
               !isKillSwitchLocked
-              ? "ring-2 ring-emerald-500 ring-offset-2 ring-offset-obsidian"
+              ? "ring-2 ring-st-pos ring-offset-2 ring-offset-app"
               : "",
-            "bg-emerald-500 hover:bg-emerald-400 text-white",
+            "bg-st-pos hover:brightness-110 text-white",
           )}
         >
           <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -687,18 +687,18 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
           onClick={handlePut}
           disabled={signalLocked || isTradeActive || !streamLive || isKillSwitchLocked}
           className={cn(
-            "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-xl font-black text-sm sm:text-base uppercase tracking-wider",
+            "w-full py-3 sm:py-4 px-4 sm:px-6 rounded-card font-black text-sm sm:text-base uppercase tracking-wider",
             "flex items-center justify-center gap-2 sm:gap-3",
             "transition-[transform,background-color,color] duration-75 active:scale-[0.98]",
-            "shadow-xl shadow-rose-500/25",
+            "shadow-xl shadow-st-neg/25",
             "min-h-[48px] sm:min-h-[52px]",
             signalLocked || isTradeActive || !streamLive || isKillSwitchLocked
               ? "opacity-50 cursor-not-allowed"
-              : "hover:brightness-110 hover:shadow-rose-500/40",
+              : "hover:brightness-110 hover:shadow-st-neg/40",
             isPut && !signalLocked && !isTradeActive && streamLive && !isKillSwitchLocked
-              ? "ring-2 ring-rose-500 ring-offset-2 ring-offset-obsidian"
+              ? "ring-2 ring-st-neg ring-offset-2 ring-offset-app"
               : "",
-            "bg-rose-500 hover:bg-rose-400 text-white",
+            "bg-st-neg hover:brightness-110 text-white",
           )}
         >
           <TrendingDown className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -708,17 +708,17 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
 
       {/* Trade Result Banner */}
       {lastTradeResult && (
-        <div className="mx-3 sm:mx-4 mb-3 sm:mb-4 px-3 sm:px-4 py-2.5 sm:py-3 bg-slate-800/80 border border-slate-700/60 rounded-xl animate-slide-up">
+        <div className="mx-3 sm:mx-4 mb-3 sm:mb-4 px-3 sm:px-4 py-2.5 sm:py-3 bg-slate-800/80 border border-slate-700/60 rounded-card animate-slide-up">
           <div className="flex items-center gap-2">
             <div
               className={cn(
                 "w-2 h-2 rounded-full shrink-0",
                 lastTradeResult.includes("❌")
-                  ? "bg-rose-500"
-                  : "bg-emerald-500",
+                  ? "bg-st-neg"
+                  : "bg-st-pos",
               )}
             />
-            <span className="text-[10px] sm:text-xs font-mono text-white font-bold">
+            <span className="text-[10px] sm:text-xs font-mono text-ink font-bold">
               {lastTradeResult}
             </span>
           </div>
@@ -728,12 +728,12 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
       {/* Footer */}
       <div className="mt-auto px-3 sm:px-4 py-2.5 sm:py-3 border-t border-slate-800/60 bg-obsidian-950/40 safe-area-bottom">
         <div className="flex items-center justify-between">
-          <span className="text-[9px] sm:text-[10px] text-slate-500 uppercase font-bold tracking-wider flex items-center gap-1.5 min-w-0">
+          <span className="text-[9px] sm:text-[10px] text-ink-faint uppercase font-bold tracking-wider flex items-center gap-1.5 min-w-0">
             <span className="truncate">{getPairLabel(activeSymbol)}</span>
             <AssetClassBadge symbol={activeSymbol} variant="compact" />
           </span>
           <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[10px] sm:text-xs font-mono text-white font-bold tabular-nums">
+            <span className="text-[10px] sm:text-xs font-mono text-ink font-bold tabular-nums">
               {currentPrice > 0 && !poOffline
                 ? `$${formatPairPrice(currentPrice, activeSymbol)}`
                 : "---"}
@@ -742,10 +742,10 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
               className={cn(
                 "text-[8px] sm:text-[9px] px-1.5 sm:px-2 py-0.5 rounded-full font-bold uppercase shrink-0",
                 isCall
-                  ? "bg-emerald-500/20 text-emerald-400"
+                  ? "bg-st-pos/20 text-st-pos"
                   : isPut
-                    ? "bg-rose-500/20 text-rose-400"
-                    : "bg-slate-800 text-slate-300",
+                    ? "bg-st-neg/20 text-st-neg"
+                    : "bg-slate-800 text-ink-muted",
               )}
             >
               {isCall ? "BUY" : isPut ? "SELL" : t("awaitingPrediction")}

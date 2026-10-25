@@ -89,10 +89,18 @@ module.exports = {
         "ink-faint": "var(--tp-text-3)",
         accent: "var(--tp-accent)",
         "accent-2": "var(--tp-accent-2)",
-        // Institutional candlestick colors — shared chart + UI accents. These
-        // are deliberately IDENTICAL in both themes (teal / coral).
-        "bull-green": "#22ab94",
-        "bear-red": "#f23645",
+        // Channel triplets so `/opacity` modifiers actually emit a rule.
+        brand: {
+          DEFAULT: "rgb(var(--tp-primary-rgb) / <alpha-value>)",
+          hover: "rgb(var(--tp-primary-hover-rgb) / <alpha-value>)",
+        },
+        primary: "rgb(var(--tp-primary-rgb) / <alpha-value>)",
+        success: "rgb(var(--tp-success-rgb) / <alpha-value>)",
+        danger: "rgb(var(--tp-danger-rgb) / <alpha-value>)",
+        warning: "rgb(var(--tp-warning-rgb) / <alpha-value>)",
+        // Institutional candlestick colors - shared chart + UI accents.
+        "bull-green": "#10b981",
+        "bear-red": "#ef4444",
         // ── PART 16 TERMINAL BLOTTER PALETTE (dark-only, channel triplets) ──
         // Flat-obsidian matrix system: one canvas tone, one cell tone, one
         // hairline; every saturated pixel is functional. Resolution via rgb()
@@ -131,17 +139,17 @@ module.exports = {
         },
       },
       borderRadius: {
-        card: "8px",
-        control: "6px",
+        card: "12px",
+        control: "8px",
         chip: "4px",
         // PART 16: instrument cells use a near-square terminal radius.
         cell: "4px",
       },
       boxShadow: {
-        card: "0 1px 2px rgba(0,0,0,0.05)",
+        card: "0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.06)",
         "card-lift": "0 8px 24px rgba(0,0,0,0.18)",
-        "glow-bull": "0 0 16px rgba(34,171,148,0.35)",
-        "glow-bear": "0 0 16px rgba(242,54,69,0.35)",
+        "glow-bull": "0 0 16px rgba(16,185,129,0.35)",
+        "glow-bear": "0 0 16px rgba(239,68,68,0.35)",
       },
       backgroundImage: {
         "header-sheen":

@@ -60,6 +60,7 @@ import { expiryCountdownRemainingSeconds } from "@/lib/expirySelection";
 import { getPairLabel, getPriceDigits } from "@/constants/symbols";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TimeframeSelector } from "@/components/trading/timeframe-selector";
+import { Maximize2, Minimize2 } from "lucide-react";
 import {
   chartDebugQualityFields,
   type QualityPredictDebug,
@@ -74,7 +75,7 @@ import {
 } from "@/lib/tradeOverlay";
 
 /**
- * ── COHERENCE PUBLISHER ──────────────────────────────────────────────────
+ * -- COHERENCE PUBLISHER --------------------------------------------------
  * Renders nothing. Republishes the chart's ONE `SignalHoldView` so the
  * CoherenceStrip renders the same signal the HUD is painting, instead of
  * re-deriving it from the raw store field (which flickers to `null` between
@@ -553,6 +554,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const { t } = useLangContext();
   const { resolvedTheme } = useTheme();
 
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -631,6 +633,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   const [targetLayerActive, setTargetLayerActive] = useState(false);
   const [currentDividerX, setCurrentDividerX] = useState<number | null>(null);
   const [hudNowMs, setHudNowMs] = useState<number>(() => Date.now());
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const targetDurationMin = targetDurationMinutes(expSeconds);
 
   const activeSymbolRef = useRef(activeSymbol);
@@ -892,7 +895,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         setPriceLine(bag, "hi", series, 0, TGT_LINE, LineStyle.Dotted, "T-HI");
         setPriceLine(bag, "lo", series, 0, TGT_LINE, LineStyle.Dotted, "T-LO");
       }
-      // ── LIVE price line ──
+      // -- LIVE price line --
       setPriceLine(
         bag,
         "live",
@@ -1208,8 +1211,8 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
 
       // Deterministic projection matrix: a structural key shift is the ONLY
       // trigger for a rebuild + repaint. Micro tick fluctuations within the
-      // active bucket resolve to the same key → the exact same flame array
-      // reference → no series mutation, no reflow, zero jank.
+      // active bucket resolve to the same key ? the exact same flame array
+      // reference ? no series mutation, no reflow, zero jank.
       const snap = projectionRef.current.present({
         liveTipBucketSec: tipSec,
         timeframeSec: tfSec,
@@ -1312,7 +1315,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       precision: digits,
       minMove: Math.pow(10, -digits),
     };
-    // ── THEME-AWARE CANVAS COLORS ──
+    // -- THEME-AWARE CANVAS COLORS --
     // Resolved from the design-system tokens so the canvas flips with the
     // dark/light toggle. Candle bodies stay teal/coral in BOTH themes (brand
     // constant), only the surfaces/axes/grid adapt.
@@ -1432,7 +1435,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     candleSeriesRef.current = candleSeries;
     volumeRef.current = volume;
     targetSeriesRef.current = targetSeries;
-    // ── PART 37: attach the EXPIRY boundary to the CANDLE series ──
+    // -- PART 37: attach the EXPIRY boundary to the CANDLE series --
     // Created here (not at ref-init) because a primitive only gets its
     // `attached()` — and therefore its chart/timeScale handles — once a series
     // holds it. Attached to the CANDLES, which are added before the target
@@ -1456,7 +1459,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       tradeExpiryMarkerRef.current = null;
       tradeExpiryMarkerThemeRef.current = null;
     }
-    // ── DEBUG SURFACE BASELINE (zero-data parity) ──
+    // -- DEBUG SURFACE BASELINE (zero-data parity) --
     // `writeChartDebug` is otherwise only reachable through `updateTargetLayer`,
     // which requires at least one rendered candle. On a cold/offline start (no
     // seed bars yet) that never fires, so `window.__chartDebug` stayed
@@ -1579,7 +1582,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     // PART 39 [375] — the count the BUILDING HISTORY chip reports is the bars
     // actually painted on THIS grid, not a request count.
     setClosedCount(rows.length);
-    // ── TARGET-LAYER ANCHOR (fix: no vanish on server candle close) ──
+    // -- TARGET-LAYER ANCHOR (fix: no vanish on server candle close) --
     // `swapKey` changes whenever serverCandleVersion / data.length / dataEpoch /
     // lead offset changes. Only the STRUCTURAL part (symbol/timeframe/data
     // epoch/lead) means the old target layer is meaningless for a different
@@ -1683,7 +1686,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       if (!want || emitSymbol !== want) return;
       const candleSeries = candleSeriesRef.current;
       if (!candleSeries) return;
-      // ── RAW-ONLY MUTATION (the "giant spike" / mixed-axis fix) ──
+      // -- RAW-ONLY MUTATION (the "giant spike" / mixed-axis fix) --
       // The tick is a REAL broker candle. It is merged into `rawRef` and NEVER
       // into `dataRef`, which holds the Heikin-Ashi fold. Previously the raw
       // tick was spliced straight into the folded array, so the forming bar
@@ -1706,7 +1709,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     return unsub;
   }, [activeSymbol, swapKey]);
 
-  // ── UNIFIED rAF PAINTER (MASTER MISSION part 3) ──
+  // -- UNIFIED rAF PAINTER (MASTER MISSION part 3) --
   // ONE requestAnimationFrame loop owns: (1) the coalesced candle/volume/target
   // paint (drained at most once per frame, so N ticks/frame == 1 paint), (2)
   // the now-divider coordinate (throttled to once per second), and (3) the HUD
@@ -1720,7 +1723,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
     let lastHudSecond = -1;
     const frame = () => {
       try {
-        // ── (1) COALESCED CHART PAINT — drain pending ticks once per frame ──
+        // -- (1) COALESCED CHART PAINT — drain pending ticks once per frame --
         if (pendingPaintRef.current) {
           pendingPaintRef.current = false;
           const candleSeries = candleSeriesRef.current;
@@ -1736,7 +1739,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           const arr = dataRef.current;
           const count = arr.length;
           if (candleSeries && count > 0) {
-            // ── FRAME CACHE (quick-fix part 2) — a coalesced burst of ticks
+            // -- FRAME CACHE (quick-fix part 2) — a coalesced burst of ticks
             // that resolves to the SAME row set MUST NOT re-paint. Compare the
             // forming-candle fingerprint + row count against the last frame we
             // drew and skip the whole repaint (series update calls + the
@@ -1807,7 +1810,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             firstTickRef.current = true;
           }
         }
-        // ── (2) + (3) DIVIDER + HUD CLOCK — at most once per second ──
+        // -- (2) + (3) DIVIDER + HUD CLOCK — at most once per second --
         const now = Date.now();
         const sec = Math.floor(now / 1000);
         if (sec !== lastDividerSecond) {
@@ -1895,16 +1898,90 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // The UI shows the reason instead of silently going blank.
   const hudSuppressReason = signalHoldRef.current.reason;
 
+  // -- FULLSCREEN -- the browser Fullscreen API hands the whole viewport to the
+  // chart root. The ResizeObserver on the canvas container already re-applies
+  // the new width/height, so candles, overlays and the time axis scale without
+  // a chart rebuild. `fullscreenchange` keeps the button state honest when the
+  // user exits with Esc / the browser UI rather than our button.
+  useEffect(() => {
+    const root = rootRef.current;
+    const syncFullscreen = () =>
+      setIsFullscreen(document.fullscreenElement === root);
+    const onFullscreenKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && document.fullscreenElement === root) {
+        void document.exitFullscreen?.().catch(() => {});
+      }
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    document.addEventListener("keydown", onFullscreenKey);
+    syncFullscreen();
+    return () => {
+      document.removeEventListener("fullscreenchange", syncFullscreen);
+      document.removeEventListener("keydown", onFullscreenKey);
+      if (document.fullscreenElement === root) {
+        void document.exitFullscreen?.().catch(() => {});
+      }
+    };
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    const el = rootRef.current;
+    if (!el) return;
+    try {
+      if (document.fullscreenElement === el) {
+        await document.exitFullscreen();
+        return;
+      }
+      if (document.fullscreenElement) await document.exitFullscreen();
+      await el.requestFullscreen({ navigationUI: "hide" });
+    } catch {
+      // Browser denied fullscreen (iframe policy / unsupported): stay inline.
+    }
+  }, []);
+
   return (
     <div
-      className="relative w-full h-[320px] xl:h-full min-h-0 rounded-xl overflow-hidden border bg-[var(--tp-chart-bg)] border-[var(--tp-border)] transition-colors duration-150"
+      ref={rootRef}
+      data-testid="chart-root"
+      data-fullscreen={isFullscreen ? "true" : "false"}
+      className="tp-chart-root relative w-full h-[320px] xl:h-full min-h-0 rounded-xl overflow-hidden border bg-[var(--tp-chart-bg)] border-[var(--tp-border)] transition-colors duration-150"
     >
       {/* Publishes the SAME view the HUD above rendered — one evaluate, one
           truth, so the CoherenceStrip cannot show a different signal. */}
       <SignalViewPublisher view={hudView} />
       <div ref={containerRef} className="absolute inset-0" />
 
-      {/* ── CURRENT TIME (LIVE) DIVIDER ── the neon boundary between the real
+      {/* CHART HEADER CONTROL — FULLSCREEN. Sits above every overlay so it stays
+          clickable while the HUD/legend stack grows. Entering fullscreen hands
+          the full viewport to this root; Esc or the button exits. */}
+      <div className="absolute top-2 right-2 z-30">
+        <button
+          type="button"
+          data-testid="chart-fullscreen-toggle"
+          aria-pressed={isFullscreen}
+          aria-label={isFullscreen ? "Exit fullscreen chart" : "Fullscreen chart"}
+          title={
+            isFullscreen
+              ? "Exit fullscreen (Esc)"
+              : "Fullscreen chart — candlesticks, overlays and time axis fill the screen"
+          }
+          onClick={toggleFullscreen}
+          className={
+            "flex h-7 w-7 max-sm:h-11 max-sm:w-11 items-center justify-center rounded-control border shadow-card transition-all duration-150 active:scale-95 " +
+            (isFullscreen
+              ? "border-primary/60 bg-primary/15 text-primary"
+              : "border-line bg-surface text-ink-muted hover:border-primary/40 hover:bg-elevated hover:text-ink")
+          }
+        >
+          {isFullscreen ? (
+            <Minimize2 size={14} strokeWidth={2.25} className="h-4 w-4" />
+          ) : (
+            <Maximize2 size={14} strokeWidth={2.25} className="h-4 w-4" />
+          )}
+        </button>
+      </div>
+
+      {/* -- CURRENT TIME (LIVE) DIVIDER -- the neon boundary between the real
           historical tape (left) and the Future Prediction Zone (right). Pinned
           to the wall clock; only valid once the live stream is flowing. */}
       {currentDividerX !== null ? (
@@ -1912,7 +1989,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           className="pointer-events-none absolute inset-y-0 z-10 border-l border-emerald-300/80 shadow-[0_0_12px_rgba(0,245,160,0.7)]"
           style={{ left: currentDividerX }}
         >
-          <span className="absolute left-1 top-2 whitespace-nowrap rounded border border-emerald-300/40 bg-obsidian/90 px-1.5 py-1 font-mono text-[9px] font-black uppercase tracking-widest text-emerald-200">
+          <span className="absolute left-1 top-2 whitespace-nowrap rounded border border-st-pos/40 bg-obsidian/90 px-1.5 py-1 font-mono text-[9px] font-black uppercase tracking-widest text-st-pos">
             CURRENT TIME (LIVE)
           </span>
         </div>
@@ -1926,11 +2003,11 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5">
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-[9px] font-mono text-emerald-400 uppercase tracking-widest font-black">
+          <span className="text-[9px] font-mono text-st-pos uppercase tracking-widest font-black">
             LIVE - {tf}
           </span>
           {targetDurationMin > 1 ? (
-            <span className="text-[9px] font-mono text-sky-400 uppercase tracking-widest font-bold bg-sky-500/10 border border-sky-500/20 rounded px-1.5 py-0.5">
+            <span className="text-[9px] font-mono text-st-info uppercase tracking-widest font-bold bg-st-info/10 border border-st-info/20 rounded px-1.5 py-0.5">
               LOOKAHEAD {targetDurationMin}m
             </span>
           ) : null}
@@ -1948,7 +2025,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         >
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-          <span className="text-[9px] font-mono text-amber-400 uppercase tracking-widest font-black">
+          <span className="text-[9px] font-mono text-st-warn uppercase tracking-widest font-black">
             PO OFFLINE · PROXY TICKS
           </span>
         </div>
@@ -1960,7 +2037,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5">
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-          <span className="text-[9px] font-mono text-amber-400 uppercase tracking-widest font-black">
+          <span className="text-[9px] font-mono text-st-warn uppercase tracking-widest font-black">
             STALE PRICE - {tf}
           </span>
         </div>
@@ -1972,7 +2049,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
         <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5">
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-          <span className="text-[9px] font-mono text-amber-400 uppercase tracking-widest font-black">
+          <span className="text-[9px] font-mono text-st-warn uppercase tracking-widest font-black">
             {feedWaiting
               ? "AWAITING LIVE FEED / CONNECTING..."
               : "WAITING FOR LIVE STREAM..."}
@@ -1996,7 +2073,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             data-building={closedCount < MIN_HISTORY_CLOSES ? "true" : "false"}
             className={`text-[8px] font-mono uppercase tracking-widest font-bold rounded-chip px-1.5 py-0.5 border ${
               closedCount < MIN_HISTORY_CLOSES
-                ? "text-amber-300 bg-amber-500/10 border-amber-500/30"
+                ? "text-st-warn bg-st-warn/10 border-st-warn/30"
                 : "text-term-ink-faint bg-transparent border-term-line"
             }`}
             title={
@@ -2014,7 +2091,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
 
       {!feedOffline && hasCandles && (feedWaiting || streamStalled) && (
         <div className="pointer-events-none absolute inset-0 flex items-end justify-center pb-2">
-          <p className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest bg-black/40 px-2 py-1 rounded backdrop-blur-sm">
+          <p className="text-[9px] font-mono text-st-warn/80 uppercase tracking-widest bg-black/40 px-2 py-1 rounded backdrop-blur-sm">
             {feedWaiting
               ? "Live feed synchronising — awaiting a valid tick (no fake prices)"
               : "Live feed paused — resuming on next tick"}
@@ -2025,7 +2102,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       {/* FEED-OFFLINE OVERLAY */}
       {feedOffline ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-rose-300">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-st-neg">
             {feedStatus === "auth_failed"
               ? "FEED OFFLINE — auth failed"
               : "FEED OFFLINE — awaiting SSID"}
@@ -2046,10 +2123,10 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
       {/* PARITY-BREACH DIAGNOSTIC — falling raw ticks without bucket writes. */}
       {hasCandles && candleParityBreach ? (
         <div
-          className="pointer-events-none absolute top-2 right-2 z-10 flex items-center gap-1.5"
+          className="pointer-events-none absolute top-2 right-11 z-10 flex items-center gap-1.5"
           title={`Falling raw ticks without bucket writes (${candleParityBreach.tickCount} ticks / ${candleParityBreach.bucketWrites} writes). Validating the aggregation pipeline — the local bar may lag while this is active.`}
         >
-          <span className="text-[9px] font-mono text-rose-300 uppercase tracking-widest font-black bg-rose-500/10 border border-rose-500/40 rounded px-1.5 py-0.5">
+          <span className="text-[9px] font-mono text-st-neg uppercase tracking-widest font-black bg-st-neg/10 border border-st-neg/40 rounded px-1.5 py-0.5">
             PARITY BREACH
           </span>
         </div>
@@ -2072,16 +2149,16 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           timeframe (always shown once candles exist), and the countdown to
           target expiry aligned to PO candle closures. */}
       {hasCandles && !feedOffline ? (
-        <div className="pointer-events-none absolute top-10 right-2 z-10 flex flex-col items-end gap-1">
+        <div className="pointer-events-none absolute top-14 right-2 z-10 flex flex-col items-end gap-1 sm:top-10">
           {/* PART 43.5 [474] — PO-offline OTC has NO verdict: replace the
               BUY/SELL/MARKET-WAIT chip with an explicit offline chip so no
               stale verdict is ever shown while only proxy ticks flow. */}
           {hudPoOffline ? (
             <div
               data-testid="hud-po-offline"
-              className="flex items-center gap-2 rounded-md border border-amber-400/40 bg-amber-500/10 backdrop-blur-sm px-2 py-1"
+              className="flex items-center gap-2 rounded-md border border-amber-400/40 bg-st-warn/10 backdrop-blur-sm px-2 py-1"
             >
-              <span className="text-[10px] font-mono font-black uppercase tracking-widest text-amber-300">
+              <span className="text-[10px] font-mono font-black uppercase tracking-widest text-st-warn">
                 PO OFFLINE — PROXY TICKS
               </span>
             </div>
@@ -2112,13 +2189,13 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               gate actually suppressed the display, so the user sees WHY the
               label didn't flip instead of a silent blank. */}
           {hudSuppressReason ? (
-            <div className="flex items-center gap-2 rounded-md border border-amber-400/30 bg-amber-500/10 backdrop-blur-sm px-2 py-1 font-mono text-[9px] uppercase tracking-widest">
+            <div className="flex items-center gap-2 rounded-md border border-amber-400/30 bg-st-warn/10 backdrop-blur-sm px-2 py-1 font-mono text-[9px] uppercase tracking-widest">
               {hudSuppressReason === "too_late" ? (
-                <span className="font-black text-amber-300">
+                <span className="font-black text-st-warn">
                   TOO LATE TO ACT
                 </span>
               ) : hudSuppressReason === "regime_scored_only" ? (
-                <span className="font-black text-violet-300">
+                <span className="font-black text-st-teal">
                   SCORED-ONLY — RANDOM WALK
                 </span>
               ) : (
@@ -2140,7 +2217,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
             className={`flex items-center gap-2 rounded-md backdrop-blur-sm px-2 py-1 font-mono text-[10px] ${
               hudTargetShown
                 ? "border border-white/10 bg-obsidian/85"
-                : "border border-amber-400/30 bg-amber-500/10"
+                : "border border-amber-400/30 bg-st-warn/10"
             }`}
           >
             <span className="uppercase tracking-widest text-slate-400">TGT</span>
@@ -2152,7 +2229,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
                 {hudLive > 0 ? (
                   <span
                     className={`font-bold tabular-nums ${
-                      hudDeltaPct >= 0 ? "text-emerald-400" : "text-rose-400"
+                      hudDeltaPct >= 0 ? "text-st-pos" : "text-st-neg"
                     }`}
                   >
                     {hudDeltaPct >= 0 ? "+" : ""}
@@ -2162,7 +2239,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               </>
             ) : (
               <span
-                className="font-black uppercase tracking-widest text-amber-300"
+                className="font-black uppercase tracking-widest text-st-warn"
                 title={hudTargetCopy.hint}
               >
                 {hudTargetCopy.label}
@@ -2178,7 +2255,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               <span className="uppercase tracking-widest text-slate-400">
                 TARGET CANDLES
               </span>
-              <span className="font-black tabular-nums text-sky-300">
+              <span className="font-black tabular-nums text-st-info">
                 {formatTargetCandlesLabel(hudTargetCandles)}
               </span>
             </div>
@@ -2186,7 +2263,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           {!hudPoOffline && hudZone && hudCountdown ? (
             <div className="flex items-center gap-2 rounded-md border border-white/10 bg-obsidian/85 backdrop-blur-sm px-2 py-1 font-mono text-[10px]">
               <span className="uppercase tracking-widest text-slate-400">EXPIRY</span>
-              <span className="font-black tabular-nums text-sky-300">{hudCountdown}</span>
+              <span className="font-black tabular-nums text-st-info">{hudCountdown}</span>
             </div>
           ) : null}
         </div>
@@ -2197,7 +2274,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           grid that far ahead instead. Persists via the store. */}
       {hasCandles ? (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 z-10">
-          <span className="text-[9px] font-mono text-sky-400 uppercase tracking-widest font-bold bg-sky-500/10 border border-sky-500/20 rounded px-1.5 py-0.5">
+          <span className="text-[9px] font-mono text-st-info uppercase tracking-widest font-bold bg-st-info/10 border border-st-info/20 rounded px-1.5 py-0.5">
             LEAD
           </span>
           {LEAD_OFFSET_OPTIONS.map((opt) => {
@@ -2210,7 +2287,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
                 onClick={() => setLeadOffset(opt.value)}
                 className={`text-[9px] font-mono uppercase tracking-widest font-bold rounded px-1.5 py-0.5 transition-colors ${
                   active
-                    ? "bg-sky-500/25 border border-sky-400/50 text-sky-300"
+                    ? "bg-st-info/25 border border-st-info/50 text-st-info"
                     : "bg-white/5 border border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20"
                 }`}
                 title={
@@ -2227,7 +2304,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           <button
             type="button"
             onClick={() => hardResetLiveData()}
-            className="text-[9px] font-mono uppercase tracking-widest font-bold rounded px-1.5 py-0.5 transition-colors bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:text-rose-200 hover:border-rose-400/50"
+            className="text-[9px] font-mono uppercase tracking-widest font-bold rounded px-1.5 py-0.5 transition-colors bg-st-neg/10 border border-st-neg/20 text-st-neg hover:text-st-neg hover:border-st-neg/50"
             title="Clear all caches and re-initialize the live feed from the broker's tick ring"
           >
             RESET FEED

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
@@ -106,23 +106,23 @@ export const Header: React.FC = () => {
   };
   return (
     <>
-      <nav className="shrink-0 border-b border-[var(--tp-border)] bg-header-sheen backdrop-blur-xl sticky top-0 z-40 transition-colors duration-150">
+      <nav className="shrink-0 border-b border-line bg-header-sheen backdrop-blur-xl sticky top-0 z-40 transition-colors duration-150">
         <div className="max-w-full mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-3">
           {/* Left: Hamburger (mobile/tablet) + Branding */}
           <div className="flex items-center gap-2.5 shrink-0">
             <button
               onClick={() => setDrawerOpen((v) => !v)}
-              className="lg:hidden flex items-center justify-center w-9 h-9 rounded-lg bg-obsidian-900 border border-slate-700/60 text-slate-300 hover:text-white transition-colors"
+              className="lg:hidden flex items-center justify-center w-11 h-11 rounded-control bg-elevated border border-line text-ink-muted hover:text-ink hover:bg-surface transition-colors"
               aria-label={drawerOpen ? t("closeNavigation") : t("openNavigation")}
               aria-expanded={drawerOpen}
             >
               {drawerOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
             <Link href="/" className="flex items-center gap-2 group">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 bg-gradient-to-br from-blue-600 to-blue-800 rounded-lg flex items-center justify-center shadow-lg shadow-blue-600/20 group-hover:shadow-blue-600/40 transition-shadow duration-300">
-                <span className="text-white font-black text-[10px] sm:text-xs">T</span>
+              <div className="w-8 h-8 bg-gradient-to-br from-primary to-brand-hover rounded-control flex items-center justify-center shadow-lg shadow-primary/20 group-hover:shadow-primary/40 transition-shadow duration-300">
+                <span className="text-white font-black text-xs">T</span>
               </div>
-              <span className="text-slate-100 font-bold text-xs sm:text-sm tracking-widest uppercase hidden sm:inline whitespace-nowrap">
+              <span className="text-ink font-bold text-xs sm:text-sm tracking-widest uppercase hidden sm:inline whitespace-nowrap">
                 Alpha.5 Pro
               </span>
             </Link>
@@ -135,10 +135,10 @@ export const Header: React.FC = () => {
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap",
+                  "flex items-center gap-1.5 px-3.5 py-2 rounded-control text-[11px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap border",
                   isActive(item.href)
-                    ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent",
+                    ? "bg-primary/15 text-primary border-primary/30"
+                    : "text-ink-muted hover:text-ink hover:bg-elevated border-transparent",
                 )}
               >
                 <item.icon size={14} className="shrink-0" />
@@ -151,13 +151,13 @@ export const Header: React.FC = () => {
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             {/* User profile chip */}
             {user ? (
-              <div className="hidden md:flex items-center gap-2 pl-2 pr-1 py-1 rounded-xl bg-obsidian-900/70 border border-slate-800">
-                <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-blue-600 to-blue-800 flex items-center justify-center shrink-0 shadow-sm shadow-blue-600/30">
+              <div className="hidden md:flex items-center gap-2 pl-2 pr-1 py-1 rounded-control bg-elevated border border-line">
+                <div className="w-6 h-6 rounded-control bg-gradient-to-br from-primary to-brand-hover flex items-center justify-center shrink-0 shadow-sm shadow-primary/30">
                   <span className="text-white font-black text-[10px] leading-none">
                     {profileInitial}
                   </span>
                 </div>
-                <span className="text-[11px] font-semibold text-slate-300 max-w-[130px] truncate">
+                <span className="text-[11px] font-semibold text-ink-muted max-w-[130px] truncate">
                   {user.name?.trim() || user.email}
                 </span>
                 <button
@@ -165,7 +165,7 @@ export const Header: React.FC = () => {
                   onClick={() => logout()}
                   title={t("logout")}
                   aria-label={t("logout")}
-                  className="flex items-center justify-center w-6 h-6 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                  className="flex items-center justify-center w-8 h-8 rounded-control text-ink-faint hover:text-danger hover:bg-danger/10 transition-colors"
                 >
                   <LogOut size={13} />
                 </button>
@@ -173,16 +173,16 @@ export const Header: React.FC = () => {
             ) : (
               <Link
                 href="/login"
-                className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-wider bg-emerald-600/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-600/20 transition-colors"
+                className="hidden md:flex items-center gap-1.5 px-3 py-2 rounded-control text-[11px] font-bold uppercase tracking-wider bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors"
               >
                 <LogIn size={13} />
                 {t("signIn")}
               </Link>
             )}
             {/* Engine status */}
-            <div className="hidden xs:flex items-center gap-1.5 sm:gap-2 pl-2 sm:pl-3 border-l border-slate-800">
-              <div className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${connected ? "bg-emerald-500" : "bg-rose-500"} ${connected ? "animate-pulse" : ""} ${connected ? "shadow-emerald-500/40" : "shadow-rose-500/40"}`} />
-              <span className="text-[9px] sm:text-xs uppercase tracking-widest font-bold text-slate-400">
+            <div className="hidden xs:flex items-center gap-1.5 sm:gap-2 pl-2 sm:pl-3 border-l border-line">
+              <div className={`w-2 h-2 rounded-full ${connected ? "bg-success" : "bg-danger"} ${connected ? "animate-pulse" : ""} ${connected ? "shadow-success/40" : "shadow-danger/40"}`} />
+              <span className="text-[9px] sm:text-xs uppercase tracking-widest font-bold text-ink-muted">
                 <span className="hidden xs:inline">{connected ? t("sync") : t("error")}</span>
                 <span className="xs:hidden">{connected ? "ON" : "OFF"}</span>
               </span>
@@ -205,26 +205,26 @@ export const Header: React.FC = () => {
       <div
         className={cn(
           "lg:hidden fixed inset-y-0 left-0 z-[65] flex flex-col w-[290px] max-w-[85vw]",
-          "bg-obsidian border-r border-slate-800/80",
+          "bg-surface border-r border-line",
           "transform transition-transform duration-300 ease-in-out",
           drawerOpen ? "translate-x-0" : "-translate-x-full",
         )}
         aria-hidden={!drawerOpen}
       >
         {/* Engine status */}
-        <div className="shrink-0 mx-3 mt-4 mb-2 px-4 py-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg flex items-center gap-2.5">
+        <div className="shrink-0 mx-3 mt-4 mb-2 px-4 py-2.5 bg-success/10 border border-success/20 rounded-control flex items-center gap-2.5">
           <div className="relative">
-            <div className={cn("w-2.5 h-2.5 rounded-full", connected ? "bg-emerald-500" : "bg-rose-500")} />
-            <div className={cn("absolute inset-0 w-2.5 h-2.5 rounded-full opacity-40", connected ? "bg-emerald-500 animate-ping" : "bg-rose-500")} />
+            <div className={cn("w-2.5 h-2.5 rounded-full", connected ? "bg-success" : "bg-danger")} />
+            <div className={cn("absolute inset-0 w-2.5 h-2.5 rounded-full opacity-40", connected ? "bg-success animate-ping" : "bg-danger")} />
           </div>
-          <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider leading-none">
+          <span className={cn("text-[10px] font-bold uppercase tracking-wider leading-none", connected ? "text-success" : "text-danger")}>
             {connected ? t("engineActive") : t("engineOffline")}
           </span>
         </div>
 
         {/* Navigation links */}
         <div className="flex-1 px-3 overflow-y-auto custom-scrollbar">
-          <div className="text-[9px] font-bold text-slate-600 uppercase tracking-[0.2em] px-3 pb-2">
+          <div className="text-[9px] font-bold text-ink-faint uppercase tracking-[0.2em] px-3 pb-2">
             {t("navigation")}
           </div>
           {navItems.map((item) => {
@@ -235,16 +235,16 @@ export const Header: React.FC = () => {
                 href={item.href}
                 onClick={() => setDrawerOpen(false)}
                 className={cn(
-                  "flex items-center gap-3 px-4 min-h-[44px] rounded-xl transition-all duration-200 group mb-0.5",
+                  "flex items-center gap-3 px-4 min-h-[44px] rounded-control transition-all duration-200 group mb-0.5 border",
                   active
-                    ? "bg-emerald-500/15 text-white border border-emerald-500/30 font-bold"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/40 border border-transparent",
+                    ? "bg-primary/15 text-ink border-primary/30 font-bold"
+                    : "text-ink-muted hover:text-ink hover:bg-elevated border-transparent",
                 )}
               >
-                <item.icon size={18} className={cn("shrink-0 transition-colors duration-200", active ? "text-emerald-400" : "text-slate-500 group-hover:text-emerald-400")} />
+                <item.icon size={18} className={cn("shrink-0 transition-colors duration-200", active ? "text-primary" : "text-ink-faint group-hover:text-primary")} />
                 <span className="text-sm font-semibold tracking-wide">{item.label}</span>
                 {active && (
-                  <div className="ml-auto w-1 h-4 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
+                  <div className="ml-auto w-1 h-4 rounded-full bg-primary shadow-sm shadow-primary/50" />
                 )}
               </Link>
             );
@@ -252,8 +252,8 @@ export const Header: React.FC = () => {
         </div>
 
         {/* Theme + Language convenience */}
-        <div className="shrink-0 px-4 py-3 border-t border-slate-800/60 flex items-center justify-between">
-          <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">
+        <div className="shrink-0 px-4 py-3 border-t border-line flex items-center justify-between">
+          <span className="text-[10px] font-bold text-ink-faint uppercase tracking-wider">
             {t("appearance")}
           </span>
           <div className="flex items-center gap-1.5">

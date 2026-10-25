@@ -41,7 +41,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0B0E14",
+  themeColor: "#0B0F19",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
@@ -90,7 +90,7 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: THEME_PREPAINT_SCRIPT }} />
         <script dangerouslySetInnerHTML={{ __html: LANG_PREPAINT_SCRIPT }} />
       </head>
-      <body className="bg-obsidian dark:bg-obsidian text-slate-100 selection:bg-emerald-500/30 antialiased">
+      <body className="bg-app text-ink selection:bg-primary/30 antialiased">
         <ThemeProvider>
           <LanguageProvider>
             <SocketProvider>
@@ -106,14 +106,14 @@ export default function RootLayout({
               */}
               <ErrorBoundary
                 fallback={
-                  <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 bg-obsidian text-slate-100 p-6">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-blue-800 flex items-center justify-center">
+                  <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 bg-app text-ink p-6">
+                    <div className="w-10 h-10 rounded-control bg-gradient-to-br from-primary to-brand-hover flex items-center justify-center">
                       <span className="text-white font-black text-sm">T</span>
                     </div>
-                    <p className="text-xs font-mono text-slate-300 uppercase tracking-widest">
-                      Alpha.5 Pro — Interface Error
+                    <p className="text-xs font-mono text-ink-muted uppercase tracking-widest">
+                      Alpha.5 Pro - Interface Error
                     </p>
-                    <p className="text-[11px] font-mono text-slate-500 text-center max-w-md">
+                    <p className="text-[11px] font-mono text-ink-faint text-center max-w-md">
                       The trading interface failed to render. Reload the page to
                       reconnect to the terminal.
                     </p>

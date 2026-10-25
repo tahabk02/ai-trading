@@ -1,4 +1,4 @@
-@tailwind base;
+﻿@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
@@ -19,9 +19,9 @@
     color-scheme: dark;
 
     /* ── raw channel triplets (consumed by tailwind.config.js) ── */
-    --ob: 11 14 20; /* #0b0e14 */
-    --ob-900: 18 21 29; /* #12151d */
-    --ob-950: 7 9 16; /* #070910 */
+    --ob: 11 15 25; /* #0B0F19 */
+    --ob-900: 17 24 39; /* #111827 */
+    --ob-950: 8 12 20; /* #080C14 */
     --sl-50: 248 250 252;
     --sl-100: 241 245 249;
     --sl-200: 226 232 240;
@@ -30,28 +30,38 @@
     --sl-500: 100 116 139;
     --sl-600: 71 85 105;
     --sl-700: 51 65 85;
-    --sl-800: 30 41 59;
-    --sl-900: 15 23 42;
-    --sl-950: 2 6 23;
+    --sl-800: 31 41 55; /* #1F2937 - borders / hover */
+    --sl-900: 17 24 39; /* #111827 - cards */
+    --sl-950: 11 15 25; /* #0B0F19 - page */
 
     /* ── semantic tokens ── */
-    --tp-bg: #070910;
-    --tp-surface: #0f1420;
-    --tp-elevated: #171c28;
-    --tp-well: #04060b;
-    --tp-border: rgba(148, 163, 184, 0.14);
-    --tp-border-strong: #2a3448;
+    --tp-bg: #0b0f19;
+    --tp-surface: #111827;
+    --tp-elevated: #1f2937;
+    --tp-well: #0b0f19;
+    --tp-border: #1f2937;
+    --tp-border-strong: #374151;
     --tp-text: #f8fafc;
     --tp-text-2: #94a3b8;
     --tp-text-3: #64748b;
-    --tp-accent: #22ab94;
+    --tp-primary: #2563eb;
+  --tp-primary-rgb: 37 99 235;
+    --tp-primary-hover: #1d4ed8;
+  --tp-primary-hover-rgb: 29 78 216;
+    --tp-success: #10b981;
+  --tp-success-rgb: 16 185 129;
+    --tp-danger: #ef4444;
+  --tp-danger-rgb: 239 68 68;
+    --tp-warning: #f59e0b;
+  --tp-warning-rgb: 245 158 11;
+    --tp-accent: #2563eb;
     --tp-accent-2: #3b82f6;
 
     /* ── chart tokens (read at runtime by financial-chart.tsx) ── */
-    --tp-chart-bg: #070910;
-    --tp-grid: rgba(148, 163, 184, 0.14);
+    --tp-chart-bg: #0b0f19;
+    --tp-grid: rgba(148, 163, 184, 0.1);
     --tp-axis-text: #94a3b8;
-    --tp-chart-border: #2a3448;
+    --tp-chart-border: #1f2937;
     --tp-crosshair: rgba(148, 163, 184, 0.35);
     --tp-price-line: rgba(148, 163, 184, 0.85);
     /* PART 37 — vertical EXPIRY boundary. Deliberately NOT the price-line hue:
@@ -68,19 +78,17 @@
        hairline, ink scales = text. Gold = real-market / hold, crypto =
        digital channel. Consumed by tailwind.config.js via
        rgb(var(--x) / <alpha-value>) so `/opacity` modifiers keep working. */
-    --term-canvas: 6 7 11;       /* #06070B */
-    --term-panel: 13 16 26;      /* #0D101A */
-    --term-line: 42 50 72;       /* #2A3248 */
-    --term-ink: 232 237 246;     /* #E8EDF6 */
-    --term-ink-dim: 129 140 160; /* #818CA0 */
-    --term-ink-faint: 112 124 149; /* #707C95 — raised from #68748D, which
-       measured 4.04:1 on --term-panel and failed WCAG AA (4.5) for the 8-10px
-       labels that use this token (pair captions, expiry pills, pin stars). */
-    --term-gold: 216 160 72;     /* #D8A048 */
-    --term-crypto: 0 179 201;    /* #00B3C9 */
+    --term-canvas: 11 15 25;       /* #0B0F19 */
+    --term-panel: 17 24 39;        /* #111827 */
+    --term-line: 31 41 55;         /* #1F2937 */
+    --term-ink: 248 250 252;       /* #F8FAFC */
+    --term-ink-dim: 148 163 184;   /* #94A3B8 */
+    --term-ink-faint: 125 139 160; /* #7D8BA0 */
+    --term-gold: 245 158 11;       /* #F59E0B */
+    --term-crypto: 6 182 212;      /* #06B6D4 */
 
-    --bull: 34 171 148;          /* #22ab94 — direction UP (candles match) */
-    --bear: 242 54 69;           /* #f23645 — direction DOWN (candles match) */
+    --bull: 16 185 129;            /* #10B981 - direction UP */
+    --bear: 239 68 68;             /* #EF4444 - direction DOWN */
 
     /* ── STATUS HUE CHANNELS ────────────────────────────────────────────────
        The `--sl-*` / `--ob*` scales invert under `html.light`, so slate ink
@@ -94,12 +102,12 @@
        slate scale already has. Dark values are the exact literals they replace,
        so dark mode is pixel-identical; light values are darkened to clear
        WCAG AA (>= 4.5:1) on white, #F8FAFC canvas and #F1F5F9 elevated. */
-    --st-pos: 52 211 153;      /* #34D399 emerald-400 (was literal) */
-    --st-neg: 251 113 132;     /* #FB7184 rose-400 (was literal) */
-    --st-warn: 251 191 36;     /* #FBBF24 amber-400 (was literal) */
-    --st-caution: 251 146 60;  /* #FB923C orange-400 (was literal) */
-    --st-info: 96 165 250;     /* #60A5FA blue-400 (was literal) */
-    --st-teal: 94 234 212;     /* #5EEAD4 teal-300 (was literal) */
+    --st-pos: 52 211 153;      /* #34D399 */
+    --st-neg: 251 113 132;     /* #FB7184 */
+    --st-warn: 251 191 36;     /* #FBBF24 */
+    --st-caution: 251 146 60;  /* #FB923C */
+    --st-info: 96 165 250;     /* #60A5FA */
+    --st-teal: 94 234 212;     /* #5EEAD4 */
 
     /* ── 8px SPACING GRID (4 / 8 / 12 / 16 / 24 / 32 / 48) ──
        The terminal lays out exclusively on this scale. Tailwind's numeric
@@ -126,27 +134,37 @@
     --ob-950: 255 255 255;
     --sl-50: 2 6 23;
     --sl-100: 15 23 42;
-    --sl-200: 30 41 59;
-    --sl-300: 51 65 85;
+    --sl-200: 15 23 42;
+    --sl-300: 30 41 59;
     --sl-400: 71 85 105;
     --sl-500: 100 116 139;
     --sl-600: 148 163 184;
     --sl-700: 203 213 225;
-    --sl-800: 226 232 240;
-    --sl-900: 241 245 249;
-    --sl-950: 248 250 252;
+    --sl-800: 226 232 240; /* #E2E8F0 - borders */
+    --sl-900: 241 245 249; /* #F1F5F9 - elevated */
+    --sl-950: 248 250 252; /* #F8FAFC - page */
 
     --tp-bg: #f8fafc;
     --tp-surface: #ffffff;
     --tp-elevated: #f1f5f9;
-    --tp-well: #ffffff;
-    --tp-border: rgba(15, 23, 42, 0.08);
+    --tp-well: #f8fafc;
+    --tp-border: #e2e8f0;
     --tp-border-strong: #cbd5e1;
-    --tp-text: #1e293b;
+    --tp-text: #0f172a;
     --tp-text-2: #475569;
     --tp-text-3: #64748b;
-    --tp-accent: #0d9488;
-    --tp-accent-2: #2563eb;
+    --tp-primary: #2563eb;
+  --tp-primary-rgb: 37 99 235;
+    --tp-primary-hover: #1d4ed8;
+  --tp-primary-hover-rgb: 29 78 216;
+    --tp-success: #059669;
+  --tp-success-rgb: 5 150 105;
+    --tp-danger: #dc2626;
+  --tp-danger-rgb: 220 38 38;
+    --tp-warning: #b45309;
+  --tp-warning-rgb: 180 83 9;
+    --tp-accent: #2563eb;
+    --tp-accent-2: #1d4ed8;
 
     --tp-chart-bg: #ffffff;
     --tp-grid: rgba(15, 23, 42, 0.06);
@@ -179,14 +197,17 @@
          crypto   #0E7490 on #FFFFFF    ->  5.3:1  (was #00B3C9 -> 2.4:1)
        Gold/cyan are darkened rather than kept: the dark-theme values are
        calibrated for a #06070B bed and fail hard against white. */
-    --term-canvas: 248 250 252;   /* #F8FAFC — page air, matches --tp-bg */
-    --term-panel: 255 255 255;    /* #FFFFFF — cell bed */
-    --term-line: 203 213 225;     /* #CBD5E1 — hairline (1.5:1 on white) */
+    --term-canvas: 248 250 252;   /* #F8FAFC - page air, matches --tp-bg */
+    --term-panel: 255 255 255;    /* #FFFFFF - card bed */
+    --term-line: 203 213 225;     /* #CBD5E1 - hairline */
     --term-ink: 15 23 42;         /* #0F172A */
     --term-ink-dim: 71 85 105;    /* #475569 */
     --term-ink-faint: 100 116 139; /* #64748B */
-    --term-gold: 161 98 7;        /* #A16207 */
-    --term-crypto: 14 116 160;    /* #0E7490 */
+    --term-gold: 180 83 9;        /* #B45309 */
+    --term-crypto: 14 116 144;    /* #0E7490 */
+
+    --bull: 5 150 105;            /* #059669 */
+    --bear: 220 38 38;            /* #DC2626 */
 
     /* ── STATUS HUE CHANNELS — LIGHT OVERRIDES ──
        Same failure mode as the `--term-*` leak above: these were stock
@@ -389,8 +410,10 @@
   .tp-card {
     background-color: var(--tp-surface);
     border: 1px solid var(--tp-border);
-    border-radius: 8px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    border-radius: 12px;
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.04),
+      0 1px 3px rgba(0, 0, 0, 0.06);
     transition:
       border-color 150ms ease,
       box-shadow 150ms ease,
@@ -398,58 +421,254 @@
       background-color 150ms ease;
   }
 
+  html.light .tp-card {
+    box-shadow:
+      0 1px 2px rgba(15, 23, 42, 0.04),
+      0 2px 8px rgba(15, 23, 42, 0.04);
+  }
+
   .tp-card-hover:hover {
     border-color: var(--tp-border-strong);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.18),
+      0 2px 6px rgba(0, 0, 0, 0.1);
     transform: translateY(-2px);
+  }
+
+  html.light .tp-card-hover:hover {
+    box-shadow:
+      0 12px 28px rgba(15, 23, 42, 0.08),
+      0 2px 6px rgba(15, 23, 42, 0.05);
+  }
+
+  .tp-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--tp-border);
+  }
+
+  .tp-card-body {
+    padding: 1.25rem;
   }
 
   .tp-panel {
     background-color: var(--tp-elevated);
     border: 1px solid var(--tp-border);
-    border-radius: 8px;
+    border-radius: 12px;
   }
 
   .tp-well {
     background-color: var(--tp-well);
     border: 1px solid var(--tp-border);
-    border-radius: 6px;
+    border-radius: 8px;
   }
 
   /* ── CONTROLS ── */
   .tp-input {
     background-color: var(--tp-well);
     border: 1px solid var(--tp-border-strong);
-    border-radius: 4px;
+    border-radius: 8px;
     color: var(--tp-text);
+    padding: 0.625rem 0.875rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
     transition:
       border-color 150ms ease,
-      box-shadow 150ms ease;
+      box-shadow 150ms ease,
+      background-color 150ms ease;
   }
   .tp-input::placeholder {
     color: var(--tp-text-3);
   }
   .tp-input:focus {
     outline: none;
-    border-color: var(--tp-accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tp-accent) 20%, transparent);
+    border-color: var(--tp-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tp-primary) 22%, transparent);
+  }
+  .tp-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 
   .tp-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.375rem;
-    border-radius: 6px;
+    gap: 0.5rem;
+    min-height: 40px;
+    padding: 0.5rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-size: 0.75rem;
     font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: pointer;
     transition:
       background-color 150ms ease,
       color 150ms ease,
       border-color 150ms ease,
+      box-shadow 150ms ease,
       transform 150ms ease;
   }
   .tp-btn:active {
     transform: scale(0.98);
+  }
+  .tp-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .tp-btn-primary {
+    background-color: var(--tp-primary);
+    border-color: var(--tp-primary);
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.24);
+  }
+  .tp-btn-primary:hover:not(:disabled) {
+    background-color: var(--tp-primary-hover);
+    border-color: var(--tp-primary-hover);
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28);
+  }
+
+  .tp-btn-secondary {
+    background-color: var(--tp-surface);
+    border-color: var(--tp-border-strong);
+    color: var(--tp-text);
+  }
+  .tp-btn-secondary:hover:not(:disabled) {
+    background-color: var(--tp-elevated);
+    border-color: var(--tp-text-3);
+  }
+
+  .tp-btn-ghost {
+    background-color: transparent;
+    border-color: transparent;
+    color: var(--tp-text-2);
+  }
+  .tp-btn-ghost:hover:not(:disabled) {
+    background-color: var(--tp-elevated);
+    color: var(--tp-text);
+  }
+
+  .tp-btn-success {
+    background-color: var(--tp-success);
+    border-color: var(--tp-success);
+    color: #ffffff;
+  }
+  .tp-btn-success:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--tp-success) 86%, #000000);
+  }
+
+  .tp-btn-danger {
+    background-color: var(--tp-danger);
+    border-color: var(--tp-danger);
+    color: #ffffff;
+  }
+  .tp-btn-danger:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--tp-danger) 86%, #000000);
+  }
+
+  .tp-btn-warning {
+    background-color: var(--tp-warning);
+    border-color: var(--tp-warning);
+    color: #0b0f19;
+  }
+  .tp-btn-warning:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--tp-warning) 88%, #000000);
+  }
+
+  /* ── BADGES / PILLS ── */
+  .tp-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1875rem 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 9999px;
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    line-height: 1;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .tp-badge-success {
+    background-color: color-mix(in srgb, var(--tp-success) 14%, transparent);
+    border-color: color-mix(in srgb, var(--tp-success) 38%, transparent);
+    color: var(--tp-success);
+  }
+  .tp-badge-danger {
+    background-color: color-mix(in srgb, var(--tp-danger) 14%, transparent);
+    border-color: color-mix(in srgb, var(--tp-danger) 38%, transparent);
+    color: var(--tp-danger);
+  }
+  .tp-badge-warning {
+    background-color: color-mix(in srgb, var(--tp-warning) 14%, transparent);
+    border-color: color-mix(in srgb, var(--tp-warning) 38%, transparent);
+    color: var(--tp-warning);
+  }
+  .tp-badge-info {
+    background-color: color-mix(in srgb, var(--tp-primary) 14%, transparent);
+    border-color: color-mix(in srgb, var(--tp-primary) 38%, transparent);
+    color: var(--tp-primary);
+  }
+  .tp-badge-neutral {
+    background-color: var(--tp-elevated);
+    border-color: var(--tp-border);
+    color: var(--tp-text-2);
+  }
+
+  /* ── SEGMENTED CONTROL ── */
+  .tp-segmented {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background-color: var(--tp-elevated);
+    border: 1px solid var(--tp-border);
+    border-radius: 10px;
+  }
+  .tp-segmented-item {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    min-height: 36px;
+    padding: 0.375rem 0.875rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    color: var(--tp-text-2);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 150ms ease,
+      color 150ms ease,
+      border-color 150ms ease,
+      box-shadow 150ms ease;
+  }
+  .tp-segmented-item:hover {
+    color: var(--tp-text);
+    background-color: var(--tp-surface);
+  }
+  .tp-segmented-item-active {
+    background-color: var(--tp-primary);
+    border-color: var(--tp-primary);
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.24);
+  }
+  .tp-segmented-item-active:hover {
+    background-color: var(--tp-primary-hover);
+    color: #ffffff;
   }
 
   /* ── TABLE (zebra + hover) ── */
@@ -458,11 +677,12 @@
     border-collapse: collapse;
     font-size: 0.75rem;
   }
-  .tp-table tbody tr:nth-child(odd) {
-    background-color: color-mix(in srgb, var(--tp-elevated) 60%, transparent);
+  .tp-table tbody tr {
+    border-bottom: 1px solid var(--tp-border);
+    transition: background-color 120ms ease;
   }
   .tp-table tbody tr:hover {
-    background-color: color-mix(in srgb, var(--tp-accent) 10%, transparent);
+    background-color: color-mix(in srgb, var(--tp-primary) 7%, transparent);
   }
   .tp-table th {
     color: var(--tp-text-3);
@@ -471,11 +691,44 @@
     font-weight: 700;
     font-size: 0.625rem;
     text-align: left;
+    background-color: color-mix(in srgb, var(--tp-elevated) 60%, transparent);
   }
   .tp-table th,
   .tp-table td {
-    padding: 0.5rem 0.75rem;
+    padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--tp-border);
+    vertical-align: middle;
+  }
+
+  .tp-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+    border: 1px solid var(--tp-border);
+    border-radius: 10px;
+    font-size: 0.75rem;
+  }
+  .tp-banner-error {
+    background-color: color-mix(in srgb, var(--tp-danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--tp-danger) 35%, transparent);
+    color: var(--tp-danger);
+  }
+  .tp-banner-success {
+    background-color: color-mix(in srgb, var(--tp-success) 10%, transparent);
+    border-color: color-mix(in srgb, var(--tp-success) 35%, transparent);
+    color: var(--tp-success);
+  }
+  .tp-banner-warning {
+    background-color: color-mix(in srgb, var(--tp-warning) 10%, transparent);
+    border-color: color-mix(in srgb, var(--tp-warning) 35%, transparent);
+    color: var(--tp-warning);
+  }
+
+  .tp-skeleton {
+    background-color: var(--tp-elevated);
+    border-radius: 8px;
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   }
 }
 
@@ -667,4 +920,22 @@
   .safe-area-top {
     padding-top: env(safe-area-inset-top);
   }
+}
+
+/* ── CHART FULLSCREEN ─────────────────────────────────────────────────────
+   Unlayered on purpose: fullscreen must override the component's inline
+   Tailwind height utilities (`h-[320px] xl:h-full`) without `!important`.
+   The canvas is sized by its ResizeObserver, so the chart reflows to the
+   viewport automatically after requestFullscreen(). */
+.tp-chart-root:fullscreen,
+.tp-chart-root:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  border-width: 0;
+  border-radius: 0;
+}
+
+.tp-chart-root::backdrop {
+  background: var(--tp-bg);
 }

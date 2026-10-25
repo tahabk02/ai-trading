@@ -170,6 +170,15 @@ class PredictRequest(BaseModel):
         gt=0,
         description="Real live ask arm (drives bid_ask_pressure; optional)",
     )
+    event_times: Optional[List[Any]] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional REAL high-impact event timestamps (ISO-8601, epoch seconds "
+            "or epoch milliseconds). Supplied values activate the ±15-minute news "
+            "blackout in the predictive layer; absent = no invented calendar."
+        ),
+    )
     dataSource: Optional[str] = Field(
         default="unknown",
         description="Source of the data (e.g. 'alpaca', 'alpaca_historical')",

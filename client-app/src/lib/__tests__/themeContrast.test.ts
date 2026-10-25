@@ -1,4 +1,4 @@
-/**
+﻿/**
  * themeContrast.test.ts — LIGHT MODE TOKEN COMPLETENESS + WCAG CONTRAST.
  *
  * The light-mode bug: the eight `--term-*` tokens were declared ONLY in
@@ -378,7 +378,7 @@ describe("terminal panels do not re-inline light-mode wash-out literals", () => 
  * `var(--tp-elevated)` with no `<alpha-value>` placeholder, so Tailwind cannot
  * synthesise an alpha channel and DROPS the utility entirely:
  *
- *     bg-elevated/70   ->  no rule emitted at all
+ *     bg-elevated   ->  no rule emitted at all
  *     bg-st-pos/10     ->  background-color: rgb(var(--st-pos) / 0.1)
  *
  * `tsc` and `eslint` both pass, the class is simply absent from the stylesheet.

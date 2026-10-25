@@ -13,6 +13,7 @@ import {
 import apiClient, { type PredictionResponse } from "@/services/api";
 import { AssetClassBadge } from "@/components/shared/asset-class-badge";
 import { TierBadge } from "@/components/shared/tier-badge";
+import { PredictiveMicrostructure } from "@/components/trading/predictive-microstructure";
 import { getAssetSubType, searchSymbolUniverse } from "@/constants/symbols";
 import {
   classifyVerdictState,
@@ -110,9 +111,9 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
 
   if (!mounted) {
     return (
-      <div className="bg-obsidian border border-slate-800 rounded-xl p-4 backdrop-blur-sm animate-pulse h-full">
-        <div className="h-4 w-48 bg-slate-800 rounded mb-6" />
-        <div className="h-20 w-full bg-slate-800/50 rounded" />
+      <div className="bg-surface border border-line rounded-card p-4 backdrop-blur-sm animate-pulse h-full">
+        <div className="h-4 w-48 bg-elevated rounded mb-6" />
+        <div className="h-20 w-full bg-elevated rounded" />
       </div>
     );
   }
@@ -171,13 +172,13 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
 
   return (
     <div
-      className="bg-obsidian border border-slate-800 rounded-xl p-4 sm:p-5 backdrop-blur-sm relative flex flex-col justify-between shadow-sm transition-colors duration-200"
+      className="bg-surface border border-line rounded-card p-4 sm:p-5 backdrop-blur-sm relative flex flex-col justify-between shadow-sm transition-colors duration-200"
       dir={rtl ? "rtl" : "ltr"}
     >
       <div>
         <div className="flex items-center justify-between mb-2 gap-2">
-          <h3 className="text-white font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
+          <h3 className="text-ink font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-st-pos inline-block shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
             {t("predictiveIntelligence")}
           </h3>
 
@@ -186,13 +187,13 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
           </div>
         </div>
 
-        <p className="text-[10px] text-slate-500 font-mono mb-4">
+        <p className="text-[10px] text-ink-faint font-mono mb-4">
           {t("mlInferenceSubtitle")}
         </p>
 
         {error && (
-          <div className="mb-3 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl">
-            <p className="text-[11px] text-rose-400 font-mono break-words">
+          <div className="mb-3 p-3 bg-st-neg/10 border border-st-neg/30 rounded-card">
+            <p className="text-[11px] text-st-neg font-mono break-words">
               {error}
             </p>
           </div>
@@ -203,9 +204,9 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
              exponential backoff. Keeps the last good prediction on screen and
              shows a CALM amber banner instead of a red error. */}
         {quoteStreamWaiting && (
-          <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <p className="text-[11px] text-amber-400 font-mono break-words">
+          <div className="mb-3 p-3 bg-st-warn/10 border border-st-warn/30 rounded-card flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse shrink-0" />
+            <p className="text-[11px] text-st-warn font-mono break-words">
               {t("waitingLiveStream")}
             </p>
           </div>
@@ -219,8 +220,8 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
              for a spinner (which previously froze the component tree). */}
         {isLoading && !predictionData && (
           <div className="flex items-center gap-2 my-6 justify-center py-4">
-            <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs text-slate-400 font-mono">
+            <div className="w-4 h-4 border-2 border-st-pos border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs text-ink-muted font-mono">
               {t("runningInference")}
             </span>
           </div>
@@ -239,13 +240,13 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
               <div
                 data-testid="verdict-error-banner"
                 role="alert"
-                className="mb-3 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl"
+                className="mb-3 p-3 bg-st-neg/10 border border-st-neg/30 rounded-card"
               >
-                <p className="text-[11px] text-rose-400 font-mono break-words">
+                <p className="text-[11px] text-st-neg font-mono break-words">
                   {errorHeadline(verdictState.errorKind)}
                 </p>
                 {verdictState.detail && (
-                  <p className="text-[10px] text-rose-300/70 font-mono mt-1 break-words">
+                  <p className="text-[10px] text-st-neg/70 font-mono mt-1 break-words">
                     {verdictState.detail}
                   </p>
                 )}
@@ -255,13 +256,13 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
             {withheldState && (
               <div
                 data-testid="verdict-withheld-banner"
-                className="mb-3 p-3 bg-slate-800/40 border border-slate-700/60 rounded-xl"
+                className="mb-3 p-3 bg-elevated border border-line rounded-card"
               >
-                <p className="text-[11px] text-slate-300 font-mono break-words">
+                <p className="text-[11px] text-ink-muted font-mono break-words">
                   {withheldHeadline(withheldState.reason)}
                 </p>
                 {withheldState.detail && (
-                  <p className="text-[10px] text-slate-500 font-mono mt-1 break-words">
+                  <p className="text-[10px] text-ink-faint font-mono mt-1 break-words">
                     {withheldState.detail}
                   </p>
                 )}
@@ -270,22 +271,22 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
 
             {(isLoading && predictionData) && (
               <div className="flex items-center justify-end gap-2">
-                <div className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-                <span className="text-[10px] text-amber-400 font-mono uppercase tracking-wider">
+                <div className="w-3 h-3 border-2 border-st-warn border-t-transparent rounded-full animate-spin" />
+                <span className="text-[10px] text-st-warn font-mono uppercase tracking-wider">
                   {t("recomputingSignal")}
                 </span>
               </div>
             )}
 
-            <div className="flex flex-wrap items-center justify-between bg-obsidian-950/60 p-3 rounded-xl border border-slate-800 gap-2">
+            <div className="flex flex-wrap items-center justify-between bg-well p-3 rounded-card border border-line gap-2">
               <span
                 className={
                   "px-3 py-1 rounded-lg text-xs font-black uppercase tracking-wider " +
                   (predictionData.signal === "BUY"
-                    ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                    ? "bg-st-pos/15 text-st-pos border border-st-pos/30"
                     : predictionData.signal === "SELL"
-                      ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
-                      : "bg-slate-800 text-slate-300 border border-slate-600")
+                      ? "bg-st-neg/15 text-st-neg border border-st-neg/30"
+                      : "bg-elevated text-ink-muted border border-line-strong")
                 }
               >
                 {predictionData.signal}
@@ -299,11 +300,11 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                       "px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider " +
                       (predictionData.waiting_reason ===
                       "CONFLUENCE_BELOW_THERMAL"
-                        ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                        ? "bg-st-warn/15 text-st-warn border border-st-warn/30"
                         : predictionData.waiting_reason ===
                             "AI_ENGINE_UNAVAILABLE"
-                          ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
-                          : "bg-slate-800 text-slate-400 border border-slate-600")
+                          ? "bg-st-neg/15 text-st-neg border border-st-neg/30"
+                          : "bg-elevated text-ink-muted border border-line-strong")
                     }
                     title={
                       predictionData.waiting_detail ??
@@ -340,15 +341,15 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
               )}
 
               <div className="flex items-center gap-4 font-mono text-xs">
-                <span className="text-slate-400 font-bold">
+                <span className="text-ink-muted font-bold">
                   {t("target")}:{" "}
-                  <strong className="text-white">
+                  <strong className="text-ink">
                     ${formatPairPrice(predictionData.target_price, symbol)}
                   </strong>
                 </span>
-                <span className="text-slate-400 font-bold">
+                <span className="text-ink-muted font-bold">
                   {t("current")}:{" "}
-                  <strong className="text-white">
+                  <strong className="text-ink">
                     ${formatPairPrice(displayPrice, symbol)}
                   </strong>
                 </span>
@@ -357,10 +358,10 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                     className={
                       "font-bold px-1.5 py-0.5 rounded text-xs " +
                       (deltaDisplay.startsWith("+")
-                        ? "text-emerald-400 bg-emerald-500/10"
+                        ? "text-st-pos bg-st-pos/10"
                         : deltaDisplay.startsWith("-")
-                          ? "text-rose-400 bg-rose-500/10"
-                          : "text-slate-400 bg-slate-500/10")
+                          ? "text-st-neg bg-st-neg/10"
+                          : "text-ink-muted bg-slate-500/10")
                     }
                   >
                     {deltaDisplay}
@@ -377,43 +378,43 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                    the gauge is replaced by an explicit "no verdict" state. */
                 <div
                   data-testid="verdict-gauge-suppressed"
-                  className="md:col-span-1 bg-obsidian-950/60 border border-slate-800 rounded-xl p-4 flex items-center justify-center text-center relative min-h-[180px]"
+                  className="md:col-span-1 bg-well border border-line rounded-card p-4 flex items-center justify-center text-center relative min-h-[180px]"
                 >
                   <div className="flex flex-col items-center gap-1">
-                    <span className="w-8 h-8 border-2 border-slate-700 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
+                    <span className="w-8 h-8 border-2 border-line-strong border-t-transparent rounded-full animate-spin" />
+                    <span className="text-[10px] font-mono text-ink-faint uppercase tracking-wider">
                       no verdict this cycle
                     </span>
                   </div>
                 </div>
               ) : (
-              <div className="md:col-span-1 bg-obsidian-950/60 border border-slate-800 rounded-xl p-4 flex flex-col items-center justify-center text-center relative min-h-[180px]">
+              <div className="md:col-span-1 bg-well border border-line rounded-card p-4 flex flex-col items-center justify-center text-center relative min-h-[180px]">
                 <div
                   className={
-                    "relative w-28 h-28 flex items-center justify-center rounded-full border-4 bg-obsidian-950 shadow-inner " +
+                    "relative w-28 h-28 flex items-center justify-center rounded-full border-4 bg-well shadow-inner " +
                     (thermallyGated
-                      ? "border-amber-400/50 shadow-[0_0_18px_rgba(245,158,11,0.25)]"
-                      : "border-slate-800")
+                      ? "border-st-warn/50 shadow-[0_0_18px_rgba(245,158,11,0.25)]"
+                      : "border-line")
                   }
                 >
                   <div className="flex flex-col items-center">
                     <span
                       className={
                         "text-xl font-bold font-mono " +
-                        (thermallyGated ? "text-amber-400" : "text-white")
+                        (thermallyGated ? "text-st-warn" : "text-ink")
                       }
                     >
                       {displayConfidence}%
                     </span>
                     {bookN && bookN > 0 ? (
-                      <span className="text-[8px] font-mono text-slate-500 uppercase font-semibold">
+                      <span className="text-[8px] font-mono text-ink-faint uppercase font-semibold">
                         {bookA}/{bookN} books
                       </span>
                     ) : null}
                     <span
                       className={
                         "text-[9px] font-mono tracking-wider uppercase font-bold " +
-                        (thermallyGated ? "text-amber-400" : "text-slate-400")
+                        (thermallyGated ? "text-st-warn" : "text-ink-muted")
                       }
                     >
                       {thermallyGated ? "MARKET WAITING" : t("confidence")}
@@ -421,13 +422,13 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                   </div>
                 </div>
 
-                <div className="w-full mt-4 border-t border-slate-800 pt-2 text-[9px] font-mono text-slate-400">
+                <div className="w-full mt-4 border-t border-line pt-2 text-[9px] font-mono text-ink-muted">
                   {/* PART 22.1 [151] — when the RF corroborator did not run for
                       this tape, say so explicitly; never quietly show
                       confluence-derived numbers under RF-labeled fields. */}
                   {predictionData.corroborator_unavailable ? (
                     <p
-                      className="uppercase font-bold text-amber-400"
+                      className="uppercase font-bold text-st-warn"
                       title={t("rfCorroboratorUnavailableTitle")}
                     >
                       {t("rfCorroboratorUnavailable")}
@@ -476,14 +477,14 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                       : "--"
                   }
                 />
-                <div className="bg-obsidian-950/60 p-3 rounded-xl border border-slate-800 flex flex-col justify-between">
-                  <p className="text-[9px] text-slate-500 uppercase font-black mb-1">
+                <div className="bg-well p-3 rounded-card border border-line flex flex-col justify-between">
+                  <p className="text-[9px] text-ink-faint uppercase font-black mb-1">
                     {t("timeframe")}
                   </p>
                   <select
                     value={selectedTimeframe}
                     onChange={(e) => handleTimeframeSelect(e.target.value)}
-                    className="bg-obsidian-950 border border-slate-700 text-white font-mono text-xs font-bold rounded px-2 py-1 w-full focus:outline-none focus:border-emerald-500 cursor-pointer"
+                    className="bg-well border border-line-strong text-ink font-mono text-xs font-bold rounded px-2 py-1 w-full focus:outline-none focus:border-st-pos cursor-pointer"
                   >
                     {tfOptions.map((opt) => (
                       <option key={opt.value} value={opt.value}>
@@ -503,12 +504,16 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
                 <MetricCard label={t("updated")} value={liveTime || "--"} />
               </div>
             </div>
+
+            <PredictiveMicrostructure
+              predictive={predictionData.predictive}
+            />
           </div>
         )}
 
         {!predictionData && !isLoading && !error && !quoteStreamWaiting && (
           <div className="py-8 text-center">
-            <p className="text-slate-500 text-xs font-mono">
+            <p className="text-ink-faint text-xs font-mono">
               {t("enterSymbolPrompt")}
             </p>
           </div>
@@ -520,11 +525,11 @@ export const PredictiveIntelligence: React.FC<PredictiveIntelligenceProps> = ({
 
 function MetricCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-obsidian-950/60 p-3 rounded-xl border border-slate-800 flex flex-col justify-between min-h-[64px]">
-      <p className="text-[9px] text-slate-500 uppercase font-black mb-1">
+    <div className="bg-well p-3 rounded-card border border-line flex flex-col justify-between min-h-[64px]">
+      <p className="text-[9px] text-ink-faint uppercase font-black mb-1">
         {label}
       </p>
-      <p className="text-xs text-white font-mono font-bold truncate">{value}</p>
+      <p className="text-xs text-ink font-mono font-bold truncate">{value}</p>
     </div>
   );
 }
@@ -619,15 +624,15 @@ function SymbolSearchInput() {
           isFocusedRef.current = false;
           setTimeout(() => setIsOpen(false), 200);
         }}
-        className="bg-obsidian-950 border border-slate-700 text-white text-xs font-bold rounded-lg px-2.5 py-1.5 w-32 focus:outline-none focus:border-emerald-500 font-mono shadow-sm"
+        className="bg-well border border-line-strong text-ink text-xs font-bold rounded-lg px-2.5 py-1.5 w-32 focus:outline-none focus:border-st-pos font-mono shadow-sm"
       />
       {loading && (
         <div className="absolute right-2 top-1/2 -translate-y-1/2">
-          <div className="w-3 h-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+          <div className="w-3 h-3 border-2 border-st-pos border-t-transparent rounded-full animate-spin" />
         </div>
       )}
       {isOpen && results.length > 0 && (
-        <div className="absolute top-full right-0 mt-1 w-64 bg-obsidian-950 border border-slate-700 rounded-xl shadow-2xl z-50 max-h-60 overflow-y-auto">
+        <div className="absolute top-full right-0 mt-1 w-64 bg-well border border-line-strong rounded-card shadow-2xl z-50 max-h-60 overflow-y-auto">
           {(["forex", "crypto", "commodity", "otc"] as const).map(
             (category) => {
               const grouped = results.filter(
@@ -637,7 +642,7 @@ function SymbolSearchInput() {
               if (grouped.length === 0) return null;
               return (
                 <React.Fragment key={category}>
-                  <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-slate-500 bg-slate-900">
+                  <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-ink-faint bg-elevated">
                     {category === "forex"
                       ? "Currencies"
                       : category === "commodity"
@@ -651,12 +656,12 @@ function SymbolSearchInput() {
                       key={r.symbol}
                       type="button"
                       onMouseDown={() => handleSelect(r.symbol)}
-                      className="w-full text-left px-3 py-2 hover:bg-slate-800 text-white text-xs font-mono flex items-center justify-between gap-2 border-b border-slate-800 last:border-0"
+                      className="w-full text-left px-3 py-2 hover:bg-elevated text-ink text-xs font-mono flex items-center justify-between gap-2 border-b border-line last:border-0"
                     >
-                      <span className="font-bold text-emerald-400">
+                      <span className="font-bold text-st-pos">
                         {r.symbol}
                       </span>
-                      <span className="text-slate-500 truncate text-[10px]">
+                      <span className="text-ink-faint truncate text-[10px]">
                         {r.name}
                       </span>
                       <AssetClassBadge symbol={r.symbol} />
