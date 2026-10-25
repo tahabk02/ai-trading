@@ -133,6 +133,33 @@ describe("PredictiveMicrostructure", () => {
     );
   });
 
+  it("does not invent regimes, sweeps or thresholds for unavailable fields", () => {
+    render(
+      <PredictiveMicrostructure
+        predictive={{
+          available: true,
+          microstructure: {
+            available: true,
+            suppressed: false,
+            suppression_reasons: [],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("predictive-regime").textContent).toBe("--");
+    expect(screen.getByTestId("predictive-release").textContent).toBe("N/A");
+    expect(screen.getByTestId("predictive-sweep").textContent).toBe(
+      "UNAVAILABLE",
+    );
+    expect(screen.queryByText("RANGE")).toBeNull();
+    expect(screen.queryByText("NO SWEEP")).toBeNull();
+    expect(screen.queryByText(/TH 85%/)).toBeNull();
+    const meter = screen.getByRole("meter");
+    expect(meter.getAttribute("aria-valuenow")).toBeNull();
+    expect(meter.getAttribute("aria-valuetext")).toBe("unavailable");
+  });
+
   it("does not show a release badge when the ensemble abstains", () => {
     render(
       <PredictiveMicrostructure

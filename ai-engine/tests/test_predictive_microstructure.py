@@ -39,6 +39,7 @@ from app.services.quant_matrix import evaluate_quant_matrix
 from app.services.regime_adaptation import (
     evaluate_event_blackout,
     profile_market_regime,
+    profile_price_regime,
 )
 from app.services.tick_pipeline import RingBuffer, TickEvent, TickStreamProcessor
 
@@ -146,6 +147,27 @@ def test_momentum_divergence_detects_fading_high():
 # ---------------------------------------------------------------------------
 # Regime adapters
 # ---------------------------------------------------------------------------
+def test_tick_stream_keeps_wicks_aligned_when_a_fresher_tick_is_added():
+    prices = np.linspace(1.1000, 1.1030, 24)
+    highs = prices + 0.0004
+    lows = prices - 0.0004
+    base = analyze_tick_stream(prices, highs=highs, lows=lows)
+    with_tick = analyze_tick_stream(
+        prices,
+        highs=highs,
+        lows=lows,
+        tick=float(prices[-1] + 0.0002),
+    )
+    assert with_tick["liquidity"] == base["liquidity"]
+
+
+def test_tick_stream_ignores_a_repeated_last_price():
+    prices = np.linspace(1.1000, 1.1020, 20)
+    base = analyze_tick_stream(prices)
+    repeated = analyze_tick_stream(prices, tick=float(prices[-1]))
+    assert repeated["velocity"] == base["velocity"]
+
+
 def test_otc_markov_probabilities_are_normalised():
     rng = np.random.default_rng(7)
     closes = 1.1 + np.cumsum(rng.normal(0, 0.0002, 200))
@@ -171,6 +193,20 @@ def test_real_session_uses_london_newyork_overlap():
     assert profile["adapter"]["session"]["session"] == "london_newyork_overlap"
     assert profile["adapter"]["spread"]["available"] is True
     assert profile["adapter"]["spread"]["spread_pips"] > 0
+
+
+def test_otc_velocity_dynamics_uses_flat_prices_when_tick_series_omitted():
+    prices = 1.1 + np.arange(7) * 0.0001
+    times = np.arange(7, dtype=float)
+    profile = profile_price_regime(
+        symbol="EUR/USD",
+        prices=prices,
+        tick_timestamps=times,
+    )
+    assert profile["asset_class"] == "OTC"
+    velocity = profile["adapter"]["velocity_dynamics"]
+    assert velocity["available"] is True
+    assert velocity["window_seconds"] == 3.0
 
 
 def test_crypto_squeeze_and_depth_state():
@@ -203,6 +239,13 @@ def test_event_blackout_only_when_real_event_times_supplied():
         now, [(now + timedelta(hours=3)).isoformat()], before_minutes=15
     )
     assert outside["active"] is False
+    # numpy arrays must not hit ``truth value of an array is ambiguous``.
+    active_numpy = evaluate_event_blackout(
+        now,
+        np.array([(now + timedelta(minutes=5)).isoformat()], dtype=object),
+        before_minutes=15,
+    )
+    assert active_numpy["active"] is True
 
 
 def test_low_volatility_flat_zone_is_suppressed():
@@ -224,6 +267,7 @@ def test_zero_atr_regime_is_suppressed_not_treated_as_expansion():
         candles=_candles(closes, wick=0.0),
     )
     assert profile["features"]["atr"] == 0.0
+    assert profile["features"]["atr_percentile"] == 0.5
     assert profile["suppression"]["active"] is True
     assert "low_volatility_flat_zone" in profile["suppression"]["reasons"]
 
@@ -287,6 +331,13 @@ def test_bayesian_outcomes_update_precision_and_weights():
             regime="trend",
             component_scores={"momentum": 1.0},
             realized_direction="HOLD",
+        )
+    with pytest.raises(ValueError):
+        ensemble.record_outcome(
+            regime="trend",
+            component_scores={"momentum": 1.0},
+            realized_direction="BUY",
+            weight=float("inf"),
         )
 
 
@@ -377,6 +428,36 @@ def test_tick_pipeline_stop_with_idle_workers_does_not_deadlock():
     stats = asyncio.run(scenario())
     assert stats["running"] is False
     assert stats["queue_depth"] == 0
+
+
+def test_tick_pipeline_stop_does_not_deadlock_when_queue_is_smaller_than_workers():
+    async def scenario():
+        processor = TickStreamProcessor(workers=4, queue_size=2)
+        await processor.start()
+        processor.submit(TickEvent(symbol="EUR/USD", price=1.1, timestamp=1.0))
+        await asyncio.wait_for(processor.stop(), timeout=2.0)
+        return processor.stats()
+
+    stats = asyncio.run(scenario())
+    assert stats["running"] is False
+    assert stats["queue_depth"] == 0
+
+
+def test_tick_pipeline_isolates_invalid_tick_payloads():
+    processor = TickStreamProcessor(capacity=16)
+    first = processor.process_now(
+        TickEvent(symbol="EUR/USD", price=1.1, timestamp=1.0)
+    )
+    assert first is None
+    invalid = processor.process_now(
+        TickEvent(symbol="EUR/USD", price=None, timestamp=2.0)  # type: ignore[arg-type]
+    )
+    assert invalid is None
+    recovered = processor.process_now(
+        TickEvent(symbol="EUR/USD", price=1.2, timestamp=3.0)
+    )
+    assert recovered is not None
+    assert processor.stats()["errors"] == 1
 
 
 # ---------------------------------------------------------------------------

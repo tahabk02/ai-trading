@@ -558,8 +558,18 @@ def analyze_candle_microstructure(
 
     prices = closes
     effective_tick = tick
-    if effective_tick is not None and np.isfinite(effective_tick) and effective_tick > 0:
+    if (
+        effective_tick is not None
+        and np.isfinite(effective_tick)
+        and effective_tick > 0
+        and float(effective_tick) != float(closes[-1])
+    ):
+        # A repeated spot equal to the last close is not a new price move. It
+        # used to be appended and could manufacture a false fading-momentum
+        # divergence on a zero-delta tail.
         prices = np.append(closes, float(effective_tick))
+    else:
+        effective_tick = None
 
     body = compute_body_metrics(opens, closes, highs, lows)
     sri = compute_strength_reversal_index(opens, closes, highs, lows)
@@ -651,7 +661,12 @@ def analyze_tick_stream(
     if len(p) < 2:
         raise ValueError("analyze_tick_stream requires >= 2 prices")
     series = p
-    if tick is not None and np.isfinite(tick) and tick > 0:
+    if (
+        tick is not None
+        and np.isfinite(tick)
+        and tick > 0
+        and float(tick) != float(p[-1])
+    ):
         series = np.append(p, float(tick))
     velocity = compute_velocity_metrics(series, timestamps)
     divergence = detect_momentum_divergence(series, timestamps)
@@ -668,7 +683,14 @@ def analyze_tick_stream(
         "pools": [],
     }
     if highs is not None and lows is not None and len(highs) == len(lows) and len(highs) >= 2:
-        sweeps = detect_liquidity_sweeps(highs, lows, series[-len(highs) :])
+        # Wicks belong to the OHLC/price series, not to a separately supplied
+        # freshest tick. Align against the base tape so an extra tick cannot
+        # shift the high/low pair by one bar.
+        sweeps = detect_liquidity_sweeps(
+            highs,
+            lows,
+            p[-min(len(highs), len(p)) :],
+        )
     returns = np.diff(series) / np.maximum(series[:-1], EPS)
     realized_vol = float(np.std(returns)) if len(returns) else 0.0
     finite_recent = returns[-min(len(returns), 30) :]

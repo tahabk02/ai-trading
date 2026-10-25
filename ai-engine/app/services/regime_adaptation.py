@@ -97,12 +97,18 @@ def _ensure_utc(moment: Optional[datetime]) -> datetime:
 
 def _parse_event_time(value: Any) -> Optional[datetime]:
     """Accept ISO-8601 strings, epoch seconds or epoch milliseconds."""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, datetime):
         return _ensure_utc(value)
-    if isinstance(value, (int, float)) and np.isfinite(value):
-        seconds = float(value) / 1000.0 if float(value) > 1e11 else float(value)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        try:
+            raw = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not np.isfinite(raw):
+            return None
+        seconds = raw / 1000.0 if raw > 1e11 else raw
         try:
             return datetime.fromtimestamp(seconds, tz=UTC)
         except (OverflowError, OSError, ValueError):
@@ -132,7 +138,18 @@ def evaluate_event_blackout(
     the result is explicitly ``available: False`` - the engine does not
     fabricate a news calendar.
     """
-    if not event_times:
+    if event_times is None:
+        return {
+            "available": False,
+            "active": False,
+            "reason": "no_event_calendar_supplied",
+            "minutes_to_event": None,
+        }
+    try:
+        event_items = list(event_times)[:200]
+    except TypeError:
+        event_items = []
+    if not event_items:
         return {
             "available": False,
             "active": False,
@@ -143,7 +160,7 @@ def evaluate_event_blackout(
     before = max(0, int(before_minutes))
     after = max(0, int(after_minutes))
     nearest: Optional[Tuple[float, datetime]] = None
-    for raw in event_times:
+    for raw in event_items:
         event = _parse_event_time(raw)
         if event is None:
             continue
@@ -189,6 +206,11 @@ def _atr_percentile(atr_pct: np.ndarray, window: int = 120) -> float:
     hist = atr_pct[-min(len(atr_pct), window) :]
     if len(hist) == 0:
         return 0.5
+    if float(np.ptp(hist)) <= EPS:
+        # A constant volatility history has no rank; 0.5 is neutral instead of
+        # falsely reporting the 100th percentile (which used to read as
+        # "expansion" on a flat tape).
+        return 0.5
     return float(np.mean(hist <= hist[-1]))
 
 
@@ -226,13 +248,14 @@ def _bollinger_state(closes: np.ndarray, window: int = 20) -> Dict[str, Any]:
             "reason": "insufficient_history",
         }
     w = min(window, len(closes))
-    csum = np.concatenate(([0.0], np.cumsum(closes)))
-    csq = np.concatenate(([0.0], np.cumsum(closes * closes)))
-    means = (csum[w:] - csum[:-w]) / float(w)
-    variances = np.maximum((csq[w:] - csq[:-w]) / float(w) - means * means, 0.0)
-    stds = np.sqrt(variances)
+    windows = np.lib.stride_tricks.sliding_window_view(closes, w)
+    means = windows.mean(axis=1)
+    stds = windows.std(axis=1)
     bandwidth = 2.0 * stds / np.maximum(means, EPS)
-    percentile = float(np.mean(bandwidth <= bandwidth[-1])) if len(bandwidth) else 0.5
+    if len(bandwidth) and float(bandwidth[-1]) <= EPS:
+        percentile = 0.0
+    else:
+        percentile = float(np.mean(bandwidth <= bandwidth[-1])) if len(bandwidth) else 0.5
     mean_last = float(means[-1])
     std_last = float(stds[-1])
     upper = mean_last + 2.0 * std_last
@@ -296,14 +319,30 @@ def _velocity_dynamics(
     tick_timestamps: Optional[Sequence[float]],
     now: Optional[datetime],
 ) -> Dict[str, Any]:
-    if not tick_prices or len(tick_prices) < 4 or not tick_timestamps:
+    if tick_prices is None or tick_timestamps is None:
         return {
             "available": False,
             "reason": "tick_timestamps_not_supplied",
         }
-    prices = np.asarray(tick_prices, dtype=np.float64)
-    times = np.asarray(tick_timestamps, dtype=np.float64)
-    if len(times) != len(prices) or not np.all(np.diff(times) > 0):
+    try:
+        prices = np.asarray(tick_prices, dtype=np.float64)
+        times = np.asarray(tick_timestamps, dtype=np.float64)
+    except (TypeError, ValueError):
+        return {
+            "available": False,
+            "reason": "tick_timestamps_not_numeric",
+        }
+    if (
+        len(prices) < 4
+        or len(times) != len(prices)
+        or not np.all(np.isfinite(prices))
+        or not np.all(np.isfinite(times))
+    ):
+        return {
+            "available": False,
+            "reason": "insufficient_three_second_windows",
+        }
+    if not np.all(np.diff(times) > 0):
         return {
             "available": False,
             "reason": "tick_timestamps_not_monotonic",
@@ -442,6 +481,14 @@ def profile_market_regime(
     opens = np.asarray([float(c.get("open", c["close"])) for c in candles], dtype=np.float64)
     if not np.all(np.isfinite(closes)) or np.any(closes <= 0):
         raise ValueError("candle closes must be finite and positive")
+    if (
+        not np.all(np.isfinite(highs))
+        or not np.all(np.isfinite(lows))
+        or not np.all(np.isfinite(opens))
+    ):
+        raise ValueError("candle OHLC values must be finite")
+    if np.any(highs < lows):
+        raise ValueError("candle high must be >= low")
 
     atr = _wilder_atr(highs, lows, closes)
     atr_last = float(atr[-1]) if len(atr) else 0.0
@@ -453,8 +500,10 @@ def profile_market_regime(
     compression = bool(range_ratio <= 0.55)
     directional_bias = _directional_bias(closes, atr_last)
 
-    reversals = np.sign(closes - opens)
-    reversal_ratio = float(np.mean(reversals[-min(len(reversals), 10) :] != np.sign(np.diff(closes, prepend=closes[0]))[-min(len(reversals), 10) :]))
+    comparison_bars = min(len(closes) - 1, 10)
+    body_sign = np.sign(closes[-comparison_bars:] - opens[-comparison_bars:])
+    trend_sign = np.sign(np.diff(closes)[-comparison_bars:])
+    reversal_ratio = float(np.mean(body_sign != trend_sign))
     regime = _classify_regime(efficiency, atr_percentile, reversal_ratio, compression)
 
     asset_class = resolve_asset_class(symbol)
@@ -596,6 +645,9 @@ def profile_price_regime(
     profile = profile_market_regime(
         symbol=symbol,
         candles=candles,
+        # The flat prices are themselves the tick tape when no separate tick
+        # series was supplied, so 3-second OTC velocity dynamics stay available
+        # to the streaming path instead of reporting a false "not supplied".
         tick_prices=tick_prices if tick_prices is not None else p,
         tick_timestamps=tick_timestamps,
         bid=bid,

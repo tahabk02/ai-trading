@@ -24,6 +24,10 @@ function finite(value: unknown, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function hasFinite(value: unknown): boolean {
+  return value != null && Number.isFinite(Number(value));
+}
+
 function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
 }
@@ -33,8 +37,14 @@ function signed(value: unknown, digits = 2): string {
   return `${num >= 0 ? "+" : ""}${num.toFixed(digits)}`;
 }
 
-function humanize(reason: string): string {
-  return reason.replace(/_/g, " ").toUpperCase();
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function humanize(reason: unknown): string {
+  return String(reason).replace(/_/g, " ").toUpperCase();
 }
 
 function gaugePercent(score: number): number {
@@ -62,20 +72,39 @@ export const PredictiveMicrostructure: React.FC<
   const ensemble = predictive.ensemble;
   if (!micro && !regime && !ensemble) return null;
 
-  const momentumScore = finite(ensemble?.components?.momentum?.score);
   const velocity = micro?.velocity;
-  const acceleration = finite(velocity?.acceleration);
+  const velocityAvailable =
+    velocity?.available === true && hasFinite(velocity.velocity);
+  const accelerationAvailable =
+    velocity?.available === true && hasFinite(velocity.acceleration);
+  const momentumScore = finite(ensemble?.components?.momentum?.score);
+  const momentumAvailable =
+    ensemble?.available === true &&
+    hasFinite(ensemble?.components?.momentum?.score);
   const confidence = finite(ensemble?.confidence);
+  const confidenceAvailable =
+    ensemble?.available === true && hasFinite(ensemble?.confidence);
   const threshold = finite(ensemble?.threshold, 85);
-  const sweep = micro?.liquidity?.last_sweep ?? "none";
-  const pools = micro?.liquidity?.pools?.slice(0, 4) ?? [];
-  const session = regime?.session?.session;
-  const assetClass = regime?.asset_class;
-  const regimeName = String(regime?.regime ?? "range");
+  const thresholdAvailable =
+    ensemble?.available === true && hasFinite(ensemble?.threshold);
+  const liquidityAvailable = micro?.liquidity?.available === true;
+  const sweep = liquidityAvailable
+    ? micro?.liquidity?.last_sweep ?? "none"
+    : null;
+  const pools = liquidityAvailable
+    ? (micro?.liquidity?.pools ?? []).slice(0, 4)
+    : [];
+  const regimeAvailable =
+    regime?.available === true &&
+    typeof regime.regime === "string" &&
+    regime.regime.length > 0;
+  const session = regimeAvailable ? regime?.session?.session : undefined;
+  const assetClass = regimeAvailable ? regime?.asset_class : undefined;
+  const regimeName = regimeAvailable ? String(regime?.regime) : null;
   const suppressionReasons = Array.from(
     new Set([
-      ...(micro?.suppression_reasons ?? []),
-      ...(ensemble?.suppression_reasons ?? []),
+      ...asStringArray(micro?.suppression_reasons),
+      ...asStringArray(ensemble?.suppression_reasons),
     ]),
   );
   const suppressed =
@@ -83,8 +112,16 @@ export const PredictiveMicrostructure: React.FC<
     micro?.suppressed === true ||
     suppressionReasons.length > 0;
 
-  const components = Object.entries(ensemble?.components ?? {});
-  const release = ensemble?.release === true && !suppressed;
+  const components =
+    ensemble?.available === true &&
+    ensemble.components != null &&
+    typeof ensemble.components === "object"
+      ? Object.entries(ensemble.components)
+      : [];
+  const release =
+    ensemble?.available === true &&
+    ensemble.release === true &&
+    !suppressed;
 
   return (
     <section
@@ -108,7 +145,9 @@ export const PredictiveMicrostructure: React.FC<
             data-testid="predictive-regime"
             className="px-1.5 py-0.5 rounded border border-line-strong bg-surface text-[9px] font-mono font-bold text-ink"
           >
-            {REGIME_LABELS[regimeName] ?? regimeName.toUpperCase()}
+            {regimeName
+              ? REGIME_LABELS[regimeName] ?? regimeName.toUpperCase()
+              : "--"}
           </span>
           <span
             data-testid="predictive-release"
@@ -116,10 +155,16 @@ export const PredictiveMicrostructure: React.FC<
               "px-1.5 py-0.5 rounded border text-[9px] font-mono font-black " +
               (release
                 ? "bg-st-pos/15 text-st-pos border-st-pos/30"
-                : "bg-st-warn/15 text-st-warn border-st-warn/30")
+                : ensemble?.available === true
+                  ? "bg-st-warn/15 text-st-warn border-st-warn/30"
+                  : "bg-elevated text-ink-faint border-line-strong")
             }
           >
-            {release ? "RELEASE" : "ABSTAIN"}
+            {ensemble?.available === true
+              ? release
+                ? "RELEASE"
+                : "ABSTAIN"
+              : "N/A"}
           </span>
         </div>
       </div>
@@ -139,28 +184,40 @@ export const PredictiveMicrostructure: React.FC<
             aria-label="momentum velocity score"
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={Math.round(gaugePercent(momentumScore))}
+            aria-valuenow={
+              momentumAvailable
+                ? Math.round(gaugePercent(momentumScore))
+                : undefined
+            }
+            aria-valuetext={momentumAvailable ? undefined : "unavailable"}
             className="relative h-2 rounded-full bg-elevated overflow-hidden"
           >
             <div className="absolute inset-y-0 left-1/2 w-px bg-line-strong" />
-            <div
-              className={
-                "absolute inset-y-0 rounded-full " +
-                (momentumScore >= 0 ? "bg-st-pos" : "bg-st-neg")
-              }
-              style={{ width: `${gaugePercent(momentumScore)}%` }}
-            />
+            {momentumAvailable && (
+              <div
+                className={
+                  "absolute inset-y-0 rounded-full " +
+                  (momentumScore >= 0 ? "bg-st-pos" : "bg-st-neg")
+                }
+                style={{ width: `${gaugePercent(momentumScore)}%` }}
+              />
+            )}
           </div>
           <div className="flex items-center justify-between mt-1.5 text-[10px] font-mono">
             <span className="text-ink font-bold">
-              {velocity?.available ? signed(velocity.velocity) : "--"}
+              {velocityAvailable ? signed(velocity.velocity) : "--"}
             </span>
             <span
               className={
-                acceleration >= 0 ? "text-st-pos" : "text-st-neg"
+                accelerationAvailable
+                  ? finite(velocity?.acceleration) >= 0
+                    ? "text-st-pos"
+                    : "text-st-neg"
+                  : "text-ink-faint"
               }
             >
-              ACC {signed(acceleration)}
+              ACC{" "}
+              {accelerationAvailable ? signed(velocity?.acceleration) : "--"}
             </span>
           </div>
         </div>
@@ -181,20 +238,22 @@ export const PredictiveMicrostructure: React.FC<
                     : "bg-elevated text-ink-faint")
               }
             >
-              {sweep === "high"
-                ? "SWEEP HIGH"
-                : sweep === "low"
-                  ? "SWEEP LOW"
-                  : "NO SWEEP"}
+              {!liquidityAvailable
+                ? "UNAVAILABLE"
+                : sweep === "high"
+                  ? "SWEEP HIGH"
+                  : sweep === "low"
+                    ? "SWEEP LOW"
+                    : "NO SWEEP"}
             </span>
           </div>
           <div className="space-y-1">
             {pools.length === 0 ? (
               <p className="text-[10px] font-mono text-ink-faint">--</p>
             ) : (
-              pools.map((pool) => (
+              pools.map((pool, index) => (
                 <div
-                  key={`${pool.side}-${pool.price}`}
+                  key={`${pool.side}-${pool.price ?? "na"}-${index}`}
                   className="flex items-center justify-between gap-2 text-[10px] font-mono"
                 >
                   <span
@@ -205,11 +264,13 @@ export const PredictiveMicrostructure: React.FC<
                     {pool.side === "high" ? "H" : "L"}
                   </span>
                   <span className="text-ink flex-1 truncate">
-                    {pool.price != null ? pool.price.toFixed(5) : "--"}
+                    {hasFinite(pool.price)
+                      ? finite(pool.price).toFixed(5)
+                      : "--"}
                   </span>
                   <span className="text-ink-faint">
-                    {pool.distance_atr != null
-                      ? pool.distance_atr.toFixed(2) + " ATR"
+                    {hasFinite(pool.distance_atr)
+                      ? finite(pool.distance_atr).toFixed(2) + " ATR"
                       : "--"}
                   </span>
                   <span
@@ -217,7 +278,11 @@ export const PredictiveMicrostructure: React.FC<
                       pool.swept ? "text-ink-faint" : "text-st-warn"
                     }
                   >
-                    {pool.swept ? "SWEPT" : pool.touches + "x"}
+                    {pool.swept
+                      ? "SWEPT"
+                      : hasFinite(pool.touches)
+                        ? finite(pool.touches) + "x"
+                        : "--"}
                   </span>
                 </div>
               ))
@@ -231,28 +296,31 @@ export const PredictiveMicrostructure: React.FC<
               Bayesian ensemble
             </span>
             <span className="text-[9px] font-mono text-ink-faint">
-              TH {threshold.toFixed(0)}%
+              TH {thresholdAvailable ? threshold.toFixed(0) + "%" : "--"}
             </span>
           </div>
           <div className="flex items-center justify-between text-[10px] font-mono mb-1.5">
             <span className="text-ink font-bold">
-              {ensemble?.available ? confidence.toFixed(1) + "%" : "--"}
+              {confidenceAvailable ? confidence.toFixed(1) + "%" : "--"}
             </span>
             <span className="text-ink-faint">
               precis{" "}
-              {ensemble?.expected_precision != null
+              {ensemble?.available === true &&
+              hasFinite(ensemble.expected_precision)
                 ? (finite(ensemble.expected_precision) * 100).toFixed(0) + "%"
                 : "--"}
             </span>
           </div>
           <div className="h-1.5 rounded-full bg-elevated overflow-hidden mb-2">
-            <div
-              className={
-                "h-full rounded-full " +
-                (release ? "bg-st-pos" : "bg-st-warn")
-              }
-              style={{ width: `${clamp(confidence, 0, 100)}%` }}
-            />
+            {confidenceAvailable && (
+              <div
+                className={
+                  "h-full rounded-full " +
+                  (release ? "bg-st-pos" : "bg-st-warn")
+                }
+                style={{ width: `${clamp(confidence, 0, 100)}%` }}
+              />
+            )}
           </div>
           <div className="space-y-1">
             {components.length === 0 ? (

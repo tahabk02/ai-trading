@@ -329,6 +329,12 @@ class AdaptiveBayesianEnsemble:
         direction = str(realized_direction).strip().upper()
         if direction not in ("BUY", "SELL"):
             raise ValueError("realized_direction must be BUY or SELL")
+        try:
+            weight_amount = float(weight)
+        except (TypeError, ValueError):
+            raise ValueError("weight must be finite and positive") from None
+        if not np.isfinite(weight_amount) or weight_amount <= 0.0:
+            raise ValueError("weight must be finite and positive")
         realized_sign = 1 if direction == "BUY" else -1
         regime = self._normalize_regime(regime)
         asset_class = self._normalize_asset_class(asset_class)
@@ -345,7 +351,7 @@ class AdaptiveBayesianEnsemble:
                 if not np.isfinite(score) or score == 0.0:
                     continue
                 correct = (score > 0) == (realized_sign > 0)
-                states[component].record(correct, weight=weight)
+                states[component].record(correct, weight=weight_amount)
                 updated[component] = correct
         return {
             "regime": regime,

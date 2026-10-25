@@ -39,6 +39,7 @@ DEFAULT_QUEUE_SIZE = 8192
 DEFAULT_WORKERS = 2
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_HISTORY = 256
+DEFAULT_DRAIN_TIMEOUT = 2.0
 
 
 @dataclass(frozen=True)
@@ -98,22 +99,28 @@ class TickStreamProcessor:
         workers: int = DEFAULT_WORKERS,
         batch_size: int = DEFAULT_BATCH_SIZE,
         evaluator: Optional[Callable[..., Dict[str, Any]]] = None,
+        drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
     ) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
         if queue_size <= 0:
             raise ValueError("queue_size must be positive")
         if workers <= 0:
             raise ValueError("workers must be positive")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if drain_timeout <= 0:
+            raise ValueError("drain_timeout must be positive")
         self.capacity = int(capacity)
         self.queue_size = int(queue_size)
         self.workers = int(workers)
         self.batch_size = int(batch_size)
+        self.drain_timeout = float(drain_timeout)
         self._evaluator = evaluator or default_tick_evaluator
         self._buffers: Dict[str, RingBuffer] = {}
         self._timestamps: Dict[str, RingBuffer] = {}
         self._latest: Dict[str, Dict[str, Any]] = {}
-        self._queue: Optional[asyncio.Queue[Optional[TickEvent]]] = None
+        self._queue: Optional[asyncio.Queue[TickEvent]] = None
         self._tasks: List[asyncio.Task[None]] = []
         self._running = False
         self._processed = 0
@@ -141,11 +148,19 @@ class TickStreamProcessor:
         if not self._running:
             return
         self._running = False
-        assert self._queue is not None
-        for _ in range(self.workers):
-            await self._queue.put(None)
+        queue = self._queue
+        assert queue is not None
+        try:
+            # Let already-accepted ticks finish, then cancel the now-idle
+            # workers. This cannot deadlock when queue_size < workers, unlike
+            # the old sentinel-per-worker implementation.
+            await asyncio.wait_for(queue.join(), timeout=self.drain_timeout)
+        except asyncio.TimeoutError:
+            self._dropped += queue.qsize()
         awaited = list(self._tasks)
         self._tasks = []
+        for task in awaited:
+            task.cancel()
         if awaited:
             await asyncio.gather(*awaited, return_exceptions=True)
         self._queue = None
@@ -180,39 +195,23 @@ class TickStreamProcessor:
     # -- workers ----------------------------------------------------------
     async def _worker(self, index: int) -> None:
         del index
-        assert self._queue is not None
+        queue = self._queue
+        assert queue is not None
         while True:
-            item = await self._queue.get()
+            item = await queue.get()
             try:
-                if item is None:
-                    # Requeue the sentinel so every worker gets its own wake-up.
-                    # ``stop()`` discards the queue immediately afterwards.
-                    try:
-                        self._queue.put_nowait(None)
-                    except asyncio.QueueFull:
-                        pass
-                    return
                 batch = [item]
                 while len(batch) < self.batch_size:
                     try:
-                        nxt = self._queue.get_nowait()
+                        nxt = queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    if nxt is None:
-                        # Never consume another worker's shutdown sentinel as a
-                        # batch item: requeue it and finish this batch.
-                        try:
-                            self._queue.put_nowait(None)
-                        except asyncio.QueueFull:
-                            pass
-                        self._queue.task_done()
-                        break
                     batch.append(nxt)
-                    self._queue.task_done()
+                    queue.task_done()
                 for event in batch:
                     self._process_event(event)
             finally:
-                self._queue.task_done()
+                queue.task_done()
 
     # -- evaluation -------------------------------------------------------
     def process_now(self, event: TickEvent) -> Optional[Dict[str, Any]]:
@@ -221,9 +220,13 @@ class TickStreamProcessor:
 
     def _process_event(self, event: TickEvent) -> Optional[Dict[str, Any]]:
         self._processed += 1
-        symbol = str(event.symbol or "").strip().upper()
-        price = float(event.price)
-        timestamp = float(event.timestamp)
+        symbol = str(getattr(event, "symbol", "") or "").strip().upper()
+        try:
+            price = float(getattr(event, "price", None))
+            timestamp = float(getattr(event, "timestamp", None))
+        except (TypeError, ValueError, OverflowError):
+            self._errors += 1
+            return None
         if (
             not symbol
             or not np.isfinite(price)
@@ -232,8 +235,14 @@ class TickStreamProcessor:
         ):
             self._errors += 1
             return None
-        buffer = self._buffers.setdefault(symbol, RingBuffer(self.capacity))
-        times = self._timestamps.setdefault(symbol, RingBuffer(self.capacity))
+        buffer = self._buffers.get(symbol)
+        if buffer is None:
+            buffer = RingBuffer(self.capacity)
+            self._buffers[symbol] = buffer
+        times = self._timestamps.get(symbol)
+        if times is None:
+            times = RingBuffer(self.capacity)
+            self._timestamps[symbol] = times
         buffer.append(price)
         times.append(timestamp)
 
@@ -263,16 +272,25 @@ class TickStreamProcessor:
                 "available": False,
                 "reason": f"evaluation_failed: {type(exc).__name__}",
             }
+        if not isinstance(payload, dict):
+            self._errors += 1
+            payload = {
+                "available": False,
+                "reason": "evaluator_returned_non_mapping",
+            }
+        else:
+            payload = {str(key): value for key, value in payload.items()}
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self._latencies.append(elapsed_ms)
         self._evaluated += 1
+        # Engine-owned metadata wins over a custom evaluator's fields.
         result = {
+            **payload,
             "symbol": symbol,
             "price": float(prices[-1]),
             "timestamp": timestamp,
             "ticks": len(prices),
             "latency_ms": round(elapsed_ms, 3),
-            **payload,
         }
         self._latest[symbol] = result
         return result
