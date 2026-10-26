@@ -158,15 +158,15 @@ def test_apply_gate_no_class_gate_supplied_is_not_vetoed():
 
 def test_asset_class_resolution():
     assert resolve_asset_class("EUR/SEK") == ASSET_CLASS_REAL
-    assert resolve_asset_class("eur/nok") == ASSET_CLASS_REAL
+    assert resolve_asset_class("eur/huf") == ASSET_CLASS_REAL
     assert resolve_asset_class("EUR/USD") == ASSET_CLASS_OTC
     assert resolve_asset_class("EUR/JPY") == ASSET_CLASS_OTC
     assert resolve_asset_class("UNKNOWN/XX") == ASSET_CLASS_OTC  # safe default
     assert resolve_asset_class(None) == ASSET_CLASS_OTC
-    assert is_real_asset("USD/SEK") is True
+    assert is_real_asset("USD/PLN") is True
     assert is_real_asset("USD/JPY") is False
     assert is_otc_asset("USD/JPY") is True
-    assert is_otc_asset("USD/SEK") is False
+    assert is_otc_asset("USD/PLN") is False
 
 
 def test_crypto_majors_are_their_own_class_not_real_fx():
@@ -190,7 +190,7 @@ def test_crypto_majors_are_their_own_class_not_real_fx():
     assert is_otc_asset("BTC/USD") is False
     # Wholesale FX is unaffected by the crypto split.
     assert is_real_asset("EUR/SEK") is True
-    assert len(REAL_ASSET_CLASS_SYMBOLS) == 10
+    assert len(REAL_ASSET_CLASS_SYMBOLS) == 5
 
 
 # ── 4 ── sanitization (NaN/inf/<=0 dropped; per-class minimum windows) ──────

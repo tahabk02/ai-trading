@@ -1068,7 +1068,7 @@ const lastRealtimePublish = new Map<string, number>();
 
       // ── STRICT WHITELIST ENFORCEMENT ──
       // Only the 34 whitelisted instruments are selectable (32 OTC forex +
-      // BTC/USD + ETH/USD). AAPL, NVDA, SPY → rejected.
+      // EUR/USD + USD/JPY). AAPL, NVDA, SPY → rejected.
       if (!isWhitelistedOtcpair(cleanSymbol)) {
         set({
           error: `Symbol ${cleanSymbol} is not on the OTC whitelist.`,
@@ -1361,7 +1361,7 @@ const lastRealtimePublish = new Map<string, number>();
 
           // ── Strict per-symbol caching ──
           // The raw candle array is stored ONLY under the normalized symbol that
-          // fetched it. Different pairs (EUR/USD, GBP/USD, AUD/CAD...) each get
+          // fetched it. Different pairs (EUR/USD, USD/JPY, AUD/CAD...) each get
           // their own unique key, so one pair's candles NEVER bleed into another.
           const normSymbol = (data.symbol || symbol || "").trim().toUpperCase();
           const candles = Array.isArray(data.candles) ? data.candles : [];

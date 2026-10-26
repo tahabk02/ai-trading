@@ -6,7 +6,7 @@ import { MarketTerminal } from "@/components/terminal/market-terminal";
 /**
  * MARKET TERMINAL — the all-pairs grid dashboard (Alpha.5 Pro).
  *
- * Renders every OTC/crypto instrument side-by-side, streaming live quotes +
+ * Renders every OTC/real instrument side-by-side, streaming live quotes +
  * micro-quant CALL/PUT verdicts over ONE WS channel and refreshing per-horizon
  * `/multi-predict` batches on demand. The single-asset deep-dive (chart +
  * order book + intelligence) moved to `/pro`.

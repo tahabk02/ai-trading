@@ -9,7 +9,7 @@
  *
  * Provider confirmation (the schedule must agree with the feeds we poll):
  *   • Yahoo Finance intraday forex (`YAHOO_CHART_BASE`) — the source behind the
- *     10 REAL pairs — prints its final 1-minute bar at the weekly close and
+ *     5 REAL pairs — prints its final 1-minute bar at the weekly close and
  *     resumes when the market reopens Sunday 17:00 ET.
  *   • Frankfurter / ECB reference rates publish on TARGET business days only —
  *     no Saturday or Sunday prints.
@@ -19,8 +19,8 @@
  *
  * SCOPE — REAL pairs only. This helper is symbol-agnostic on purpose; callers
  * must apply it ONLY to REAL instruments (assetSubType "forex"). OTC
- * instruments and crypto are broker-quoted 24/7 and are NEVER marked closed by
- * it. The authoritative classifier is `symbolRegistry.getAssetSubType`.
+ * instruments are broker-quoted 24/7 and are NEVER marked closed by it. The
+ * authoritative classifier is `symbolRegistry.getAssetSubType`.
  *
  * Not modelled: exchange holidays / ad-hoc halts. Those are day-level gaps the
  * data providers surface as absent prints, not as an error loop — the caller's

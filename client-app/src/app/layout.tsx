@@ -28,13 +28,13 @@ export const metadata: Metadata = {
     template: "%s | Alpha.5 Pro",
   },
   description:
-    "ALPHA.5 PRO institutional trading terminal — real-time OTC forex & crypto signals, live candlestick charts, dynamic quantitative prediction engine, and automated risk management with kill-switch protection.",
+    "ALPHA.5 PRO institutional trading terminal — real-time OTC forex & real-market signals, live candlestick charts, dynamic quantitative prediction engine, and automated risk management with kill-switch protection.",
   applicationName: "Alpha.5 Pro",
   keywords: [
     "Alpha 5 Pro",
     "trading terminal",
     "OTC forex",
-    "crypto signals",
+    "real-market forex",
     "real-time prediction",
     "risk management",
   ],

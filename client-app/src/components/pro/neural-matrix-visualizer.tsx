@@ -11,7 +11,7 @@ import type { MarketLane, MatrixFeed } from "@/lib/neuralMatrix/engine";
 /**
  * SIGNAL CONFLUENCE MAP VISUALIZER
  * ============================================================================
- * Renders the three market channels (REAL / OTC / CRYPTO) as an ingest →
+ * Renders the two market channels (REAL / OTC) as an ingest →
  * analysis → consensus convergence trace resolving to a single fused VERDICT.
  * Signals are real packets travelling real conduits; conviction is the actual
  * gated BUY/SELL from the ONE coherent signal view the chart already publishes.
@@ -35,7 +35,7 @@ import type { MarketLane, MatrixFeed } from "@/lib/neuralMatrix/engine";
  *
  * ── WHAT THIS COMPONENT RENDERS ──────────────────────────────────────────
  *   • canvas          — the graph (painted imperatively, never via React)
- *   • lane rail       — the three market channels + their live agent counts
+ *   • lane rail       — the two market channels + their live agent counts
  *   • telemetry strip — throughput / in-flight / conviction, change-gated 1 Hz
  *   • inspector       — the hovered or pinned agent's details
  *
@@ -56,30 +56,28 @@ interface NeuralMatrixVisualizerProps {
 /**
  * Asset-subtype → matrix-lane bridge.
  *
- * `getAssetSubType` classifies into `"forex" | "otc" | "crypto"`, but the
- * matrix names the wholesale channel "real" (REAL MARKET), matching the
- * `term-gold` = real-market convention the rest of the terminal uses. The two
- * vocabularies are bridged HERE and only here, so the rest of the component
- * never has to know both names exist.
+ * `getAssetSubType` classifies into `"forex" | "otc"`, but the matrix names
+ * the wholesale channel "real" (REAL MARKET), matching the `term-gold` =
+ * real-market convention the rest of the terminal uses. The two vocabularies
+ * are bridged HERE and only here, so the rest of the component never has to
+ * know both names exist.
  */
 function laneOf(symbol: string): MarketLane {
   if (!symbol) return "otc";
   const sub = getAssetSubType(symbol);
-  if (sub === "crypto") return "crypto";
   if (sub === "otc") return "otc";
   return "real";
 }
 
 /**
  * Lane hue per channel, expressed as the SAME CSS variables the canvas palette
- * reads. Real = gold, Crypto = cyan, OTC = the terminal accent teal — matching
- * the `term-gold` / `term-crypto` classification already used by the Order Book
- * and signal cards, so a colour never means two different things on one screen.
+ * reads. Real = gold, OTC = the terminal accent teal — matching the
+ * `term-gold` classification already used by the Order Book and signal cards,
+ * so a colour never means two different things on one screen.
  */
 const LANE_TOKEN: Record<MarketLane, string> = {
   real: "var(--term-gold)",
   otc: "var(--tp-accent)",
-  crypto: "var(--term-crypto)",
 };
 
 export const NeuralMatrixVisualizer: React.FC<NeuralMatrixVisualizerProps> = ({
@@ -261,7 +259,7 @@ export const NeuralMatrixVisualizer: React.FC<NeuralMatrixVisualizerProps> = ({
           />
         </div>
 
-        {/* ── LANE RAIL — the three market channels ── */}
+        {/* ── LANE RAIL — the two market channels ── */}
         <ul className="pointer-events-none absolute left-0 top-0 z-10 flex h-full w-[74px] flex-col justify-around py-2 pl-2">
           {lanes.map((lane) => {
             const active = activeLane === lane.lane;

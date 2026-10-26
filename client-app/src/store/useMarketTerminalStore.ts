@@ -38,13 +38,13 @@ import {
 /**
  * MARKET TERMINAL STORE — Alpha.5 Pro all-pairs grid.
  *
- * Owns the full 44-instrument universe card state:
+ * Owns the full 26-instrument universe card state:
  *   • quotes      — live price / bid / ask / spread / tick count / freshness
  *                   (fed by the 1Hz `market_quotes` WS snapshots + REST bootstrap)
  *   • verdicts    — the AI engine's 1Hz micro-quant verdicts (`live_quant_signal`)
  *   • predictions — heavier per-horizon `/multi-predict` results
  *   • horizon     — GLOBAL target horizon (1/2/3/5/10 min) with per-card overrides
- *   • filter      — asset-class filter (all | otc | real | crypto)
+ *   • filter      — asset-class filter (all | otc | real)
  *
  * Verdicts and predictions are kept SEPARATE so the grid always renders the
  * freshest live 1Hz CALL/PUT instantly while the heavier horizon refresh lands.
@@ -233,7 +233,7 @@ interface MarketTerminalState {
 export { ALL_MARKET_SYMBOLS } from "@/constants/symbols";
 
 /**
- * The 10 REAL_FOREX_PAIRS symbols only (assetSubType "forex") — used by the
+ * The 5 REAL_FOREX_PAIRS symbols only (assetSubType "forex") — used by the
  * grid to render the REAL badge and the PART 14/15 regime-gate ("scored_only")
  * non-tradable display for real-market pairs.
  */
@@ -274,7 +274,7 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
       // RENDERED fields are identical. Card selectors subscribe per-symbol
       // (`s.quotes[symbol]`), so an unchanged reference makes zustand's
       // Object.is bail-out skip that card entirely. Without this every 1Hz
-      // frame allocates 44 fresh quote objects and re-renders all 44 cards
+      // frame allocates 26 fresh quote objects and re-renders all 26 cards
       // even when nothing moved.
       for (const q of quotes) {
         if (!q?.symbol) continue;
@@ -352,8 +352,8 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
   markPredictionsPending: (symbols) =>
     set((state) => {
       // ONE set() for the whole batch. Calling setPrediction per symbol spread
-      // the full predictions record 44 times per refresh and emitted 44 store
-      // notifications, re-rendering every card 44x for a single frame change.
+      // the full predictions record 26 times per refresh and emitted 26 store
+      // notifications, re-rendering every card 26x for a single frame change.
       let next: Record<string, CardHorizonPrediction> | null = null;
       for (const symbol of symbols) {
         const key = symbol?.trim?.().toUpperCase?.();

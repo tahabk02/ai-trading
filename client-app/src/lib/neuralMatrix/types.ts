@@ -12,13 +12,9 @@
  */
 
 /** Market channel a node belongs to. Mirrors `AssetSubType` in constants/symbols. */
-export type MarketLane = "real" | "otc" | "crypto";
+export type MarketLane = "real" | "otc";
 
-export const MARKET_LANES: readonly MarketLane[] = [
-  "real",
-  "otc",
-  "crypto",
-] as const;
+export const MARKET_LANES: readonly MarketLane[] = ["real", "otc"] as const;
 
 /** Structural role in the pipeline — drives radius, colour and collision mass. */
 export type NodeRole = "ingest" | "analysis" | "consensus" | "emitter";

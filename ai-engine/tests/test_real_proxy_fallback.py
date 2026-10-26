@@ -155,7 +155,7 @@ def test_full_surface_real_without_quotes_is_executable():
         pytest.skip("real-proxy floor disabled via env")
     series = _clean_rising_series()
     surface = build_execution_surface(
-        symbol="EUR/NOK",
+        symbol="EUR/HUF",
         closes=series,
         direction="BUY",
         confidence_pct=82.0,
@@ -178,7 +178,7 @@ def test_full_surface_real_without_quotes_is_executable():
 def test_full_surface_real_without_quotes_strict_veto_when_disabled():
     series = _clean_rising_series()
     surface = build_execution_surface(
-        symbol="EUR/NOK",
+        symbol="EUR/HUF",
         closes=series,
         direction="BUY",
         confidence_pct=97.0,

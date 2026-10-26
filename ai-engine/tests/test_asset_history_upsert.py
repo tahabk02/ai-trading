@@ -106,7 +106,7 @@ def test_posts_via_httpx_to_core_ingest_route(monkeypatch):
             200,
             json={
                 "ingested": 1,
-                "symbol": "GBP/USD",
+                "symbol": "EUR/CHF",
                 "timeframe": "1m",
                 "window": "30m",
             },
@@ -121,13 +121,13 @@ def test_posts_via_httpx_to_core_ingest_route(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", IngestTransportClient)
 
-    job = AssetHistoryUpsertJob(_FakeCollector(prices={"GBP/USD": 1.265}))  # type: ignore[arg-type]
+    job = AssetHistoryUpsertJob(_FakeCollector(prices={"EUR/CHF": 1.265}))  # type: ignore[arg-type]
     n = asyncio.run(job.run_once())
     assert n == 1
     assert observed["method"] == "POST"
     assert observed["path"] == "/api/v1/history/ingest"
     payload = observed["payload"]
-    assert payload["symbol"] == "GBP/USD"
+    assert payload["symbol"] == "EUR/CHF"
     assert payload["bars"][0]["close"] == 1.265
 
 

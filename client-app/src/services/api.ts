@@ -1110,7 +1110,7 @@ const apiClient = {
    * Batch prediction (horizon refresh). Fans the symbol list through the SAME
    * /predict pipeline server-side (real bars + live tick + ATR targets, 5s
    * result cache, bounded concurrency); `silent` suppresses the global
-   * high-confidence toasts so a 34-card horizon change never spams alerts.
+   * high-confidence toasts so a 26-card horizon change never spams alerts.
    * Longer window than the default 15s — a cold batch across all pairs can
    * take longer than the standard request budget.
    */

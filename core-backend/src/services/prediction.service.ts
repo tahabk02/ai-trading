@@ -6,7 +6,7 @@ import { logger } from "../utils/logger";
 // ============================================================
 
 export interface SavePredictionInput {
-  /** Trading pair or stock symbol (e.g. "BTC/USDT", "AAPL") */
+  /** Trading pair (e.g. "EUR/USD") */
   symbol: string;
   /** Predicted direction: BUY, SELL, or HOLD */
   signal: "BUY" | "SELL" | "HOLD";

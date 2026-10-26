@@ -104,13 +104,11 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 EPS = 1e-12
 
-# ── OTC FOREX & CRYPTO PRICE PRECISION ──
+# ── OTC / REAL FOREX PRICE PRECISION ──
 # Prices are returned to the correct number of decimals for each pair.
-# - BTC/USD, ETH/USD (Crypto majors) → 2 decimals.
 # - JPY-cross pairs (CAD/JPY, CHF/JPY) → 3 decimals.
-# - All other OTC Forex pairs → 5 decimals.
+# - All other OTC/real Forex pairs → 5 decimals.
 _JPY_QUOTES = frozenset({"JPY"})
-_CRYPTO_SYMBOLS = frozenset({"BTC/USD", "ETH/USD"})
 
 # ── ML WARMUP / TRAINING THRESHOLD ──
 # Frankfurter (ECB) publishes BUSINESS DAYS only (~5 of 7 calendar days,
@@ -267,8 +265,6 @@ def _background_model_warm(
 
 def _price_precision(symbol: str) -> int:
     sym = (symbol or "").strip().upper()
-    if sym in _CRYPTO_SYMBOLS:
-        return 2
     try:
         quote = sym.split("/")[1]
         return 3 if quote in _JPY_QUOTES else 5

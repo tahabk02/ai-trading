@@ -146,35 +146,30 @@ router = APIRouter()
 signal_gen = SignalGenerator(confidence_threshold=settings.CONFIDENCE_THRESHOLD)
 
 # ════════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — 100% REAL · 0 DEMO · FULL 44-PAIR UNIVERSE
-# Mirrors core-backend symbolRegistry.service.ts EXACTLY (44 real assets).
-# PART 28.3 — the 10 real wholesale pairs (EUR/CZK, USD/SEK …) are part of
-# that canonical 44, so they MUST be accepted here too: the card grid and
-# the PRO expiry bar read regime_gate / suppressed_reason from /predict
+# STRICT OTC WHITELIST — 100% REAL · 0 DEMO · 26-PAIR UNIVERSE
+# Mirrors core-backend symbolRegistry.service.ts EXACTLY (26 real assets).
+# PART 28.3 — the 5 real wholesale pairs (EUR/SEK, EUR/HUF …) are part of
+# that canonical universe, so they MUST be accepted here too: the card grid
+# and the PRO expiry bar read regime_gate / suppressed_reason from /predict
 # responses, and the audit universe_regime_audit.py audits them on real
 # Yahoo intraday bars. Rejecting them at this boundary is what kept real
 # pro terminals locked with no gateway verdict at all.
 # ════════════════════════════════════════════════════════════════════
 STRICT_OTC_WHITELIST = frozenset({
-    # Forex Majors (7)
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD", "NZD/USD",
-    # Crypto Majors (2)
-    "BTC/USD", "ETH/USD",
-    # Euro Crosses (7)
-    "EUR/GBP", "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD", "EUR/NZD", "EUR/TRY",
-    # Pound Crosses (4)
-    "GBP/JPY", "GBP/CHF", "GBP/AUD", "GBP/CAD",
+    # Forex Majors (5)
+    "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD",
+    # Euro Crosses (4)
+    "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD",
     # Yen Crosses (3)
     "AUD/JPY", "CAD/JPY", "CHF/JPY",
-    # Other Minors (5)
-    "AUD/CAD", "AUD/NZD", "NZD/JPY", "CAD/CHF", "EUR/RUB",
-    # Emerging / OTC Variants (6)
-    "USD/TRY", "USD/ZAR", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
-    # PART 28.3 — the 10 REAL NON-OTC wholesale pairs (assetSubType "forex",
+    # Other Minors (4)
+    "AUD/CAD", "AUD/NZD", "CAD/CHF", "EUR/RUB",
+    # Emerging / OTC Variants (5)
+    "USD/TRY", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
+    # PART 28.3 — the 5 REAL NON-OTC wholesale pairs (assetSubType "forex",
     # Yahoo intraday tape, ECB reference baseline). Mirrors
     # REAL_FOREX_PAIRS in app/data/collector.py.
-    "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK", "EUR/HUF",
-    "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
+    "EUR/SEK", "EUR/HUF", "USD/NOK", "USD/PLN", "USD/CZK",
 })
 
 PREDICT_PIPELINE_TIMEOUT_SECONDS = 120.0

@@ -7,7 +7,7 @@
  *  1. GitHub Repository Polling — periodic HTTPS GETs to raw GitHub file URLs
  *     for live price snapshots (JSON or CSV). This is the canonical upstream.
  *  2. Free public REST APIs — tiered cascade (Frankfurter, Open ER-API,
- *     CoinGecko) as HTTP fallback for symbols not in the GitHub repo.
+ *     as HTTP fallback for symbols not in the GitHub repo.
  *  3. Persistent candle buffers — real 1-minute OHLC buckets accumulated
  *     from genuine live ticks, never fabricated.
  *
@@ -45,7 +45,7 @@ export interface ForexCandle {
   low: number;
   close: number;
   volume: number;
-  /** Classification stamped by the bridge feed ("forex"|"otc"|"crypto"). */
+  /** Classification stamped by the bridge feed ("forex"|"otc"). */
   assetType?: string;
 }
 
@@ -69,7 +69,7 @@ export interface ForexSpotResult {
   /**
    * PART 42.1 [421] — true when this REAL pair is in its weekly closed window
    * (Fri ~17:00 → Sun ~17:00 New York). The price, when present, is the LAST
-   * CLOSE, never a live quote; `stale` is always set alongside it. OTC/crypto
+   * CLOSE, never a live quote; `stale` is always set alongside it. OTC
    * are 24/7 and never carry this flag.
    */
   marketClosed?: boolean;
@@ -111,8 +111,8 @@ function envMs(name: string, fallback: number, min = 100, max = 60_000): number 
 /** Default budget for the primary client (PO-mirrored HTTP tier, Yahoo, GitHub). */
 const REQUEST_TIMEOUT_MS = envMs("FOREX_HTTP_TIMEOUT_MS", 5_000);
 /**
- * Per-tier budget for the LOW-priority fallback APIs (Frankfurter, open.er-api,
- * CoinGecko). The tick ingestion loop probes every 1s, so the tail of the
+ * Per-tier budget for the LOW-priority fallback APIs (Frankfurter, open.er-api).
+ * The tick ingestion loop probes every 1s, so the tail of the
  * cascade must never spend a full primary budget per tier: three serial
  * fallbacks at 5s each starved the poll window for ~15s and piled up overlapping
  * probes. 2s per fallback bounds the exhausted-cascade worst case while still
@@ -173,11 +173,10 @@ const GITHUB_PRICES_FILE =
 /** Known free public forex rate API base URLs (tiered fallback). */
 const FRANKFURTER_BASE = "https://api.frankfurter.dev/v1";
 const OPEN_ER_API_BASE = "https://open.er-api.com/v6/latest";
-const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
 /**
  * PART 28 — YAHOO FINANCE 1-MINUTE FOREX CHART API.
- * Keyless intraday source for the 10 real (non-OTC) pairs. Returns genuine
+ * Keyless intraday source for the 5 real (non-OTC) pairs. Returns genuine
  * 1-minute OHLC bars (`meta.regularMarketPrice` + `timestamp[]`). Yanked in
  * front of the Frankfurter/open.er-api daily feeds — those are ECB daily
  * reference rates and CANNOT power live M1 candles or a 1Hz blotter (PART 27).
@@ -188,15 +187,10 @@ const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
 const YAHOO_POLL_MS = 9000;
 
-/** The 10 REAL_FOREX_PAIRS (ECB-sourced) now fed by the intraday Yahoo tier. */
+/** The 5 REAL_FOREX_PAIRS (ECB-sourced) now fed by the intraday Yahoo tier. */
 const REAL_FOREX_INTRADAY_SET: ReadonlySet<string> = new Set([
   "EUR/SEK",
-  "EUR/NOK",
-  "EUR/DKK",
-  "EUR/PLN",
-  "EUR/CZK",
   "EUR/HUF",
-  "USD/SEK",
   "USD/NOK",
   "USD/PLN",
   "USD/CZK",
@@ -205,39 +199,26 @@ const REAL_FOREX_INTRADAY_SET: ReadonlySet<string> = new Set([
 /** Well-known symbols the GitHub repo may store. */
 const KNOWN_FOREX_SYMBOLS = [
   "EUR/USD",
-  "GBP/USD",
   "USD/JPY",
   "USD/CHF",
   "AUD/USD",
-  "NZD/USD",
   "USD/CAD",
-  "EUR/GBP",
   "EUR/JPY",
   "EUR/CHF",
   "EUR/AUD",
   "EUR/CAD",
-  "EUR/NZD",
-  "EUR/TRY",
-  "GBP/JPY",
-  "GBP/CHF",
-  "GBP/AUD",
-  "GBP/CAD",
   "AUD/JPY",
   "CAD/JPY",
   "CHF/JPY",
   "AUD/CAD",
   "AUD/NZD",
-  "NZD/JPY",
   "CAD/CHF",
   "EUR/RUB",
   "USD/TRY",
-  "USD/ZAR",
   "USD/MXN",
   "USD/SGD",
   "MAD/USD",
   "KES/USD",
-  "BTC/USD",
-  "ETH/USD",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -482,8 +463,8 @@ class ForexDataService {
   /**
    * PART 42.1 [420] — is `norm` a REAL (non-OTC) forex instrument? The
    * authoritative classifier is the symbol registry (`assetSubType "forex"`);
-   * the 32 OTC majors classify as "otc" and crypto as "crypto", so neither is
-   * ever gated by the forex-week schedule.
+   * the OTC majors classify as "otc", so they are never gated by the
+   * forex-week schedule.
    */
   private isRealMarketPair(norm: string): boolean {
     return symbolRegistry.getAssetSubType(norm) === "forex";
@@ -525,7 +506,6 @@ class ForexDataService {
    *  1. GitHub repo cache (if fresh < 15s)
    *  2. Frankfurter API (ECB rates, free, no key)
    *  3. Open ER-API (free, no key)
-   *  4. CoinGecko (crypto only)
    */
   async getLiveSpotFresh(symbol: string): Promise<ForexSpotResult> {
     const norm = (symbol || "").trim().toUpperCase();
@@ -536,7 +516,7 @@ class ForexDataService {
     // there is nothing to fetch, so the whole cascade below is skipped: no
     // HTTP retries, no error log. We serve the LAST CLOSE, honestly stamped
     // `stale` + `marketClosed` so no live-freshness gate can treat it as live.
-    // OTC/crypto never reach this branch — they are 24/7 broker instruments.
+    // OTC symbols never reach this branch — they are 24/7 broker instruments.
     if (this.isRealMarketPair(norm) && isForexMarketClosed()) {
       return this.marketClosedSpotResult(norm);
     }
@@ -665,22 +645,6 @@ class ForexDataService {
       return openErResult;
     }
 
-    // Tier 3: CoinGecko (crypto pairs only)
-    let cgResult: ForexSpotResult | undefined;
-    if (norm === "BTC/USD" || norm === "ETH/USD") {
-      const cgCooldown = this.sourceCooldownReason("coingecko");
-      cgResult = cgCooldown
-        ? { success: false, price: null, source: "coingecko", error: cgCooldown }
-        : await this.fetchCoinGeckoSpot(norm);
-      if (!cgCooldown) {
-        this.recordSourceHealth("coingecko", cgResult.success, cgResult.error);
-      }
-      if (cgResult.success) {
-        this.recoveryMode = false;
-        return cgResult;
-      }
-    }
-
     const nowMs = Date.now();
     const poNow = this.pocketOptionCache.get(norm);
     const cachedNow = this.lastSpotCache.get(norm);
@@ -704,9 +668,6 @@ class ForexDataService {
       },
       { source: "frankfurter", ok: false, reason: frankResult.error },
       { source: "open_er_api", ok: false, reason: openErResult.error },
-      ...(cgResult
-        ? [{ source: "coingecko", ok: false, reason: cgResult.error }]
-        : []),
     ]);
 
     // ── LAST KNOWN GOOD: keep the tape alive instead of withholding a real
@@ -1003,61 +964,6 @@ class ForexDataService {
     }
   }
 
-  // ── CoinGecko (crypto pairs) ─────────────────────────────────────────────
-
-  private async fetchCoinGeckoSpot(symbol: string): Promise<ForexSpotResult> {
-    try {
-      await this.throttleApiCall();
-
-      const coinId =
-        symbol === "BTC/USD"
-          ? "bitcoin"
-          : symbol === "ETH/USD"
-            ? "ethereum"
-            : null;
-
-      if (!coinId) {
-        return {
-          success: false,
-          price: null,
-          source: "coingecko",
-          error: `Unsupported CoinGecko symbol: ${symbol}`,
-        };
-      }
-
-      const url = `${COINGECKO_BASE}/simple/price?ids=${coinId}&vs_currencies=usd`;
-      const response = await this.client.get(url, {
-        timeout: FALLBACK_TIMEOUT_MS,
-      });
-
-      if (response.status === 200 && response.data?.[coinId]?.usd) {
-        const price = Number(response.data[coinId].usd);
-        if (Number.isFinite(price) && price > 0) {
-          this.updateSpotCache(symbol, price);
-          return {
-            success: true,
-            price,
-            source: "coingecko",
-          };
-        }
-      }
-
-      return {
-        success: false,
-        price: null,
-        source: "coingecko",
-        error: "No price from CoinGecko",
-      };
-    } catch (error: unknown) {
-      return {
-        success: false,
-        price: null,
-        source: "coingecko",
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   //  HISTORICAL CANDLES
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1068,7 +974,6 @@ class ForexDataService {
    * Data source cascade:
    *  1. GitHub repo — candles/{SYMBOL}-1d.json
    *  2. Frankfurter — last 90 days of daily ECB rates
-   *  3. CoinGecko — historical daily OHLC (crypto only)
    *
    * Returns { success: false } with zero fabricated candles if all fail.
    */
@@ -1092,19 +997,11 @@ class ForexDataService {
 
     // PART 28: real pairs get Yahoo Finance intraday bars (M1/Hr) before the
     // ECB daily feed — this is what actually powers M1/M5 chart warmup for the
-    // 10 real pairs now that they stream intraday.
+    // 5 real pairs now that they stream intraday.
     if (REAL_FOREX_INTRADAY_SET.has(norm)) {
       const yahooResult = await this.fetchYahooCandles(norm, timeframe, limit);
       if (yahooResult.success && yahooResult.bars.length > 0) {
         return yahooResult;
-      }
-    }
-
-    // Try CoinGecko for crypto pairs (has historical OHLC)
-    if (norm === "BTC/USD" || norm === "ETH/USD") {
-      const cgResult = await this.fetchCoinGeckoCandles(norm, limit);
-      if (cgResult.success && cgResult.bars.length > 0) {
-        return cgResult;
       }
     }
 
@@ -1396,81 +1293,6 @@ class ForexDataService {
         success: false,
         bars: [],
         source: "frankfurter",
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  // ── CoinGecko historical OHLC (crypto only) ─────────────────────────────
-
-  private async fetchCoinGeckoCandles(
-    symbol: string,
-    limit: number,
-  ): Promise<{
-    success: boolean;
-    bars: ForexCandle[];
-    source: string;
-    error?: string;
-  }> {
-    try {
-      await this.throttleApiCall();
-
-      const coinId =
-        symbol === "BTC/USD"
-          ? "bitcoin"
-          : symbol === "ETH/USD"
-            ? "ethereum"
-            : null;
-
-      if (!coinId) {
-        return {
-          success: false,
-          bars: [],
-          source: "coingecko",
-          error: "Unsupported symbol for CoinGecko",
-        };
-      }
-
-      // CoinGecko OHLC endpoint: /coins/{id}/ohlc
-      // days=90 gives daily candles
-      const url = `${COINGECKO_BASE}/coins/${coinId}/ohlc?vs_currency=usd&days=90`;
-      const response = await this.client.get(url);
-
-      if (response.status === 200 && Array.isArray(response.data)) {
-        const raw: [number, number, number, number, number][] = response.data;
-        const bars: ForexCandle[] = raw.map(([ts, o, h, l, c]) => ({
-          timestamp: ts,
-          open: Number(o),
-          high: Number(h),
-          low: Number(l),
-          close: Number(c),
-          volume: 0,
-        }));
-
-        const valid = bars.filter(
-          (b) => b.close > 0 && Number.isFinite(b.close),
-        );
-
-        if (valid.length > 0) {
-          return {
-            success: true,
-            bars: valid.slice(-limit),
-            source: "coingecko",
-          };
-        }
-      }
-
-      return {
-        success: false,
-        bars: [],
-        source: "coingecko",
-        error: "No candle data from CoinGecko",
-      };
-    } catch (error: unknown) {
-      return {
-        success: false,
-        bars: [],
-        source: "coingecko",
         error: error instanceof Error ? error.message : String(error),
       };
     }
@@ -2073,7 +1895,6 @@ class ForexDataService {
    * Canonicalize an incoming symbol to the strict whitelist "/" format, exactly
    * as the frontend and registry expect. Maps every real-world variant:
    *   "EURUSD" / "EUR-USD" / "EUR_USD" / "eur/usd"  → "EUR/USD"
-   *   "BTCUSD"                                    → "BTC/USD"
    * Unknown / non-6-char compact inputs are returned ucase-but-unslashed → the
    * caller (backed by the whitelist) decides whether to reject them.
    */

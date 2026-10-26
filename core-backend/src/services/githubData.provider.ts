@@ -8,30 +8,30 @@
  * Expected repository structure (configurable via env vars):
  *
  *   prices/                      (live tick snapshots, refreshed every push)
- *     ├── BTC-USD.json
- *     ├── ETH-USD.json
+ *     ├── EUR-USD.json
+ *     ├── USD-JPY.json
  *     ├── EUR-USD.json
  *     └── ...
  *
  *   candles/                     (daily OHLCV bars, historical series)
- *     ├── BTC-USD-1d.json
- *     ├── ETH-USD-1d.json
+ *     ├── EUR-USD-1d.json
+ *     ├── USD-JPY-1d.json
  *     └── ...
  *
  * Each live-tick JSON file:
  *   {
- *     "symbol": "BTC/USD",
- *     "price": 68421.50,
- *     "bid": 68420.00,
- *     "ask": 68423.00,
+ *     "symbol": "EUR/USD",
+ *     "price": 1.08421,
+ *     "bid": 1.08420,
+ *     "ask": 1.08423,
  *     "volume": 1234.5,
  *     "timestamp": "2026-09-01T12:34:56.000Z"
  *   }
  *
  * Each candle JSON file (array):
  *   [
- *     { "timestamp": 1693526400000, "open": 68000, "high": 68500,
- *       "low": 67800, "close": 68400, "volume": 54321 },
+ *     { "timestamp": 1693526400000, "open": 1.08000, "high": 1.08500,
+ *       "low": 1.07800, "close": 1.08400, "volume": 54321 },
  *     ...
  *   ]
  *
@@ -40,6 +40,7 @@
 
 import axios, { AxiosInstance } from "axios";
 import { logger } from "../utils/logger";
+import { symbolRegistry } from "./symbolRegistry.service";
 
 // ── Types ──
 
@@ -296,6 +297,7 @@ export class GitHubDataProviderService {
       const fetchPromises = tickFiles.map(async (file) => {
         const symbolFileName = file.path.split("/").pop()?.replace(".json", "") ?? "";
         const symbol = symbolFileName.replace(/-/g, "/");
+        if (!symbolRegistry.isValidSymbolSync(symbol)) return;
         const rawUrl = this.buildRawUrl(file.path);
 
         const tick = await this.tryFetchJson<GitHubPriceTick>(rawUrl);
@@ -329,13 +331,12 @@ export class GitHubDataProviderService {
    */
   private async fetchKnownSymbolTicks(): Promise<void> {
     const knownSymbols = [
-      "BTC-USD", "ETH-USD", "EUR-USD", "GBP-USD", "USD-JPY",
-      "USD-CHF", "USD-CAD", "AUD-USD", "NZD-USD", "EUR-GBP",
-      "EUR-JPY", "EUR-CHF", "EUR-AUD", "EUR-CAD", "EUR-NZD",
-      "EUR-TRY", "GBP-JPY", "GBP-CHF", "GBP-AUD", "GBP-CAD",
-      "AUD-JPY", "CAD-JPY", "CHF-JPY", "AUD-CAD", "AUD-NZD",
-      "NZD-JPY", "CAD-CHF", "EUR-RUB", "USD-TRY", "USD-ZAR",
-      "USD-MXN", "USD-SGD", "MAD-USD", "KES-USD",
+      "EUR-USD", "USD-JPY", "USD-CHF", "USD-CAD", "AUD-USD",
+      "EUR-JPY", "EUR-CHF", "EUR-AUD", "EUR-CAD", "AUD-JPY",
+      "CAD-JPY", "CHF-JPY", "AUD-CAD", "AUD-NZD", "CAD-CHF",
+      "EUR-RUB", "USD-TRY", "USD-MXN", "USD-SGD", "MAD-USD",
+      "KES-USD", "EUR-SEK", "EUR-HUF", "USD-NOK", "USD-PLN",
+      "USD-CZK",
     ];
 
     const fetchPromises = knownSymbols.map(async (sym) => {
@@ -392,7 +393,8 @@ export class GitHubDataProviderService {
    */
   private emitTickIfNew(tick: GitHubPriceTick): void {
     const symbol = (tick.symbol || "").trim().toUpperCase();
-    if (!symbol || !Number.isFinite(tick.price) || tick.price <= 0) return;
+    if (!symbol || !symbolRegistry.isValidSymbolSync(symbol)) return;
+    if (!Number.isFinite(tick.price) || tick.price <= 0) return;
 
     const lastPrice = this.lastSeenPrices.get(symbol);
     const now = Date.now();
@@ -427,7 +429,7 @@ export class GitHubDataProviderService {
    * Fetch historical candle data for a symbol from the GitHub repo.
    *
    * Tries:
-   *  1. candles/{SYMBOL}-1d.json (e.g. candles/BTC-USD-1d.json)
+   *  1. candles/{SYMBOL}-1d.json (e.g. candles/EUR-SEK-1d.json)
    *  2. candles/{SYMBOL}.json (generic, no timeframe suffix)
    *  3. Returns empty array on failure (zero fabrication).
    */
@@ -437,6 +439,14 @@ export class GitHubDataProviderService {
     limit: number = 200,
   ): Promise<{ success: boolean; bars: GitHubCandle[]; source: string; error?: string }> {
     const norm = (symbol || "").trim().toUpperCase();
+    if (!symbolRegistry.isValidSymbolSync(norm)) {
+      return {
+        success: false,
+        bars: [],
+        source: "github",
+        error: `Symbol ${norm} is not in the trading universe`,
+      };
+    }
     const fileSymbol = norm.replace(/\//g, "-");
 
     // Check cache first

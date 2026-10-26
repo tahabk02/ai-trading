@@ -2,19 +2,18 @@
  * publishMarketData.ts — REAL DATA PUBLISHER → GITHUB RAW
  *
  * Fetches GENUINE live market prices from free public APIs (the exact same
- * tiered cascade used by ForexDataService: Frankfurter/ECB + CoinGecko) and
+ * tiered cascade used by ForexDataService: Frankfurter/ECB + open.er-api) and
  * publishes them to a public GitHub repository's raw file URL via the GitHub
  * Contents API.
  *
- * Every symbol in the platform's strict 34-pair OTC whitelist (see
+ * Every symbol in the platform's strict 26-pair whitelist (see
  * symbolRegistry.service.ts) is included, so the backend tick ingestion
  * pipeline never hits "All spot rate sources exhausted".
  *
  * Output schema — STRICTLY the array-of-ticks form parsed by the backend:
  *
  *   [
- *     { "symbol": "EUR/USD", "price": 1.1578, "timestamp": 1725294500000 },
- *     { "symbol": "BTC/USD", "price": 61200.5, "timestamp": 1725294500000 }
+ *     { "symbol": "EUR/USD", "price": 1.1578, "timestamp": 1725294500000 }
  *   ]
  *
  * Usage:
@@ -70,7 +69,6 @@ const REQUEST_TIMEOUT_MS = 15_000;
 // Free public rate APIs (same cascade as ForexDataService)
 const FRANKFURTER_BASE = "https://api.frankfurter.dev/v1";
 const OPEN_ER_API_BASE = "https://open.er-api.com/v6/latest";
-const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TYPES
@@ -89,55 +87,45 @@ interface SymbolSpec {
   base: string;
   quote: string;
   digits: number;
-  kind: "forex" | "crypto";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  THE FULL 34-PAIR WHITELIST (mirrors symbolRegistry.service.ts)
+//  THE 26-PAIR WHITELIST (mirrors symbolRegistry.service.ts)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SYMBOL_SPECS: SymbolSpec[] = [
   // Forex majors
-  { symbol: "EUR/USD", base: "EUR", quote: "USD", digits: 5, kind: "forex" },
-  { symbol: "GBP/USD", base: "GBP", quote: "USD", digits: 5, kind: "forex" },
-  { symbol: "USD/JPY", base: "USD", quote: "JPY", digits: 3, kind: "forex" },
-  { symbol: "USD/CHF", base: "USD", quote: "CHF", digits: 5, kind: "forex" },
-  { symbol: "USD/CAD", base: "USD", quote: "CAD", digits: 5, kind: "forex" },
-  { symbol: "AUD/USD", base: "AUD", quote: "USD", digits: 5, kind: "forex" },
-  { symbol: "NZD/USD", base: "NZD", quote: "USD", digits: 5, kind: "forex" },
-  // Crypto majors
-  { symbol: "BTC/USD", base: "bitcoin", quote: "USD", digits: 2, kind: "crypto" },
-  { symbol: "ETH/USD", base: "ethereum", quote: "USD", digits: 2, kind: "crypto" },
+  { symbol: "EUR/USD", base: "EUR", quote: "USD", digits: 5 },
+  { symbol: "USD/JPY", base: "USD", quote: "JPY", digits: 3 },
+  { symbol: "USD/CHF", base: "USD", quote: "CHF", digits: 5 },
+  { symbol: "USD/CAD", base: "USD", quote: "CAD", digits: 5 },
+  { symbol: "AUD/USD", base: "AUD", quote: "USD", digits: 5 },
   // Euro crosses
-  { symbol: "EUR/GBP", base: "EUR", quote: "GBP", digits: 5, kind: "forex" },
-  { symbol: "EUR/JPY", base: "EUR", quote: "JPY", digits: 3, kind: "forex" },
-  { symbol: "EUR/CHF", base: "EUR", quote: "CHF", digits: 5, kind: "forex" },
-  { symbol: "EUR/AUD", base: "EUR", quote: "AUD", digits: 5, kind: "forex" },
-  { symbol: "EUR/CAD", base: "EUR", quote: "CAD", digits: 5, kind: "forex" },
-  { symbol: "EUR/NZD", base: "EUR", quote: "NZD", digits: 5, kind: "forex" },
-  { symbol: "EUR/TRY", base: "EUR", quote: "TRY", digits: 5, kind: "forex" },
-  // Pound crosses
-  { symbol: "GBP/JPY", base: "GBP", quote: "JPY", digits: 3, kind: "forex" },
-  { symbol: "GBP/CHF", base: "GBP", quote: "CHF", digits: 5, kind: "forex" },
-  { symbol: "GBP/AUD", base: "GBP", quote: "AUD", digits: 5, kind: "forex" },
-  { symbol: "GBP/CAD", base: "GBP", quote: "CAD", digits: 5, kind: "forex" },
+  { symbol: "EUR/JPY", base: "EUR", quote: "JPY", digits: 3 },
+  { symbol: "EUR/CHF", base: "EUR", quote: "CHF", digits: 5 },
+  { symbol: "EUR/AUD", base: "EUR", quote: "AUD", digits: 5 },
+  { symbol: "EUR/CAD", base: "EUR", quote: "CAD", digits: 5 },
   // Yen crosses
-  { symbol: "AUD/JPY", base: "AUD", quote: "JPY", digits: 3, kind: "forex" },
-  { symbol: "CAD/JPY", base: "CAD", quote: "JPY", digits: 3, kind: "forex" },
-  { symbol: "CHF/JPY", base: "CHF", quote: "JPY", digits: 3, kind: "forex" },
+  { symbol: "AUD/JPY", base: "AUD", quote: "JPY", digits: 3 },
+  { symbol: "CAD/JPY", base: "CAD", quote: "JPY", digits: 3 },
+  { symbol: "CHF/JPY", base: "CHF", quote: "JPY", digits: 3 },
   // Other minors
-  { symbol: "AUD/CAD", base: "AUD", quote: "CAD", digits: 5, kind: "forex" },
-  { symbol: "AUD/NZD", base: "AUD", quote: "NZD", digits: 5, kind: "forex" },
-  { symbol: "NZD/JPY", base: "NZD", quote: "JPY", digits: 3, kind: "forex" },
-  { symbol: "CAD/CHF", base: "CAD", quote: "CHF", digits: 5, kind: "forex" },
-  { symbol: "EUR/RUB", base: "EUR", quote: "RUB", digits: 5, kind: "forex" },
+  { symbol: "AUD/CAD", base: "AUD", quote: "CAD", digits: 5 },
+  { symbol: "AUD/NZD", base: "AUD", quote: "NZD", digits: 5 },
+  { symbol: "CAD/CHF", base: "CAD", quote: "CHF", digits: 5 },
+  { symbol: "EUR/RUB", base: "EUR", quote: "RUB", digits: 5 },
   // Emerging / OTC variants
-  { symbol: "USD/TRY", base: "USD", quote: "TRY", digits: 5, kind: "forex" },
-  { symbol: "USD/ZAR", base: "USD", quote: "ZAR", digits: 5, kind: "forex" },
-  { symbol: "USD/MXN", base: "USD", quote: "MXN", digits: 5, kind: "forex" },
-  { symbol: "USD/SGD", base: "USD", quote: "SGD", digits: 5, kind: "forex" },
-  { symbol: "MAD/USD", base: "MAD", quote: "USD", digits: 5, kind: "forex" },
-  { symbol: "KES/USD", base: "KES", quote: "USD", digits: 5, kind: "forex" },
+  { symbol: "USD/TRY", base: "USD", quote: "TRY", digits: 5 },
+  { symbol: "USD/MXN", base: "USD", quote: "MXN", digits: 5 },
+  { symbol: "USD/SGD", base: "USD", quote: "SGD", digits: 5 },
+  { symbol: "MAD/USD", base: "MAD", quote: "USD", digits: 5 },
+  { symbol: "KES/USD", base: "KES", quote: "USD", digits: 5 },
+  // Real non-OTC forex
+  { symbol: "EUR/SEK", base: "EUR", quote: "SEK", digits: 5 },
+  { symbol: "EUR/HUF", base: "EUR", quote: "HUF", digits: 5 },
+  { symbol: "USD/NOK", base: "USD", quote: "NOK", digits: 5 },
+  { symbol: "USD/PLN", base: "USD", quote: "PLN", digits: 5 },
+  { symbol: "USD/CZK", base: "USD", quote: "CZK", digits: 5 },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,20 +156,12 @@ const openErApiCache = new Map<
   { rates: Record<string, number>; ts: number }
 >();
 
-const cryptoPriceCache = new Map<
-  string,
-  { price: number; ts: number }
->();
-
 /**
  * Fetch a real live rate for one symbol.
  * Returns null if NO source can produce a genuine price (symbol is omitted).
  */
 async function fetchRealPrice(spec: SymbolSpec): Promise<number | null> {
   try {
-    if (spec.kind === "crypto") {
-      return await fetchCryptoPrice(spec);
-    }
     return await fetchForexPrice(spec);
   } catch (err) {
     log(`[publisher] Price fetch failed for ${spec.symbol}: ${
@@ -189,23 +169,6 @@ async function fetchRealPrice(spec: SymbolSpec): Promise<number | null> {
     }`);
     return null;
   }
-}
-
-/** Fetch a USD price for BTC/ETH via CoinGecko. */
-async function fetchCryptoPrice(spec: SymbolSpec): Promise<number | null> {
-  const cached = cryptoPriceCache.get(spec.symbol);
-  if (cached && Date.now() - cached.ts < REFRESH_INTERVAL_MS) {
-    return cached.price;
-  }
-
-  const url = `${COINGECKO_BASE}/simple/price?ids=${spec.base}&vs_currencies=usd`;
-  const res = await http.get(url);
-  const price = Number(res.data?.[spec.base]?.usd);
-
-  if (!Number.isFinite(price) || price <= 0) return null;
-
-  cryptoPriceCache.set(spec.symbol, { price, ts: Date.now() });
-  return price;
 }
 
 /**

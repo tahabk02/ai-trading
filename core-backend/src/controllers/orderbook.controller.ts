@@ -3,7 +3,7 @@
  *
  * Strict OTC Forex Order Book — 100% REAL DATA, ZERO SYNTHETIC FALLBACKS.
  *
- * Only the 10 whitelisted OTC pairs are accepted. Any stock/crypto/etf
+ * Only whitelisted pairs are accepted. Any stock/crypto/etf
  * symbol is REJECTED with HTTP 400.
  *
  * Data pipeline:
@@ -131,15 +131,11 @@ const PAIR_SPECS: Record<string, { base: string; quote: string }> = {
   "AUD/CAD": { base: "AUD", quote: "CAD" },
   "AUD/USD": { base: "AUD", quote: "USD" },
   "BHD/CNY": { base: "BHD", quote: "CNY" },
-  "BTC/USD": { base: "BTC", quote: "USD" },
-  "ETH/USD": { base: "ETH", quote: "USD" },
   "CAD/CHF": { base: "CAD", quote: "CHF" },
   "CAD/JPY": { base: "CAD", quote: "JPY" },
   "CHF/JPY": { base: "CHF", quote: "JPY" },
   "EUR/RUB": { base: "EUR", quote: "RUB" },
-  "EUR/TRY": { base: "EUR", quote: "TRY" },
   "EUR/USD": { base: "EUR", quote: "USD" },
-  "GBP/USD": { base: "GBP", quote: "USD" },
   "KES/USD": { base: "KES", quote: "USD" },
   "MAD/USD": { base: "MAD", quote: "USD" },
   "USD/JPY": { base: "USD", quote: "JPY" },

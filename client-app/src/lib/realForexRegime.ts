@@ -7,7 +7,7 @@
  * reusing the existing suppressedReason SCORED-ONLY rendering pattern.
  *
  * PART 28.2: the [47]/[48] review gate is now answered by the engine itself —
- * the 10 real pairs stream a genuine Yahoo intraday tape (PART 28), so the
+ * the 5 real pairs stream a genuine Yahoo intraday tape (PART 28), so the
  * regime classification that justifies a tradable UI is evaluated live on
  * intraday ticks. Pairs whose intraday classification is non-random-walk
  * (trending / mean_reverting) come back "tradable" and unlock the card;
@@ -19,7 +19,7 @@
 import { REAL_FOREX_SET } from "@/constants/symbols";
 
 /**
- * How the card's price row is sourced. PART 28 switched the 10 real pairs to
+ * How the card's price row is sourced. PART 28 switched the 5 real pairs to
  * a genuinely intraday source (Yahoo Finance 1-minute chart API streamed via
  * the core-backend tick engine at 1Hz), so for every instrument the card is
  * a live tape — "daily_close" no longer exists in the wire.
@@ -43,7 +43,7 @@ export const REAL_FOREX_NONINTERACTIVE_COPY: Record<
 };
 
 export interface RealForexRegimeDisplay {
-  /** True when the symbol is one of the 10 REAL_FOREX_PAIRS (assetSubType "forex"). */
+  /** True when the symbol is one of the 5 REAL_FOREX_PAIRS (assetSubType "forex"). */
   isReal: boolean;
   /** True → the card renders SCORED-ONLY: price only, no BUY/SELL, no action. */
   scoredOnly: boolean;
@@ -60,7 +60,7 @@ export interface RealForexRegimeDisplay {
     | "regime_scored_only"
     | "regime_pending_confirmation"
     | null;
-  /** Data cadence: every instrument (incl. the 10 real pairs) is a live tape. */
+  /** Data cadence: every instrument (incl. the 5 real pairs) is a live tape. */
   dataKind: RealForexDataKind;
   /** Cursor/tooltip copy surfaced when a scored-only card is hovered. */
   nonInteractiveTitle: string;

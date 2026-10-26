@@ -59,11 +59,11 @@ export interface MarketQuote {
 
 /**
  * Cap on the enriched snapshot. Must comfortably exceed the union of the
- * broker universe + the 44 canonical instruments (PART 27): the registry can
+ * broker universe + the 26 canonical instruments (PART 27): the registry can
  * carry 150+ entries and, when PO is fully live, every one of them has ticks.
  * An alphabetical slice(0, 40) used to silently drop the ECB real pairs
  * (EUR/SEK … USD/CZK sort last), which is exactly the "--" the user saw on
- * 9 of 10 real cards. 200 keeps every ticking instrument in the payload.
+ * most real cards. 200 keeps every ticking instrument in the payload.
  */
 const MAX_QUOTES = 200;
 

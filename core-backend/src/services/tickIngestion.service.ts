@@ -151,6 +151,12 @@ export class LiveTickIngestionService {
     githubDataProvider.setCallbacks({
       onTick: (symbol, price, bid, ask, _volume, timestamp) => {
         const norm = symbol.trim().toUpperCase();
+        if (!symbolRegistry.isValidSymbolSync(norm)) {
+          logger.debug("[TickIngestion] Dropped retired/unlisted provider tick", {
+            symbol: norm,
+          });
+          return;
+        }
 
         const tick: LiveMarketTick = {
           symbol: norm,
@@ -820,7 +826,7 @@ export class LiveTickIngestionService {
     diag?: { seq?: number; tsUtc?: number; receivedUtcMs?: number },
   ): void {
     // Canonicalize the incoming symbol to the strict "/" whitelist format so a
-    // Pocket Option tick ("EURUSD", "BTCUSD", "EUR-USD") lands on the SAME
+    // Pocket Option tick ("EURUSD", "USDJPY", "EUR-USD") lands on the SAME
     // symbol the chart, candle buffers and prediction pipeline index by —
     // otherwise every PO pair would fork into a disconnected symbol/candle.
     const norm = forexDataService.toCanonicalSymbol(symbol || "");

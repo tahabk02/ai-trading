@@ -1249,7 +1249,7 @@ export interface LiveTick {
   volume?: number;
   /** Original upstream timestamp, retained for diagnostics. */
   serverTimestamp?: number;
-  /** Strict classification from the bridge feed ("forex"|"otc"|"crypto"). */
+  /** Strict classification from the bridge feed ("forex"|"otc"). */
   assetType?: string;
 }
 

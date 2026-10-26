@@ -360,6 +360,13 @@ io.on("connection", (socket) => {
       // would silently never receive anything (frozen chart on a pair switch).
       const normalized = canonicalizeSymbol(rawSymbol);
       if (!normalized) return;
+      if (!symbolRegistry.isValidSymbolSync(normalized)) {
+        logger.warn("Rejected subscription for retired/non-whitelisted symbol", {
+          socketId: socket.id,
+          symbol: rawSymbol,
+        });
+        return;
+      }
       const tf =
         realtimeCandleAggregatorService.canonicalTimeframe(
           parsed?.timeframe || "",
@@ -428,7 +435,15 @@ io.on("connection", (socket) => {
   socket.on("subscribe_symbol", (symbol: string) => {
     try {
       if (symbol?.trim()) {
-        const normalized = symbol.trim().toUpperCase();
+        const normalized = canonicalizeSymbol(symbol);
+        if (!normalized) return;
+        if (!symbolRegistry.isValidSymbolSync(normalized)) {
+          logger.warn(
+            "Rejected legacy subscription for retired/non-whitelisted symbol",
+            { socketId: socket.id, symbol },
+          );
+          return;
+        }
         socket.join(normalized);
         socket.join(`${normalized}:M1`);
         tickIngestionService.startSymbolStream(normalized);
@@ -702,10 +717,10 @@ httpServer.listen(PORT, () => {
 
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  STRICT LIVE TICK AUTO-START â€” 100% REAL DATA, 0% DEMO
-  // Auto-start live tick streams for all whitelisted OTC pairs AND the 10
+  // Auto-start live tick streams for all whitelisted OTC pairs AND the 5
   // real non-OTC forex pairs (PART 14/15) at boot, so the market terminal
   // grid has live prices for every card the moment it connects — no
-  // per-symbol Pro-chart subscription required. Crypto boot behavior stays
+  // per-symbol Pro-chart subscription required. The boot seed stays
   // untouched (explicit getAll("otc") + getAll("forex"), never a bare
   // getAll()). Candle buffers are populated ONLY by real observed data (PO
   // bridge snapshot/ticks and genuine HTTP live ticks) — NO skeleton-bar
@@ -764,7 +779,7 @@ httpServer.listen(PORT, () => {
   // persisted 1m store back into memory on boot restores real depth across a
   // restart without inventing anything.
   //
-  // Reads the FULL instrument list (OTC + REAL + CRYPTO) through the identical
+  // Reads the FULL instrument list (OTC + REAL) through the identical
   // per-symbol path — no asset-type branch, mirroring the "one script feeds all
   // three layers" discipline. Observational by contract: a failure here must
   // never stop the server booting, since live ticks still populate the arrays.

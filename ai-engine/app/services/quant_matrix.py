@@ -1139,10 +1139,8 @@ def project_target(
 
 
 def symbol_price_digits(symbol: str) -> int:
-    """Decimal precision per asset class: crypto → 2, JPY quote → 3, else 5."""
+    """Decimal precision per asset class: JPY quote → 3, else 5."""
     sym = (symbol or "").strip().upper()
-    if sym in {"BTC/USD", "ETH/USD"}:
-        return 2
     try:
         quote = sym.split("/")[1]
         return 3 if quote == "JPY" else 5

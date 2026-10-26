@@ -160,8 +160,8 @@ interface FinancialChartProps {
    * PART 43.5 [473]/[474] — true when this OTC instrument is priced by a NON-PO
    * market proxy (PO offline). The proxy's per-second re-served tick must not
    * keep the green LIVE badge (it is NOT a PO print), and the target layer +
-   * verdict + T-HI/T-LO are withheld until a PO print returns. REAL/crypto and
-   * a genuine PO print are never this state.
+   * verdict + T-HI/T-LO are withheld until a PO print returns. REAL-market
+   * symbols and a genuine PO print are never this state.
    */
   poOfflineOtc?: boolean;
   candleParityBreach?: {

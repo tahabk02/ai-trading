@@ -118,7 +118,7 @@ function ProTerminalInner() {
   // PART 42.1 [422] — the feed-health bar must say MARKET CLOSED (never PRICE
   // STALE) when every REAL forex instrument is in its weekly closed window.
   // Returns a primitive so the page re-renders only on the transition, never on
-  // the tick clock. OTC/crypto quotes are ignored (they are 24/7). When the
+  // the tick clock. OTC quotes are ignored (they are 24/7). When the
   // market-terminal store is unhydrated (direct Pro load) this stays false and
   // the bar behaves exactly as before.
   const realMarketClosed = useMarketTerminalStore((s) => {
@@ -362,7 +362,7 @@ function ProTerminalInner() {
                 <input
                   name="symbol"
                   type="text"
-                  placeholder="BTC/USDT"
+                  placeholder="EUR/USD"
                   value={selectedSymbol}
                   onChange={(e) => setSelectedSymbol(e.target.value)}
                   className="w-20 sm:w-24 md:w-28 bg-well border border-line-strong rounded-control px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs text-ink font-mono placeholder-ink-faint focus:outline-none focus:border-primary min-h-[36px] sm:min-h-[40px]"

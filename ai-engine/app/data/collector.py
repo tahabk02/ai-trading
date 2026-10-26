@@ -12,12 +12,10 @@ from ..core.config import settings
 logger = structlog.get_logger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — FULL 44-PAIR UNIVERSE (0 DEMO, 100% REAL)
-# Mirrors core-backend symbolRegistry.service.ts. Includes the CRYPTO
-# MAJORS (BTC/USD, ETH/USD) resolved through CoinGecko's public API —
-# real exchange-aggregated prices, never synthetic.
+# STRICT OTC WHITELIST — 21-PAIR UNIVERSE (0 DEMO, 100% REAL)
+# Mirrors core-backend symbolRegistry.service.ts.
 #
-# PART 14: adds 10 REAL NON-OTC wholesale forex pairs (assetSubType
+# PART 14: adds 5 REAL NON-OTC wholesale forex pairs (assetSubType
 # "forex"). They resolve through the SAME already-integrated ECB feed
 # (Frankfurter reference rates + open.er-api spot) — a genuinely
 # integrated real market source, never an invented feed.
@@ -25,36 +23,20 @@ logger = structlog.get_logger(__name__)
 # Backed by live data sources:
 #   1. Fiat spot cross-rates: https://open.er-api.com/v6/latest/{BASE}
 #   2. Fiat daily candles:    https://api.frankfurter.dev/v1/ (ECB rates)
-#   3. Crypto spot/history:   https://api.coingecko.com/api/v3
 # ═══════════════════════════════════════════════════════════════════
 
 OTC_PAIRS: Dict[str, Dict[str, Any]] = {
     # ── Forex Majors ──
     "EUR/USD": {"base": "EUR", "quote": "USD", "daily_vol_pct": 0.005},
-    "GBP/USD": {"base": "GBP", "quote": "USD", "daily_vol_pct": 0.006},
     "USD/JPY": {"base": "USD", "quote": "JPY", "daily_vol_pct": 0.007},
     "USD/CHF": {"base": "USD", "quote": "CHF", "daily_vol_pct": 0.005},
     "USD/CAD": {"base": "USD", "quote": "CAD", "daily_vol_pct": 0.005},
     "AUD/USD": {"base": "AUD", "quote": "USD", "daily_vol_pct": 0.005},
-    "NZD/USD": {"base": "NZD", "quote": "USD", "daily_vol_pct": 0.005},
-    # ── Crypto Majors (CoinGecko-backed) ──
-    "BTC/USD": {"base": "BTC", "quote": "USD", "daily_vol_pct": 0.035,
-                "crypto_id": "bitcoin"},
-    "ETH/USD": {"base": "ETH", "quote": "USD", "daily_vol_pct": 0.045,
-                "crypto_id": "ethereum"},
     # ── Euro Crosses ──
-    "EUR/GBP": {"base": "EUR", "quote": "GBP", "daily_vol_pct": 0.004},
     "EUR/JPY": {"base": "EUR", "quote": "JPY", "daily_vol_pct": 0.007},
     "EUR/CHF": {"base": "EUR", "quote": "CHF", "daily_vol_pct": 0.004},
     "EUR/AUD": {"base": "EUR", "quote": "AUD", "daily_vol_pct": 0.006},
     "EUR/CAD": {"base": "EUR", "quote": "CAD", "daily_vol_pct": 0.006},
-    "EUR/NZD": {"base": "EUR", "quote": "NZD", "daily_vol_pct": 0.006},
-    "EUR/TRY": {"base": "EUR", "quote": "TRY", "daily_vol_pct": 0.012},
-    # ── Pound Crosses ──
-    "GBP/JPY": {"base": "GBP", "quote": "JPY", "daily_vol_pct": 0.008},
-    "GBP/CHF": {"base": "GBP", "quote": "CHF", "daily_vol_pct": 0.006},
-    "GBP/AUD": {"base": "GBP", "quote": "AUD", "daily_vol_pct": 0.007},
-    "GBP/CAD": {"base": "GBP", "quote": "CAD", "daily_vol_pct": 0.007},
     # ── Yen Crosses ──
     "AUD/JPY": {"base": "AUD", "quote": "JPY", "daily_vol_pct": 0.007},
     "CAD/JPY": {"base": "CAD", "quote": "JPY", "daily_vol_pct": 0.006},
@@ -62,19 +44,17 @@ OTC_PAIRS: Dict[str, Dict[str, Any]] = {
     # ── Other Minors ──
     "AUD/CAD": {"base": "AUD", "quote": "CAD", "daily_vol_pct": 0.004},
     "AUD/NZD": {"base": "AUD", "quote": "NZD", "daily_vol_pct": 0.004},
-    "NZD/JPY": {"base": "NZD", "quote": "JPY", "daily_vol_pct": 0.007},
     "CAD/CHF": {"base": "CAD", "quote": "CHF", "daily_vol_pct": 0.004},
     "EUR/RUB": {"base": "EUR", "quote": "RUB", "daily_vol_pct": 0.008},
     # ── Emerging / OTC Variants ──
     "USD/TRY": {"base": "USD", "quote": "TRY", "daily_vol_pct": 0.012},
-    "USD/ZAR": {"base": "USD", "quote": "ZAR", "daily_vol_pct": 0.010},
     "USD/MXN": {"base": "USD", "quote": "MXN", "daily_vol_pct": 0.009},
     "USD/SGD": {"base": "USD", "quote": "SGD", "daily_vol_pct": 0.003},
     "MAD/USD": {"base": "MAD", "quote": "USD", "daily_vol_pct": 0.004},
     "KES/USD": {"base": "KES", "quote": "USD", "daily_vol_pct": 0.004},
 }
 
-# ── REAL NON-OTC FOREX (10) — PART 14 ────────────────────────────────
+# ── REAL NON-OTC FOREX (5) — PART 14 ─────────────────────────────────
 # Standard wholesale forex pairs (assetSubType "forex"), disjoint from the
 # OTC book. They resolve through the SAME already-integrated ECB feed
 # (Frankfurter daily reference rates + open.er-api live spot). Verified to
@@ -82,18 +62,11 @@ OTC_PAIRS: Dict[str, Dict[str, Any]] = {
 # Step 1. No invented market data anywhere in this path.
 REAL_FOREX_PAIRS: Dict[str, Dict[str, Any]] = {
     "EUR/SEK": {"base": "EUR", "quote": "SEK", "daily_vol_pct": 0.005},
-    "EUR/NOK": {"base": "EUR", "quote": "NOK", "daily_vol_pct": 0.005},
-    "EUR/DKK": {"base": "EUR", "quote": "DKK", "daily_vol_pct": 0.002},
-    "EUR/PLN": {"base": "EUR", "quote": "PLN", "daily_vol_pct": 0.006},
-    "EUR/CZK": {"base": "EUR", "quote": "CZK", "daily_vol_pct": 0.005},
     "EUR/HUF": {"base": "EUR", "quote": "HUF", "daily_vol_pct": 0.006},
-    "USD/SEK": {"base": "USD", "quote": "SEK", "daily_vol_pct": 0.005},
     "USD/NOK": {"base": "USD", "quote": "NOK", "daily_vol_pct": 0.006},
     "USD/PLN": {"base": "USD", "quote": "PLN", "daily_vol_pct": 0.006},
-    "USD/CZK": {"base": "USD", "quote": "CZK", "daily_vol_pct": 0.006},
+    "USD/CZK": {"base": "USD", "quote": "CZK", "daily_vol_pct": 0.005},
 }
-
-COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 OTC_SET: set = set(OTC_PAIRS.keys())
 REAL_FOREX_SET: set = set(REAL_FOREX_PAIRS.keys())
@@ -102,7 +75,7 @@ REAL_FOREX_SET: set = set(REAL_FOREX_PAIRS.keys())
 def is_stock_symbol(symbol: str) -> bool:
     """Legacy name retained for API compatibility — ALWAYS rejects non-OTC.
 
-    The AI Engine is strict OTC-only. Any stock/crypto ticker is refused.
+    The AI Engine trades only the whitelisted Forex universe.
     """
     return False
 
@@ -114,7 +87,7 @@ def is_otc_pair(symbol: str) -> bool:
 
 
 def is_real_forex_pair(symbol: str) -> bool:
-    """Strict membership check against the 10 REAL NON-OTC forex pairs
+    """Strict membership check against the 5 REAL NON-OTC forex pairs
     (assetSubType "forex"). These are standard wholesale pairs resolved via
     the already-integrated ECB feed — never mixed into the OTC book."""
     sym = (symbol or "").strip().upper()
@@ -130,7 +103,7 @@ class MarketDataCollector:
       - Daily candles:        Frankfurter API (ECB historical reference rates)
 
     Routing: only the 10 whitelisted OTC pairs are accepted. Any other symbol
-    (AAPL, BTC/USDT, ...) is rejected with an error — never silently fabricated.
+    (AAPL, XAU/USD, ...) is rejected with an error — never silently fabricated.
     """
 
     OPEN_ER_API = "https://open.er-api.com/v6/latest"
@@ -160,7 +133,7 @@ class MarketDataCollector:
     # ── Lookup helpers ──
 
     def _spec(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Resolve a symbol spec: OTC pairs first, then the 10 real NON-OTC
+        """Resolve a symbol spec: OTC pairs first, then the 5 real NON-OTC
         wholesale forex pairs (PART 14). Both default to the SAME integrated
         ECB feed (Frankfurter / open.er-api)."""
         sym = (symbol or "").strip().upper()
@@ -187,27 +160,9 @@ class MarketDataCollector:
 
         base, quote = spec["base"], spec["quote"]
 
-        # ── TIER 0: CRYPTO MAJORS via CoinGecko (fiat APIs carry NO crypto) ──
-        crypto_id = spec.get("crypto_id")
-        if crypto_id:
-            try:
-                url = f"{COINGECKO_API}/simple/price?ids={crypto_id}&vs_currencies=usd"
-                resp = await self.client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                rate_f = float(data.get(crypto_id, {}).get("usd", 0))
-                if rate_f > 0 and math.isfinite(rate_f):
-                    price = round(rate_f, 2)
-                    self._spot_cache[sym] = (price, now)
-                    self._held_prices[sym] = (price, now)
-                    logger.info("[OTC] Live crypto spot fetched", symbol=sym, price=price, source="coingecko")
-                    return price
-            except Exception as e:
-                logger.warning("[OTC] coingecko crypto spot failed", symbol=sym, error=str(e))
-
         # ── TIER 0.5 (PART 28): YAHOO intraday spot — REAL NON-OTC pairs ──
         # Genuine 1-minute Forex prints run ahead of the ECB daily feed so the
-        # signal pipeline for these 10 pairs consumes live intraday motion, not
+        # signal pipeline for these 5 pairs consumes live intraday motion, not
         # a daily close frozen all day. Throttled per-symbol (9s hold re-serves
         # the last real print; bars only change once a minute). OTC untouched.
         if is_real_forex_pair(sym):
@@ -359,11 +314,11 @@ class MarketDataCollector:
         base, quote = spec["base"], spec["quote"]
 
         # ── PART 28: REAL NON-OTC pairs route through Yahoo intraday bars ──
-        # M1/Hr candles for the 10 real pairs now come from Yahoo's 1-minute
+        # M1/Hr candles for the 5 real pairs now come from Yahoo's 1-minute
         # chart API (genuine intraday OHLC) instead of the ECB daily close.
         # If Yahoo is unreachable we fall through to the Frankfurter daily
         # path below — never fabricated either way.
-        if is_real_forex_pair(sym) and not spec.get("crypto_id"):
+        if is_real_forex_pair(sym):
             intraday = await self._fetch_yahoo_intraday_candles(sym, tf, limit)
             if intraday:
                 logger.info(
@@ -462,7 +417,7 @@ class MarketDataCollector:
     async def _fetch_yahoo_intraday_candles(
         self, symbol: str, interval: str = "1h", limit: int = 500
     ) -> List[Dict[str, Any]]:
-        """Fetch REAL intraday OHLC candles for the 10 REAL non-OTC pairs from
+        """Fetch REAL intraday OHLC candles for the 5 REAL non-OTC pairs from
         Yahoo Finance's chart API (keyless, 1-minute base grid).
 
         OHLC + volume are Yahoo's genuine intraday bars — no synthesis. The
@@ -471,7 +426,7 @@ class MarketDataCollector:
         """
         sym = (symbol or "").strip().upper()
         spec = self._spec(sym)
-        if not spec or spec.get("crypto_id") or not is_real_forex_pair(sym):
+        if not spec or not is_real_forex_pair(sym):
             return []
         base, quote = spec["base"], spec["quote"]
         tf = (interval or "1h").lower()
@@ -552,53 +507,6 @@ class MarketDataCollector:
             )
             return []
 
-    async def _fetch_crypto_history(self, symbol: str, limit: int) -> List[Dict[str, Any]]:
-        """Fetch REAL daily crypto candles (BTC/USD, ETH/USD) from CoinGecko.
-
-        Exchange-aggregated market_chart series — never synthetic. OHLC is
-        derived deterministically from consecutive REAL closes (open = prev
-        close), identical to the core-backend crypto pipeline.
-        """
-        sym = (symbol or "").strip().upper()
-        spec = self._spec(sym)
-        crypto_id = spec.get("crypto_id") if spec else None
-        if not crypto_id:
-            return []
-        try:
-            days = min(max(limit, 30), 365)
-            url = (
-                f"{COINGECKO_API}/coins/{crypto_id}/market_chart"
-                f"?vs_currency=usd&days={days}&interval=daily"
-            )
-            resp = await self.client.get(url)
-            resp.raise_for_status()
-            prices = resp.json().get("prices") or []
-            candles: List[Dict[str, Any]] = []
-            for i, point in enumerate(prices):
-                ts, close_raw = point[0], point[1]
-                close = float(close_raw)
-                if close <= 0 or not math.isfinite(close):
-                    continue
-                prev_close = float(prices[i - 1][1]) if i > 0 else close
-                open_v = prev_close if prev_close > 0 else close
-                candles.append({
-                    "timestamp": int(ts),
-                    "open": round(open_v, 2),
-                    "high": round(max(open_v, close), 2),
-                    "low": round(min(open_v, close), 2),
-                    "close": round(close, 2),
-                    "volume": 0,
-                })
-            if candles:
-                logger.info(
-                    "[OTC] Daily crypto candles fetched (coingecko)",
-                    symbol=sym, count=len(candles),
-                )
-            return candles
-        except Exception as e:
-            logger.warning("[OTC] coingecko crypto history failed", symbol=sym, error=str(e))
-            return []
-
     async def fetch(self, symbol: str, interval: str = "1d", limit: int = 500) -> Dict[str, Any]:
         """Unified fetch for a whitelisted OTC OR real non-OTC forex pair — candles + live spot."""
         sym = (symbol or "").strip().upper()
@@ -609,13 +517,7 @@ class MarketDataCollector:
             )
             return {"success": False, "symbol": sym, "error": "NOT_OTC_WHITELIST"}
 
-        spec = self._spec(sym)
-        if spec and spec.get("crypto_id"):
-            # Crypto majors route through CoinGecko exclusively — fiat APIs
-            # carry NO crypto rates, so the frankfurter path always 404s.
-            candles = await self._fetch_crypto_history(sym, limit)
-        else:
-            candles = await self.fetch_historical_candles(sym, interval, limit)
+        candles = await self.fetch_historical_candles(sym, interval, limit)
         spot = await self.fetch_live_spot(sym)
 
         if not candles and spot is None:

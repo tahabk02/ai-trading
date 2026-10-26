@@ -54,12 +54,12 @@ describe("asset classification (the 'Real is locked' root cause)", () => {
 
   it("is unaffected by a PARTIAL quote snapshot (no arbitrary subsets)", () => {
     const full = applyAssetFilter(ALL_MARKET_SYMBOLS, filter({ classes: ["real"] }));
-    // Simulate exactly 3 of 10 real quotes having landed — the state that made
-    // the old fallback suppression render "Real 3" instead of "Real 10".
+    // Simulate exactly 3 of 5 real quotes having landed — the state that made
+    // the old fallback suppression render "Real 3" instead of "Real 5".
     const partialQuotes = new Set(full.slice(0, 3));
     const visible = applyAssetFilter(ALL_MARKET_SYMBOLS, filter({ classes: ["real"] }));
-    for (const sym of visible) expect(partialQuotes.has(sym) || true).toBe(true);
     expect(visible).toHaveLength(REAL_FOREX_PAIRS.length);
+    expect(visible.some((sym) => !partialQuotes.has(sym))).toBe(true);
   });
 
   it("never lets OTC and REAL overlap", () => {
@@ -69,16 +69,16 @@ describe("asset classification (the 'Real is locked' root cause)", () => {
   });
 
   it("class counts sum to the universe and match the registry", () => {
-    const total = ASSET_CLASS_COUNTS.otc + ASSET_CLASS_COUNTS.real + ASSET_CLASS_COUNTS.crypto;
+    const total = ASSET_CLASS_COUNTS.otc + ASSET_CLASS_COUNTS.real;
     expect(total).toBe(ALL_MARKET_SYMBOLS.length);
     expect(ASSET_CLASS_COUNTS.real).toBe(REAL_FOREX_PAIRS.length);
-    expect(ASSET_CLASS_COUNTS.crypto).toBe(2);
-    // The OTC count is DERIVED, not read off OTC_FOREX_PAIRS.length: that
-    // array deliberately spreads the 10 real pairs AND the 2 crypto majors,
-    // so `OTC_FOREX_PAIRS.length - REAL_FOREX_PAIRS.length` over-counts by 2.
-    // Deriving from classification is what makes this test meaningful.
+    expect("crypto" in ASSET_CLASS_COUNTS).toBe(false);
+    // The OTC count is DERIVED from classification, not read off
+    // OTC_FOREX_PAIRS.length: that array deliberately spreads the 5 real
+    // pairs, so subtracting REAL_FOREX_PAIRS.length is what makes this
+    // test meaningful.
     expect(ASSET_CLASS_COUNTS.otc).toBe(
-      OTC_FOREX_PAIRS.length - REAL_FOREX_PAIRS.length - 2,
+      OTC_FOREX_PAIRS.length - REAL_FOREX_PAIRS.length,
     );
   });
 
@@ -109,18 +109,18 @@ describe("multi-select toggle semantics", () => {
 
   it("accumulates multiple classes (union, not intersection)", () => {
     let classes = toggleClass([], "real");
-    classes = toggleClass(classes, "crypto");
+    classes = toggleClass(classes, "otc");
     // Canonical order is the ASSET_CLASSES declaration order, not toggle order.
-    expect(classes).toEqual(["real", "crypto"]);
+    expect(classes).toEqual(["otc", "real"]);
     const visible = applyAssetFilter(ALL_MARKET_SYMBOLS, filter({ classes }));
-    expect(visible).toHaveLength(ASSET_CLASS_COUNTS.real + ASSET_CLASS_COUNTS.crypto);
+    expect(visible).toHaveLength(ASSET_CLASS_COUNTS.otc + ASSET_CLASS_COUNTS.real);
   });
 
   it("always returns canonical order regardless of toggle sequence", () => {
-    const a = toggleClass(toggleClass(toggleClass([], "crypto"), "otc"), "real");
-    const b = toggleClass(toggleClass(toggleClass([], "real"), "crypto"), "otc");
+    const a = toggleClass(toggleClass([], "otc"), "real");
+    const b = toggleClass(toggleClass([], "real"), "otc");
     expect(a).toEqual(b);
-    expect(a).toEqual(["otc", "real", "crypto"]);
+    expect(a).toEqual(["otc", "real"]);
   });
 
   it("drops unknown / duplicate / non-string classes", () => {
@@ -133,7 +133,7 @@ describe("multi-select toggle semantics", () => {
   it("maps the legacy single-select enum onto the set", () => {
     expect(setSingleClass("all")).toEqual([]);
     expect(setSingleClass("real")).toEqual(["real"]);
-    expect(setSingleClass("crypto")).toEqual(["crypto"]);
+    expect(setSingleClass("otc")).toEqual(["otc"]);
   });
 });
 
@@ -162,7 +162,7 @@ describe("currency + free-text query", () => {
 
 describe("favorites + hidden", () => {
   it("favoritesOnly shows exactly the pinned symbols", () => {
-    const favs = ["EUR/USD", "BTC/USD"];
+    const favs = ["EUR/USD", "EUR/JPY"];
     const visible = applyAssetFilter(ALL_MARKET_SYMBOLS, filter({ favorites: favs, favoritesOnly: true }));
     expect(visible.sort()).toEqual([...favs].sort());
   });
@@ -187,9 +187,9 @@ describe("favorites + hidden", () => {
     expect(favs).toEqual([]);
   });
 
-  it("drops persisted symbols that are not in the universe", () => {
+  it("drops retired / unknown persisted symbols", () => {
     expect(sanitizeSymbolList(["EUR/USD", "FAKE/PAIR", "BTC/USD", "EUR/USD"]))
-      .toEqual(["EUR/USD", "BTC/USD"]);
+      .toEqual(["EUR/USD"]);
   });
 });
 
@@ -211,7 +211,6 @@ describe("filter composition + status", () => {
     const counts = countVisibleByClass(ALL_MARKET_SYMBOLS, state);
     expect(counts.real).toBe(ASSET_CLASS_COUNTS.real);
     expect(counts.otc).toBe(ASSET_CLASS_COUNTS.otc);
-    expect(counts.crypto).toBe(ASSET_CLASS_COUNTS.crypto);
   });
 
   it("pill counts DO honour favorites / hidden / query", () => {
@@ -235,7 +234,7 @@ describe("filter composition + status", () => {
   });
 
   it("isSymbolVisible matches applyAssetFilter for every symbol (single predicate)", () => {
-    const state = filter({ classes: ["otc", "crypto"], query: "USD", hidden: ["BTC/USD"] });
+    const state = filter({ classes: ["otc"], query: "USD", hidden: ["EUR/USD"] });
     const viaList = new Set(applyAssetFilter(ALL_MARKET_SYMBOLS, state));
     for (const sym of ALL_MARKET_SYMBOLS) {
       expect(isSymbolVisible(sym, state)).toBe(viaList.has(sym));

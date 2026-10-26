@@ -460,7 +460,6 @@ function readCanvasPalette(): CanvasPalette {
   // Every colour comes from the design system. No raw hex literals here, so the
   // graph re-themes with the rest of the terminal when `html.light` flips.
   const gold = channel("--term-gold", "#d8a048");
-  const crypto = channel("--term-crypto", "#00b3c9");
   const accent = cssColor("--tp-accent", "#22ab94");
   const bull = channel("--bull", "#22ab94");
   const bear = channel("--bear", "#f23645");
@@ -470,14 +469,14 @@ function readCanvasPalette(): CanvasPalette {
     laneBand: line,
     edge: line,
     edgeActive: accent,
-    node: { real: gold, otc: accent, crypto },
+    node: { real: gold, otc: accent },
     nodeRole: {
       ingest: gold,
       analysis: accent,
-      consensus: crypto,
+      consensus: gold,
       emitter: accent,
     },
-    packet: { real: gold, otc: accent, crypto },
+    packet: { real: gold, otc: accent },
     buy: bull,
     sell: bear,
     text: cssColor("--tp-text", "#f8fafc"),
@@ -580,7 +579,7 @@ function paintMatrix(
     const y = inv * inv * a.y + 2 * inv * t * cy + t * t * b.y;
 
     // Direction wins over lane for colour: a BUY consensus pulse must read
-    // green even while it is still inside the crypto lane.
+    // green even while it is still inside an inactive lane.
     const color =
       packet.direction === "BUY"
         ? p.buy
@@ -645,7 +644,7 @@ function paintMatrix(
   }
 
   // ── LABELS (only for the agents that earn one) ──────────────────────────
-  // Labelling all 19 nodes is noise. Ingest, consensus and the emitter carry
+  // Labelling all 13 nodes is noise. Ingest, consensus and the emitter carry
   // the semantic weight; the twelve analysts stay anonymous by design.
   ctx.font = `600 ${Math.round(9)}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
   ctx.textAlign = "center";

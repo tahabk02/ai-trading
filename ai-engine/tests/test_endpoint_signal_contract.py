@@ -105,7 +105,7 @@ def test_subthermal_attempt_keeps_its_true_direction(client):
     direction retained, gate reported, alert silent, nothing executable) are
     asserted here against the CURRENT surface.
     """
-    body = _predict(client, "GBP/USD", "4h", bearish_candles())
+    body = _predict(client, "EUR/CHF", "4h", bearish_candles())
 
     assert body.get("signal") == "SELL", (
         "a downtrend must keep SELL, got %r" % body.get("signal")
@@ -126,7 +126,7 @@ def test_subthermal_attempt_keeps_its_true_direction(client):
 
 def test_subthermal_target_is_a_real_projection_never_flat(client):
     """The retained direction must own the target: SELL projects BELOW."""
-    body = _predict(client, "GBP/USD", "4h", bearish_candles())
+    body = _predict(client, "EUR/CHF", "4h", bearish_candles())
 
     target = float(body.get("target_price") or 0)
     current = float(body.get("current_price") or 0)
@@ -139,7 +139,7 @@ def test_subthermal_target_is_a_real_projection_never_flat(client):
 
 
 def test_predict_carries_additive_predictive_diagnostics(client):
-    body = _predict(client, "GBP/USD", "4h", bearish_candles())
+    body = _predict(client, "EUR/CHF", "4h", bearish_candles())
 
     predictive = body.get("predictive")
     assert isinstance(predictive, dict)
@@ -157,7 +157,7 @@ def test_predict_event_times_activate_predictive_blackout(client):
     event = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     body = _predict(
         client,
-        "GBP/USD",
+        "EUR/CHF",
         "4h",
         bearish_candles(),
         event_times=[event],
@@ -173,7 +173,7 @@ def test_predict_event_times_activate_predictive_blackout(client):
 def test_confidence_is_never_padded_above_the_confluence_score(client):
     """The number the client shows IS the authoritative confluence score."""
     for symbol, tf, candles in (
-        ("GBP/USD", "4h", bearish_candles()),
+        ("EUR/CHF", "4h", bearish_candles()),
         ("EUR/USD", "1h", bullish_candles()),
     ):
         body = _predict(client, symbol, tf, candles)
@@ -185,7 +185,7 @@ def test_confidence_is_never_padded_above_the_confluence_score(client):
 
 
 def test_confluence_response_ships_all_three_pillars(client):
-    body = _predict(client, "GBP/USD", "4h", bearish_candles())
+    body = _predict(client, "EUR/CHF", "4h", bearish_candles())
     clusters = _confluence(body).get("clusters") or {}
     for pillar in PILLARS:
         assert pillar in clusters, "missing %s pillar in %r" % (pillar, clusters)
@@ -197,7 +197,7 @@ def test_uptrend_and_downtrend_never_both_gate_the_same_way(client):
     """Direction arbitration is the whole point: an uptrend and a downtrend
     must not collapse onto the same attempt."""
     up = _predict(client, "EUR/USD", "1h", bullish_candles())
-    down = _predict(client, "GBP/USD", "4h", bearish_candles())
+    down = _predict(client, "EUR/CHF", "4h", bearish_candles())
 
     g_up = up.get("diagnostics", {}).get("gated_direction")
     g_down = down.get("diagnostics", {}).get("gated_direction")
@@ -215,7 +215,7 @@ def test_uptrend_and_downtrend_never_both_gate_the_same_way(client):
 
 def test_target_distance_scales_with_sqrt_horizon(client):
     distances = {}
-    for tf, symbol in (("1h", "EUR/USD"), ("1d", "GBP/USD"), ("10d", "AUD/USD")):
+    for tf, symbol in (("1h", "EUR/USD"), ("1d", "USD/JPY"), ("10d", "AUD/USD")):
         body = _predict(client, symbol, tf, jpy_bullish_candles())
         target = float(body.get("target_price") or 0)
         current = float(body.get("current_price") or 0)
@@ -235,7 +235,7 @@ def test_sqrt_horizon_ratios_match_the_atr_law(client):
     perceptibility floor.
     """
     distances = {}
-    for tf, symbol in (("1h", "EUR/USD"), ("1d", "GBP/USD"), ("10d", "AUD/USD")):
+    for tf, symbol in (("1h", "EUR/USD"), ("1d", "USD/JPY"), ("10d", "AUD/USD")):
         body = _predict(client, symbol, tf, jpy_bullish_candles())
         distances[tf] = abs(
             float(body.get("target_price") or 0) - float(body.get("current_price") or 0)
@@ -336,7 +336,7 @@ def test_same_symbol_different_tapes_get_independent_ml_models(client):
     assert fp_a != fp_b, "the two fixtures must be genuinely different windows"
 
     _predict(client, "EUR/USD", "1h", tape_a)
-    _predict(client, "GBP/USD", "4h", bearish_candles())
+    _predict(client, "EUR/CHF", "4h", bearish_candles())
     _predict(client, "EUR/USD", "1h", tape_b)
 
     # Both windows are independently addressable under their own fingerprint.
@@ -364,7 +364,7 @@ def test_verdict_does_not_depend_on_a_prior_request(client):
                     bid=bid, ask=ask)
 
     # An unrelated request on a different symbol/timeframe.
-    _predict(client, "GBP/USD", "4h", bearish_candles())
+    _predict(client, "EUR/CHF", "4h", bearish_candles())
 
     warmed = _predict(client, "EUR/USD", "1h", candles, live_price=spot,
                       bid=bid, ask=ask)

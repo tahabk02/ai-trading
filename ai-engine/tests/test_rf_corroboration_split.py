@@ -162,7 +162,7 @@ def test_subthermal_fallback_never_populates_rf_or_legacy_keys(monkeypatch):
     candles = _trend_candles(1.1000, n=120, seed=7, sign=-1)
 
     resp = client.post("/api/v1/predict", json={
-        "symbol": "GBP/USD",
+        "symbol": "EUR/CHF",
         "timeframe": "4h",
         "candles": candles,
         "live_price": float(candles[-1]["close"]),

@@ -52,19 +52,17 @@ function run(state: MatrixState, frames: number, feed: MatrixFeed = LIVE_FEED): 
 describe("neural matrix — topology", () => {
   it("builds the documented agent graph", () => {
     const s = createMatrixState();
-    // 3 lanes × (1 ingest + 4 analysts + 1 consensus) = 18, + 1 emitter.
-    expect(s.nodes).toHaveLength(19);
-    expect(s.nodes.filter((n) => n.role === "ingest")).toHaveLength(3);
-    expect(s.nodes.filter((n) => n.role === "analysis")).toHaveLength(12);
-    expect(s.nodes.filter((n) => n.role === "consensus")).toHaveLength(3);
+    // 2 lanes × (1 ingest + 4 analysts + 1 consensus) = 12, + 1 emitter.
+    expect(s.nodes).toHaveLength(13);
+    expect(s.nodes.filter((n) => n.role === "ingest")).toHaveLength(2);
+    expect(s.nodes.filter((n) => n.role === "analysis")).toHaveLength(8);
+    expect(s.nodes.filter((n) => n.role === "consensus")).toHaveLength(2);
     expect(s.nodes.filter((n) => n.role === "emitter")).toHaveLength(1);
   });
 
-  it("covers all three market lanes", () => {
+  it("covers both market lanes", () => {
     const s = createMatrixState();
-    expect(new Set(s.nodes.map((n) => n.lane))).toEqual(
-      new Set(["real", "otc", "crypto"]),
-    );
+    expect(new Set(s.nodes.map((n) => n.lane))).toEqual(new Set(["real", "otc"]));
   });
 
   it("has no dangling edges and no orphan nodes", () => {
@@ -89,7 +87,7 @@ describe("neural matrix — topology", () => {
     const emitter = s.nodes.find((n) => n.role === "emitter")!;
     const intoEmitter = s.edges.filter((e) => e.to === s.nodes.indexOf(emitter));
     expect(new Set(intoEmitter.map((e) => e.lane))).toEqual(
-      new Set(["real", "otc", "crypto"]),
+      new Set(["real", "otc"]),
     );
   });
 

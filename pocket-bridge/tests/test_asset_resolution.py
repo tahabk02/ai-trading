@@ -1,7 +1,7 @@
 ﻿"""Tests for PO asset resolution + per-symbol subscription skipping.
 
 Checks that unsupported/invalid OTC pairs (e.g. ``Invalid asset:
-GBPCHF_otc``) are resolved against the broker's authoritative asset list and
+AUDCHF_otc``) are resolved against the broker's authoritative asset list and
 skipped WITHOUT flipping the bridge into a global ``connection_error`` that
 would take down the pairs that do work (EUR/USD, USD/CHF).
 
@@ -57,60 +57,60 @@ M20Engine(symbols),
 # --- asset_candidates -------------------------------------------------------
 
 def test_candidates_prefer_otc_then_bare():
-    assert asset_candidates("GBP/CHF") == ["GBPCHF_otc", "GBPCHF"]
+    assert asset_candidates("AUD/CHF") == ["AUDCHF_otc", "AUDCHF"]
     assert asset_candidates("NZ d/Cad".replace(" ", "")) == ["NZDCAD_otc", "NZDCAD"]
     assert asset_candidates("EUR/AUD") == ["EURAUD_otc", "EURAUD"]
     assert asset_candidates("EUR/CAD") == ["EURCAD_otc", "EURCAD"]
 
 
-def test_candidates_crypto_no_otc():
-    assert asset_candidates("BTC/USD") == ["BTCUSD"]
-    assert asset_candidates("ETH/USDT") == ["ETHUSDT"]
+def test_candidates_reject_retired_crypto():
+    assert asset_candidates("BTC/USD") == []
+    assert asset_candidates("ETH/USDT") == []
 
 
 def test_asset_for_symbol_backward_compat():
     # asset_for_symbol keeps returning the preferred OTC form (unchanged).
-    assert asset_for_symbol("GBP/CHF") == "GBPCHF_otc"
+    assert asset_for_symbol("AUD/CHF") == "AUDCHF_otc"
     assert asset_for_symbol("EUR/USD") == "EURUSD_otc"
 
 
 # --- resolution against the broker asset list -------------------------------
 
 def test_resolve_prefers_active_otc():
-    bridge = _bridge(["GBP/CHF"])
+    bridge = _bridge(["AUD/CHF"])
     client = FakeActiveAssetsClient([
-        {"symbol": "GBPCHF", "is_active": True},
-        {"symbol": "GBPCHF_otc", "is_active": True},
+        {"symbol": "AUDCHF", "is_active": True},
+        {"symbol": "AUDCHF_otc", "is_active": True},
     ])
-    resolved = asyncio.run(bridge._resolve_asset(client, "GBP/CHF"))
-    assert resolved == "GBPCHF_otc"
+    resolved = asyncio.run(bridge._resolve_asset(client, "AUD/CHF"))
+    assert resolved == "AUDCHF_otc"
 
 
 def test_resolve_falls_back_to_bare_pair():
-    bridge = _bridge(["GBP/CHF"])
+    bridge = _bridge(["AUD/CHF"])
     client = FakeActiveAssetsClient([
-        {"symbol": "GBPCHF", "is_active": True},
+        {"symbol": "AUDCHF", "is_active": True},
     ])
-    resolved = asyncio.run(bridge._resolve_asset(client, "GBP/CHF"))
-    assert resolved == "GBPCHF"
+    resolved = asyncio.run(bridge._resolve_asset(client, "AUD/CHF"))
+    assert resolved == "AUDCHF"
 
 
 def test_resolve_none_when_broker_lacks_every_candidate():
-    bridge = _bridge(["GBP/CHF"])
+    bridge = _bridge(["AUD/CHF"])
     client = FakeActiveAssetsClient([
         {"symbol": "EURUSD_otc", "is_active": True},
     ])
-    resolved = asyncio.run(bridge._resolve_asset(client, "GBP/CHF"))
+    resolved = asyncio.run(bridge._resolve_asset(client, "AUD/CHF"))
     assert resolved is None
-    assert "GBP/CHF" not in bridge._skipped  # skipped only at subscribe time
+    assert "AUD/CHF" not in bridge._skipped  # skipped only at subscribe time
 
 
 def test_resolve_unavailable_list_falls_back_to_first_candidate():
-    bridge = _bridge(["GBP/CHF"])
+    bridge = _bridge(["AUD/CHF"])
     client = FakeActiveAssetsClient([])
     client.active_assets = _explode  # list fetch fails at runtime
-    resolved = asyncio.run(bridge._resolve_asset(client, "GBP/CHF"))
-    assert resolved == "GBPCHF_otc"
+    resolved = asyncio.run(bridge._resolve_asset(client, "AUD/CHF"))
+    assert resolved == "AUDCHF_otc"
 
 
 # --- subscribe-time invalid-asset skip --------------------------------------
@@ -130,27 +130,30 @@ class FakeSubscribeErrorClient(FakeActiveAssetsClient):
 
 def test_invalid_asset_error_detection():
     bridge = _bridge(["EUR/USD"])
-    assert asyncio.run(bridge._is_invalid_asset_error(RuntimeError("Invalid asset: GBPCHF_otc"))
+    assert asyncio.run(bridge._is_invalid_asset_error(RuntimeError("Invalid asset: AUDCHF_otc"))
     )
     assert not asyncio.run(bridge._is_invalid_asset_error(RuntimeError("connection reset by peer"))
     )
 
 
 def test_subscribe_invalid_asset_skips_without_connection_error():
-    bridge = _bridge(["EUR/USD", "GBP/CHF"])
+    bridge = _bridge(["EUR/USD", "AUD/CHF"])
     bridge.status = "connected"  # other pairs are already live
+    bridge._assets_ready = True
     client = FakeSubscribeErrorClient()
     bridge.client = client
     with pytest.raises(AssetSkippedError):
-        asyncio.run(bridge.run_reader("GBP/CHF", "GBPCHF_otc"))
+        asyncio.run(bridge.run_reader("AUD/CHF", "AUDCHF_otc"))
     # Per-symbol skip: no global connection_error, bridge stays ONLINE.
     assert bridge.status == "connected"
     assert bridge.last_error is None
-    assert bridge._skipped == {"GBP/CHF": "GBPCHF_otc"}
+    assert bridge._skipped == {"AUD/CHF": "AUDCHF_otc"}
 
 
 def test_subscribe_generic_failure_still_reports_connection_error():
     bridge = _bridge(["EUR/USD"])
+    bridge.status = "connected"
+    bridge._assets_ready = True
     client = FakeSubscribeErrorClient()
     client.subscribe_symbol = _explode_generic  # not an invalid-asset error
     bridge.client = client

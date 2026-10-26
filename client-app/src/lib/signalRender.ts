@@ -134,7 +134,7 @@ export function targetRenderState(
 
 /**
  * The same pure gate for surfaces that hold a raw /predict payload instead
- * of a SignalHoldView (the 44-card grid). A null payload is the honest
+ * of a SignalHoldView (the 26-card grid). A null payload is the honest
  * "no verdict in hand" state: withheld with awaiting_payload.
  */
 export function targetStateForPayload(

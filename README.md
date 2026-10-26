@@ -29,13 +29,12 @@ Industrial-grade, automated trading platform powered by AI.
 
 ### Market Data Sources
 
-**OTC pairs + crypto (canonical 44-symbol engine universe):**
+**OTC forex + real forex (canonical 26-symbol engine universe):**
 - Live spot: `open.er-api.com/v6/latest/{BASE}` (ECB-sourced, no key).
 - Daily candles: `api.frankfurter.dev/v1` (ECB reference rates).
-- Crypto majors (BTC/USD, ETH/USD): CoinGecko public API.
 
-**The 10 real (non-OTC) forex pairs (EUR/SEK, EUR/NOK, EUR/DKK, EUR/PLN,
-EUR/CZK, EUR/HUF, USD/SEK, USD/NOK, USD/PLN, USD/CZK) — PART 28:**
+**The 5 real (non-OTC) forex pairs (EUR/SEK, EUR/HUF, USD/NOK, USD/PLN,
+USD/CZK) — PART 28:**
 - Live intraday spot + M1/Hr candles: **Yahoo Finance chart API**
   (`query1.finance.yahoo.com/v8/finance/chart/{SYM}=X`), streamed through the
   core-backend tick engine at 1Hz, per-symbol poll throttle ~9s.
@@ -56,7 +55,7 @@ Mitigations already in place:
 - The tiered fallback to Frankfurter (ECB daily) → open.er-api is automatic and
   unit-tested (`forexData.yahooFallback.test.ts`); the ai-engine collector falls
   back to `open.er-api`/Frankfurter daily the same way.
-- Yahoo is only ever a **streaming velocity** source for the 10 real pairs; when
+- Yahoo is only ever a **streaming velocity** source for the 5 real pairs; when
   it degrades, the system still serves real ECB daily closes (won't fabricate).
 
 To add a self-hosted intraday feed later (TwelveData, Polygon, or a keyed Yahoo
@@ -65,7 +64,7 @@ methods in `core-backend/src/services/forexData.service.ts` and the matching
 methods in `ai-engine/app/data/collector.py`; the cascade falls through
 automatically.
 
-**Real-forex regime gate (PART 28.2).** The 10 real pairs are no longer blanket
+**Real-forex regime gate (PART 28.2).** The 5 real pairs are no longer blanket
 non-tradable. Their regime gate is now data-driven from intraday closes (≥ 100)
 computed by `financial_analysis.py`: pairs that classify as `trending` or
 `mean_reverting` on the intraday tape return `regime_gate="tradable"` and unlock

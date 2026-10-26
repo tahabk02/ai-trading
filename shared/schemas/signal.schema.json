@@ -9,9 +9,9 @@
   "properties": {
     "symbol": {
       "type": "string",
-      "description": "Trading pair or stock ticker symbol (e.g. 'AAPL', 'BTC/USDT', 'EURUSD'). Always uppercase.",
+      "description": "Trading pair symbol (e.g. 'EUR/USD', 'USD/JPY', 'AUD/CAD'). Always uppercase.",
       "pattern": "^[A-Z0-9/.]{1,20}$",
-      "examples": ["AAPL", "BTC/USDT", "SPY", "ETH/USDT"]
+      "examples": ["EUR/USD", "USD/JPY", "AUD/CAD", "EUR/JPY"]
     },
 
     "signal": {
@@ -35,7 +35,7 @@
       "description": "AI-predicted target price for the asset after the forecast horizon. Must be a positive finite number.",
       "minimum": 0.000001,
       "exclusiveMinimum": true,
-      "examples": [150.5, 48200.0, 1.085]
+      "examples": [151.2, 1.085]
     },
 
     "timestamp": {
@@ -162,11 +162,11 @@
       "timestamp": "2025-01-15T14:30:00Z"
     },
     {
-      "symbol": "BTC/USDT",
+      "symbol": "USD/JPY",
       "signal": "HOLD",
       "confidence": 0.35,
       "target_price": 0.0,
-      "current_price": 48200.0,
+      "current_price": 151.2,
       "ml_probability": 0.35,
       "model_accuracy": 0.78,
       "timeframe": "1h",

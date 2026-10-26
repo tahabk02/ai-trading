@@ -74,16 +74,16 @@ describe("[421] REAL pair spot chain honours the weekly market schedule", () => 
   });
 
   it("gates the Friday close and the Sunday pre-open boundary", async () => {
-    srv.lastSpotCache.set("EUR/NOK", { price: 12, ts: Date.now() - 1_000 });
+    srv.lastSpotCache.set("EUR/SEK", { price: 12, ts: Date.now() - 1_000 });
 
     freezeAt(FRI_BEFORE_CLOSE);
-    expect((await forexDataService.getLiveSpotFresh("EUR/NOK")).marketClosed).toBeUndefined();
+    expect((await forexDataService.getLiveSpotFresh("EUR/SEK")).marketClosed).toBeUndefined();
 
     freezeAt(FRI_AFTER_CLOSE);
-    expect((await forexDataService.getLiveSpotFresh("EUR/NOK")).marketClosed).toBe(true);
+    expect((await forexDataService.getLiveSpotFresh("EUR/SEK")).marketClosed).toBe(true);
 
     freezeAt(SUNDAY_BEFORE_OPEN);
-    expect((await forexDataService.getLiveSpotFresh("EUR/NOK")).marketClosed).toBe(true);
+    expect((await forexDataService.getLiveSpotFresh("EUR/SEK")).marketClosed).toBe(true);
   });
 
   it("runs the normal cascade for a REAL pair once the market reopens (Monday)", async () => {
@@ -123,7 +123,7 @@ describe("[421] REAL pair spot chain honours the weekly market schedule", () => 
 
   it("returns no price (and no error) when a closed REAL pair was never observed", async () => {
     freezeAt(SATURDAY);
-    const r = await forexDataService.getLiveSpotFresh("USD/SEK");
+    const r = await forexDataService.getLiveSpotFresh("USD/PLN");
     expect(r.marketClosed).toBe(true);
     expect(r.success).toBe(false);
     expect(r.price).toBeNull();

@@ -30,6 +30,7 @@ from .config import (
     asset_for_symbol,
     asset_type_for_symbol,
     canonical_active_asset,
+    is_removed_symbol,
     auth_message,
     canonical_symbol,
     credential_login_status,
@@ -100,7 +101,7 @@ class ModuleUnavailableError(Exception):
 
 class AssetSkippedError(Exception):
     """Raised when a single configured symbol can NOT be subscribed because the
-    broker has no matching asset (e.g. ``Invalid asset: GBPCHF_otc``).
+    broker has no matching asset (e.g. ``Invalid asset: AUDCHF_otc``).
 
     This is a permanent, per-symbol condition: the reader for that symbol
     stops (no endless retry) while all other symbols keep streaming, and the
@@ -552,7 +553,7 @@ class PocketOptionBridge:
         self._available_asset_records = []
         for raw in sorted(symbols):
             canonical = canonical_active_asset(str(raw))
-            if not canonical:
+            if not canonical or is_removed_symbol(canonical):
                 continue
             asset_type = asset_type_for_symbol(canonical)
             self._available_asset_records.append({
@@ -560,7 +561,7 @@ class PocketOptionBridge:
                 "name": canonical,
                 "label": f"{canonical}{' OTC' if asset_type == 'otc' else ''}",
                 "assetSubType": asset_type,
-                "type": "crypto" if asset_type == "crypto" else "otc",
+                "type": "otc" if asset_type == "otc" else "forex",
             })
         self._available_assets = symbols or None
         return self._available_assets
@@ -609,11 +610,14 @@ class PocketOptionBridge:
         """Subscribe to raw ticks for one asset and feed the M20 engine.
 
         The broker's own asset list is consulted first: if no candidate for
-        this symbol exists (e.g. ``Invalid asset: GBPCHF_otc``) the reader
-        raises :class:`AssetSkippedError` — one unsupported pair must never
-        flip the whole bridge into ``connection_error`` or stop the pairs that
-        DO work (EUR/USD, USD/CHF, ...).
+        this symbol exists the reader raises :class:`AssetSkippedError` — one
+        unsupported pair must never flip the whole bridge into
+        ``connection_error`` or stop the pairs that DO work.
         """
+        if is_removed_symbol(symbol):
+            self._skipped[symbol] = "retired_pair"
+            logger.info("SKIP [%s] pair retired from platform universe", symbol)
+            return
         if not self.has_credential:
             # Clean degraded state: no stored session ssid AND no .env SSID.
             await self._set_status(
@@ -761,6 +765,9 @@ class PocketOptionBridge:
         if not canonical or "/" not in canonical:
             return {**base, "status": "subscribe_error",
                     "error": f"cannot resolve symbol {symbol!r}"}
+        if is_removed_symbol(canonical):
+            return {**base, "status": "subscribe_error",
+                    "error": f"symbol {canonical!r} was retired from the universe"}
 
         if not self.has_credential:
             return {

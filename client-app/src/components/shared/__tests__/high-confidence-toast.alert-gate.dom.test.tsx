@@ -17,16 +17,16 @@ vi.mock("@/hooks/useSocket", async () => {
 });
 
 /**
- * PART 41 [403] — a high-confidence (98%) verdict on a GATED symbol must be
+ * PART 41 [403] â€” a high-confidence (98%) verdict on a GATED symbol must be
  * silent: no toast, no sound. A score is only alertable when the metal is
- * genuinely executable — executable === true AND tier in T1..T3 AND
+ * genuinely executable â€” executable === true AND tier in T1..T3 AND
  * regime_gate === "tradable". The client re-verifies the same predicate on
  * both the local prediction monitor and the WS payload.
  */
 
 const mount = () => ui(<HighConfidenceToast />);
 
-/** Toasts render inside a collapsed panel — open it before asserting. */
+/** Toasts render inside a collapsed panel â€” open it before asserting. */
 function openSignalCenter() {
   const btn = screen.getByText(/signal center/i).closest("button");
   expect(btn).toBeTruthy();
@@ -50,7 +50,7 @@ function seedPrediction(data: Record<string, unknown>) {
   });
 }
 
-describe("high-confidence toast — alert gate (PART 41 [403])", () => {
+describe("high-confidence toast â€” alert gate (PART 41 [403])", () => {
   beforeEach(() => {
     resetAll();
   });
@@ -86,11 +86,11 @@ describe("high-confidence toast — alert gate (PART 41 [403])", () => {
     mount();
     act(() => {
       socketState.socket.server("high_confidence_signal", {
-        symbol: "BTC/USD",
+        symbol: "EUR/JPY",
         signalType: "BUY",
         confidence: 98,
-        price: 67000,
-        targetPrice: 67200,
+        price: 150.25,
+        targetPrice: 150.5,
         timeframe: "1m",
         executable: false,
         tier: "T5",
@@ -104,11 +104,11 @@ describe("high-confidence toast — alert gate (PART 41 [403])", () => {
     mount();
     act(() => {
       socketState.socket.server("high_confidence_signal", {
-        symbol: "GBP/USD",
+        symbol: "USD/JPY",
         signalType: "SELL",
         confidence: 98,
-        price: 1.32,
-        targetPrice: 1.318,
+        price: 150.25,
+        targetPrice: 150.1,
         timeframe: "1m",
       });
     });
@@ -119,11 +119,11 @@ describe("high-confidence toast — alert gate (PART 41 [403])", () => {
     mount();
     act(() => {
       socketState.socket.server("high_confidence_signal", {
-        symbol: "BTC/USD",
+        symbol: "EUR/JPY",
         signalType: "BUY",
         confidence: 98,
-        price: 67000,
-        targetPrice: 67200,
+        price: 150.25,
+        targetPrice: 150.5,
         timeframe: "1m",
         executable: true,
         tier: "T2",

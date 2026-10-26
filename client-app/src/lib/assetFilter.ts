@@ -3,7 +3,7 @@
  *
  * THREE SEPARATE CONCERNS, DELIBERATELY KEPT APART:
  *
- *   1. ASSET CLASS (otc | real | crypto) — which VENUE a pair trades on.
+ *   1. ASSET CLASS (otc | real) — which VENUE a pair trades on.
  *      This is STATIC, authoritative data from `constants/symbols.ts`.
  *   2. CURRENCY (EUR, USD, GBP …) — which CURRENCIES an operator cares about.
  *   3. FAVORITES / EXCLUSIONS — operator curation, persisted.
@@ -18,15 +18,14 @@
  *   a) BLOCKING RACE — `getState()` inside a `useMemo` is a NON-REACTIVE read.
  *      If the first render happens before any `market_quotes` snapshot lands,
  *      `sub` is `undefined` for every symbol, `byQuote` is empty, and the code
- *      fell back to a hand-rolled REGEX (`/^BTC\/USD$|^ETH\/USD$/`, plus a
- *      `REAL_MARKET_SYMBOLS` membership test) that DUPLICATED classification
- *      logic already owned by `getAssetSubType`. Two sources of truth for one
- *      fact.
+ *      fell back to a hand-rolled symbol REGEX plus a `REAL_MARKET_SYMBOLS`
+ *      membership test that DUPLICATED classification logic already owned by
+ *      `getAssetSubType`. Two sources of truth for one fact.
  *
  *   b) PARTIAL-SNAPSHOT HANG — when only SOME quotes had landed, `byQuote`
  *      was non-empty, so the fallback never ran and the grid rendered an
- *      arbitrary subset. Select "Real" mid-boot and you could get 3 of 10
- *      pairs, with no error and no way to tell that 7 were missing.
+ *      arbitrary subset. Select "Real" mid-boot and you could get 3 of 5
+ *      pairs, with no error and no way to tell that 2 were missing.
  *
  * Fix: classification is derived from the STATIC REGISTRY (always complete,
  * always identical to the backend's `symbolRegistry.service.ts`), and quotes
@@ -48,8 +47,8 @@ import { getAssetSubType, ALL_MARKET_SYMBOLS } from "@/constants/symbols";
 
 export { ALL_MARKET_SYMBOLS };
 
-/** The three selectable venue classes. "all" is a VIEW, never a stored class. */
-export type AssetClass = "otc" | "real" | "crypto";
+/** The selectable venue classes. "all" is a VIEW, never a stored class. */
+export type AssetClass = "otc" | "real";
 
 /**
  * The legacy single-select enum. "all" is not a member of `AssetClass` — it
@@ -58,12 +57,11 @@ export type AssetClass = "otc" | "real" | "crypto";
  */
 export type AssetClassFilter = "all" | AssetClass;
 
-export const ASSET_CLASSES: readonly AssetClass[] = ["otc", "real", "crypto"] as const;
+export const ASSET_CLASSES: readonly AssetClass[] = ["otc", "real"] as const;
 
 export const ASSET_CLASS_LABEL: Record<AssetClass, string> = {
   otc: "OTC",
   real: "Real",
-  crypto: "Crypto",
 };
 
 /**
@@ -74,7 +72,6 @@ export const ASSET_CLASS_LABEL: Record<AssetClass, string> = {
  */
 function classOfSymbol(symbol: string): AssetClass {
   const sub = getAssetSubType(symbol);
-  if (sub === "crypto") return "crypto";
   if (sub === "forex") return "real";
   return "otc";
 }
@@ -197,19 +194,17 @@ export function sanitizeSymbolList(raw: unknown): string[] {
  * Authoritative per-class counts, computed ONCE from the static registry.
  *
  * The previous `countByFilter` in the pill component read
- * `OTC_FOREX_PAIRS.filter(p => p.assetSubType === f)` for otc/crypto but
+ * `OTC_FOREX_PAIRS.filter(p => p.assetSubType === f)` for otc but
  * returned `OTC_FOREX_PAIRS.length` for "all" and `REAL_FOREX_PAIRS.length`
- * for "real". That happened to total 44, but ONLY because `OTC_FOREX_PAIRS`
- * spreads `REAL_FOREX_PAIRS` — a hidden coupling. It also counted crypto via
- * the "otc" bucket path, so any future symbol whose `assetSubType` drifted
- * would silently mis-report. Deriving every count from ONE map removes the
- * coupling entirely.
+ * for "real". That happened to total 26, but ONLY because `OTC_FOREX_PAIRS`
+ * spreads `REAL_FOREX_PAIRS` — a hidden coupling. Deriving every count from
+ * ONE map removes the coupling entirely.
  */
 export const ASSET_CLASS_COUNTS: Readonly<Record<AssetClass, number>> = (() => {
-  const counts: Record<AssetClass, number> = { otc: 0, real: 0, crypto: 0 };
+  const counts: Record<AssetClass, number> = { otc: 0, real: 0 };
   for (const sym of ALL_MARKET_SYMBOLS) counts[classOfSymbol(sym)] += 1;
   if (process.env.NODE_ENV !== "production") {
-    const total = counts.otc + counts.real + counts.crypto;
+    const total = counts.otc + counts.real;
     if (total !== ALL_MARKET_SYMBOLS.length) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -365,7 +360,7 @@ export function countVisibleByClass(
   symbols: string[],
   state: AssetFilterState,
 ): Record<AssetClass, number> {
-  const counts: Record<AssetClass, number> = { otc: 0, real: 0, crypto: 0 };
+  const counts: Record<AssetClass, number> = { otc: 0, real: 0 };
   for (const sym of symbols) {
     if (!isSymbolVisible(sym, { ...state, classes: [] })) continue;
     counts[classOfSymbol(sym)] += 1;

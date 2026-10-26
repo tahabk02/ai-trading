@@ -2,7 +2,7 @@
  * logDebouncer.ts — rate-gated 503 warning.
  *
  * The market terminal can emit a burst of HTTP 503s while the AI Engine /
- * feed recovers (34 cards re-polling with backoff). Unbounded logging would
+ * feed recovers (26 cards re-polling with backoff). Unbounded logging would
  * flood the devtools console with identical error lines. This debouncer
  * collapses the burst:
  *

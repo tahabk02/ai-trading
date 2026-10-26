@@ -98,30 +98,24 @@ settings = Settings()
 logger = structlog.get_logger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — FULL 34-PAIR UNIVERSE (0 DEMO, 100% REAL)
-# Mirrors core-backend symbolRegistry.service.ts EXACTLY. Includes the
-# CRYPTO MAJORS (BTC/USD, ETH/USD) so crypto signals are never rejected
-# at the execution boundary.
+# STRICT OTC WHITELIST — 21-PAIR UNIVERSE (0 DEMO, 100% REAL)
+# Mirrors the executable core-backend symbolRegistry.service.ts universe.
 # ═══════════════════════════════════════════════════════════════════
 OTC_WHITELIST = {
-    # Forex Majors (7)
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD", "NZD/USD",
-    # Crypto Majors (2)
-    "BTC/USD", "ETH/USD",
-    # Euro Crosses (7)
-    "EUR/GBP", "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD", "EUR/NZD", "EUR/TRY",
-    # Pound Crosses (4)
-    "GBP/JPY", "GBP/CHF", "GBP/AUD", "GBP/CAD",
+    # Forex Majors (5)
+    "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD",
+    # Euro Crosses (4)
+    "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD",
     # Yen Crosses (3)
     "AUD/JPY", "CAD/JPY", "CHF/JPY",
-    # Other Minors (5)
-    "AUD/CAD", "AUD/NZD", "NZD/JPY", "CAD/CHF", "EUR/RUB",
-    # Emerging / OTC Variants (6)
-    "USD/TRY", "USD/ZAR", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
+    # Other Minors (4)
+    "AUD/CAD", "AUD/NZD", "CAD/CHF", "EUR/RUB",
+    # Emerging / OTC Variants (5)
+    "USD/TRY", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
 }
 
 def _is_whitelisted(symbol: str) -> bool:
-    """Strict membership check — only the 34 whitelisted pairs pass."""
+    """Strict membership check — only the 21 OTC whitelisted pairs pass."""
     return (symbol or "").strip().upper() in OTC_WHITELIST
 
 class ExecutionEngine:
@@ -183,8 +177,7 @@ class ExecutionEngine:
 
             # ── STRICT OTC WHITELIST GATE ──
             # Reject ANY non-whitelisted signal (stocks/unlisted pairs)
-            # before risk/execution. The 34-pair universe (incl. BTC/USD,
-            # ETH/USD) passes through.
+            # before risk/execution. The 21-pair OTC universe passes through.
             if not _is_whitelisted(symbol):
                 logger.warning(
                     "REJECTED_NON_OTC_SIGNAL",

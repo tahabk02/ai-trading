@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import React from "react";
 import { TrendingUp, TrendingDown, Activity } from "lucide-react";
@@ -90,8 +90,8 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
   // ════════════════════════════════════════════════════════════════════
   // PART 41 [398] — PER-CARD PRICE, NEVER THE ACTIVE SYMBOL'S.
   // Every card used to read `selectCurrentPrice` (the ACTIVE symbol) and stamp
-  // it as its own execution price — a GBP/USD active session printed ~1.32 on
-  // the BTC/USD card. The card price now resolves from its OWN symbol: the
+  // it as its own execution price — a EUR/JPY active session printed ~150 on
+  // the USD/JPY card. The card price now resolves from its OWN symbol: the
   // signal payload price first, then the per-symbol quote map keyed by
   // `signal.symbol`. Unknown → "--". There is intentionally NO fallback to the
   // active symbol's price.
@@ -107,7 +107,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
     if (!railSymbol) return undefined;
     // Direct key first — the backend keys quotes by the canonical symbol.
     if (s.quotes?.[railSymbol]) return s.quotes[railSymbol];
-    // Slash/spacing variants ("BTC / USD" → "BTC/USD") fall back to a compact
+    // Slash/spacing variants ("USD / JPY" → "USD/JPY") fall back to a compact
     // match across the whole map. Cheap: this path only runs for variant keys.
     const compact = railSymbol.replace(/[\/\s_-]/g, "");
     for (const q of Object.values(s.quotes ?? {})) {

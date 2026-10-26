@@ -38,7 +38,7 @@ import { applyAssetFilter } from "@/lib/assetFilter";
 /**
  * MARKET TERMINAL — the all-pairs grid (Alpha.5 Pro main dashboard).
  *
- * Streaming topology (single joined WS channel, no 44× replays):
+ * Streaming topology (single joined WS channel, no 26× replays):
  *   • `market_quotes`     — 1Hz all-pair price / spread / tick-count snapshots
  *   • `live_quant_signal` — 1Hz micro-quant CALL/PUT verdicts for every pair
  *   • /multi-predict      — heavier per-horizon refresh (debounced) when the
@@ -47,8 +47,8 @@ import { applyAssetFilter } from "@/lib/assetFilter";
  * GLOBAL horizon selector applies to every card; each card can also override
  * its own horizon (that override is cleared the moment the global changes).
  *
- * ALL_44_LAYOUT — PART 15: the grid renders the full 44-instrument universe
- * (32 OTC + 10 REAL + 2 crypto). REAL pairs carry the REAL badge and are
+ * ALL_26_LAYOUT — PART 15: the grid renders the full 26-instrument universe
+ * (21 OTC + 5 REAL). REAL pairs carry the REAL badge and are
  * scored-only until [47]/[48] regime verification is explicitly confirmed.
  */
 export const MarketTerminal: React.FC = () => {
@@ -89,7 +89,7 @@ export const MarketTerminal: React.FC = () => {
     // non-reactive read: before the first `market_quotes` snapshot every
     // `sub` was `undefined`, and once a PARTIAL snapshot landed the non-empty
     // result suppressed the fallback — so selecting "Real" mid-boot could
-    // render an arbitrary subset (3 of 10 pairs) with no error surfaced.
+    // render an arbitrary subset (3 of 5 pairs) with no error surfaced.
     // `applyAssetFilter` is pure and always sees the full universe.
     const base = applyAssetFilter(ALL_MARKET_SYMBOLS, {
       classes: assetClasses,
@@ -200,7 +200,7 @@ export const MarketTerminal: React.FC = () => {
           ))}
         </div>
         <p className="mt-4 text-center text-[8px] text-term-ink-faint num-fig uppercase tracking-widest">
-          All {ALL_MARKET_SYMBOLS.length} - OTC 32 - Real 10 - Crypto 2 -
+          All {ALL_MARKET_SYMBOLS.length} - OTC 21 - Real 5 -
           live micro-quant verdicts - 60% definitive gate - Conf bar{" "}
           {minConfidencePct.toFixed(1)}% ({minTier} floor) - {symbols.length} shown
           {hiddenCount > 0 ? ` - ${hiddenCount} below bar hidden` : ""}

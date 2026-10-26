@@ -12,7 +12,7 @@ import { realtimeTickBuffer } from "../../services/realtimeTickBuffer.service";
  */
 
 const FRESH = "USD/JPY";
-const HELD = "EUR/GBP";
+const HELD = "EUR/CHF";
 const WINDOW = "AUD/USD";
 
 describe("realtimeTickBuffer: held prints never read as live", () => {

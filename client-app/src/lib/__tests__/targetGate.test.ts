@@ -46,7 +46,7 @@ const view = (over: Partial<SignalHoldView> = {}): SignalHoldView => ({
 describe("target visualization is independent of execution eligibility", () => {
   it("renders the target for every symbol x gate x tier when a price exists", () => {
     const UNIVERSE = [...new Set(ALL_UNIVERSE_TICKERS)];
-    expect(UNIVERSE).toHaveLength(44);
+    expect(UNIVERSE).toHaveLength(26);
     for (const symbol of UNIVERSE) {
       for (const gate of GATES) {
         for (const tier of TIERS) {

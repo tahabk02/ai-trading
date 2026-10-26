@@ -616,23 +616,29 @@ SUPPORTED_INTERVAL_MS = {
 # ── STRICT ASSET CLASSIFICATION ──────────────────────────────────────
 # Pocket Option OTC forex pairs trade ONLY on the `_otc` instrument and are
 # a different venue/pricing model from the standard wholesale forex book.
-# Standard (non-OTC) forex pairs resolve to the bare symbol. Crypto maps
-# directly. The classification below drives: (1) the `_otc` suffix priority
+# Standard (non-OTC) forex pairs resolve to the bare symbol. The classification
+# below drives: (1) the `_otc` suffix priority
 # in asset resolution, (2) the ``asset_type`` tag stamped on every relayed
 # tick/candle so downstream services never mix OTC pricing into the standard
 # forex pipeline or vice-versa.
 OTC_FOREX_SYMBOLS: frozenset = frozenset({
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
-    "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "EUR/CHF",
-    "EUR/AUD", "EUR/CAD", "EUR/NZD", "EUR/TRY", "GBP/JPY",
-    "GBP/CHF", "GBP/AUD", "GBP/CAD", "AUD/JPY", "CAD/JPY",
-    "CHF/JPY", "AUD/CAD", "AUD/CHF", "AUD/NZD", "NZD/JPY", "NZD/CAD",
+    "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD",
+    "AUD/USD", "EUR/JPY", "EUR/CHF",
+    "EUR/AUD", "EUR/CAD", "AUD/JPY", "CAD/JPY",
+    "CHF/JPY", "AUD/CAD", "AUD/CHF", "AUD/NZD", "NZD/CAD",
     "CAD/CHF",
-    "EUR/RUB", "USD/TRY", "USD/ZAR", "USD/MXN", "USD/SGD",
+    "EUR/RUB", "USD/TRY", "USD/MXN", "USD/SGD",
     "MAD/USD", "KES/USD",
 })
 
-CRYPTO_SYMBOLS: frozenset = frozenset({"BTC/USD", "ETH/USD"})
+# Pairs explicitly retired from the platform universe. They must never be
+# subscribed, relayed, or exposed in the broker asset list again.
+REMOVED_SYMBOLS: frozenset = frozenset({
+    "USD/ZAR", "EUR/NOK", "EUR/DKK", "ETH/USD", "EUR/GBP",
+    "GBP/USD", "GBP/JPY", "GBP/CHF", "GBP/AUD", "GBP/CAD",
+    "NZD/USD", "BTC/USD", "EUR/TRY", "EUR/CZK", "EUR/PLN",
+    "USD/SEK", "EUR/NZD", "NZD/JPY",
+})
 
 # ── REAL NON-OTC FOREX (PART 14) ──────────────────────────────────────
 # Standard wholesale forex pairs resolved via the already-integrated ECB feed
@@ -640,8 +646,7 @@ CRYPTO_SYMBOLS: frozenset = frozenset({"BTC/USD", "ETH/USD"})
 # OTC venue. Classification is explicit so OTC vs standard-forex pricing never
 # mixes on the relay.
 REAL_FOREX_SYMBOLS: frozenset = frozenset({
-    "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK",
-    "EUR/HUF", "USD/SEK", "USD/NOK", "USD/PLN", "USD/CZK",
+    "EUR/SEK", "EUR/HUF", "USD/NOK", "USD/PLN", "USD/CZK",
 })
 
 
@@ -675,18 +680,23 @@ def canonical_active_asset(raw: str) -> str:
     return canonical_symbol(value)
 
 
+def is_removed_symbol(symbol: str) -> bool:
+    """True when ``symbol`` is a retired pair or a BTC/ETH quote variant."""
+    canonical = canonical_symbol(symbol)
+    if canonical in REMOVED_SYMBOLS:
+        return True
+    base = canonical.split("/", 1)[0]
+    return base in {"BTC", "ETH"}
+
+
 def asset_type_for_symbol(symbol: str) -> str:
-    """Strict asset classification: ``forex`` | ``otc`` | ``crypto``.
+    """Strict asset classification: ``forex`` | ``otc``.
 
     Every symbol that resolves to a Pocket Option OTC instrument is tagged
     ``otc`` (its OTC attribute is preserved explicitly). Standard wholesale
-    forex pairs (non-OTC venue/pricing, including the 10 REAL_FOREX_SYMBOLS)
-    are tagged ``forex``. Crypto majors are tagged ``crypto``. Nothing is
-    mixed across these classes.
+    forex pairs (non-OTC venue/pricing, including the 5 REAL_FOREX_SYMBOLS)
+    are tagged ``forex``. Nothing is mixed across these classes.
     """
-    normalized = symbol.replace("/", "").upper()
-    if normalized in {"BTCUSD", "ETHUSD", "BTCUSDT", "ETHUSDT"}:
-        return "crypto"
     if symbol.replace(" ", "").replace("/", "/").upper() in OTC_FOREX_SYMBOLS:
         return "otc"
     if symbol.upper() in REAL_FOREX_SYMBOLS:
@@ -707,14 +717,13 @@ def asset_candidates(symbol: str) -> List[str]:
         retained ONLY for sessions where the broker does not list the OTC
         form (rotating availability), not as a pricing-mix path.
       • Standard forex pairs resolve to the bare symbol.
-      • Crypto majors map directly (``BTCUSD`` / ``ETHUSD``).
 
     Returns at least one candidate so the mapping never silently drops a
     configured symbol.
     """
+    if is_removed_symbol(symbol):
+        return []
     normalized = symbol.replace("/", "").upper()
-    if normalized in {"BTCUSD", "ETHUSD", "BTCUSDT", "ETHUSDT"}:
-        return [normalized]
     if asset_type_for_symbol(symbol) == "otc":
         return [f"{normalized}_otc", normalized]
     return [normalized]
@@ -724,10 +733,12 @@ def asset_for_symbol(symbol: str) -> str:
     """Map a backend symbol (e.g. "EUR/USD") to its preferred PO asset.
 
     OTC pairs resolve to the ``_otc`` form; standard forex resolves to the
-    bare pair. Prefer :func:`asset_candidates` when the full priority list is
-    needed to resolve against what the broker actually lists.
+    bare pair. Retired symbols return ``""``. Prefer :func:`asset_candidates`
+    when the full priority list is needed to resolve against what the broker
+    actually lists.
     """
-    return asset_candidates(symbol)[0]
+    candidates = asset_candidates(symbol)
+    return candidates[0] if candidates else ""
 
 
 @dataclass(frozen=True)
@@ -746,31 +757,24 @@ class BridgeSettings:
 
     #: Comma-separated backend symbols the bridge must subscribe to.
     #:
-    #: PART 38.2 — expanded from the original 20 majors/crosses to every
+    #: PART 38.2 — expanded from the original majors/crosses to every
     #: whitelist symbol Pocket Option's live ``active_assets()`` dump actually
-    #: lists (verified against ``GET /api/v1/symbols`` → 50 PO assets). Eight
-    #: whitelist pairs PO does NOT list (USD/TRY, USD/ZAR, USD/MXN, USD/SGD,
-    #: USD/SEK, USD/NOK, USD/PLN, USD/CZK) were deliberately NOT added — a
-    #: reader armed against an asset the broker has never heard of can only
-    #: produce ``no_ssot_cache`` noise; those pairs must be served (and
-    #: LABELLED) by the REST fallback tier instead. The five legacy majors in
-    #: the original set that PO is not currently listing (USD/JPY, USD/CHF,
-    #: USD/CAD, NZD/USD, NZD/JPY) are kept: asset availability rotates per
-    #: session, so the arm stays valid for whenever they return.
+    #: lists. Pairs PO does NOT list (USD/TRY, USD/MXN, USD/SGD, USD/NOK,
+    #: USD/PLN, USD/CZK) are deliberately NOT added — a reader armed against
+    #: an asset the broker has never heard of can only produce
+    #: ``no_ssot_cache`` noise; those pairs must be served (and LABELLED) by
+    #: the REST fallback tier instead. Retired pairs are never re-added.
     symbols: List[str] = field(default_factory=lambda: [
-        # PO OTC majors / crosses (original static set)
-        "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "USD/CAD",
-        "AUD/USD", "NZD/USD", "EUR/GBP", "EUR/JPY", "EUR/CHF",
-        "EUR/AUD", "EUR/CAD", "EUR/NZD", "GBP/JPY", "GBP/CHF",
-        "AUD/JPY", "AUD/CAD", "AUD/CHF", "NZD/JPY", "NZD/CAD",
+        # PO OTC majors / crosses
+        "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD",
+        "AUD/USD", "EUR/JPY", "EUR/CHF",
+        "EUR/AUD", "EUR/CAD",
+        "AUD/JPY", "AUD/CAD", "AUD/CHF", "NZD/CAD",
         # PART 38.2 — PO-listed whitelist symbols that were never subscribed
-        "EUR/TRY", "GBP/AUD", "GBP/CAD", "CAD/JPY", "CHF/JPY",
+        "CAD/JPY", "CHF/JPY",
         "AUD/NZD", "CAD/CHF", "EUR/RUB", "MAD/USD", "KES/USD",
         # PART 38.2 — PO-listed standard-forex (non-OTC venue) pairs
-        "EUR/SEK", "EUR/NOK", "EUR/DKK", "EUR/PLN", "EUR/CZK",
-        "EUR/HUF",
-        # PART 38.2 — PO-listed crypto majors (whitelist cards had no tape)
-        "BTC/USD", "ETH/USD",
+        "EUR/SEK", "EUR/HUF",
     ])
 
     #: Reconnect / subscription tuning (seconds).
@@ -944,7 +948,7 @@ class BridgeSettings:
         return {s: asset_for_symbol(s) for s in self.symbols}
 
     def asset_types(self) -> Dict[str, str]:
-        """Return `{backend_symbol: "otc"|"forex"|"crypto"}` classification."""
+        """Return `{backend_symbol: "otc"|"forex"}` classification."""
         return {s: asset_type_for_symbol(s) for s in self.symbols}
 
 

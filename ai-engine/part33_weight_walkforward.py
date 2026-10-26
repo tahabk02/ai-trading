@@ -3,8 +3,8 @@
 #
 # THE HONEST QUESTION
 # -------------------
-# PART 33 [239] split the five-factor ensemble into OTC / REAL / CRYPTO
-# profiles. This harness exists to answer ONE question with real data and no
+# PART 33 [239] split the five-factor ensemble into OTC / REAL profiles.
+# This harness exists to answer ONE question with real data and no
 # flattering framing:
 #
 #     Does per-asset-type weighting actually change any decision, and does it
@@ -13,8 +13,8 @@
 # METHOD (walk-forward, no look-ahead, no RNG, zero fabrication)
 # -----------------------------------------------------------
 #   1. Pull REAL history for real symbols per asset class via the engine
-#      collector (Frankfurter/ECB + Yahoo intraday for the 10 REAL pairs,
-#      CoinGecko market_chart for crypto majors, ECB daily for OTC).
+#      collector (Frankfurter/ECB + Yahoo intraday for the 5 REAL pairs,
+#      ECB daily for OTC).
 #   2. Walk the tape forward bar by bar. At each step only candles up to that
 #      bar are visible to FinancialAnalysisService -- the factor window, the
 #      rolling 50-candle features and the quality ensemble are all built from
@@ -85,8 +85,7 @@ logger = structlog.get_logger(__name__)
 
 # The real universe the engine itself ships, not a hand-picked "good" list.
 REAL_SYMBOLS = sorted(REAL_FOREX_PAIRS)
-CRYPTO_SYMBOLS = ["BTC/USD", "ETH/USD"]
-OTC_SYMBOLS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"]
+OTC_SYMBOLS = ["EUR/USD", "USD/CHF", "USD/JPY", "AUD/USD"]
 
 # Trailing bars handed to the analyzer at each step. 200 is the minimum for the
 # momentum factor to even be measurable (quality_gate requires len >= 200), so
@@ -103,9 +102,6 @@ HORIZON = 5
 
 async def fetch_real(collector: MarketDataCollector, symbol: str) -> List[Dict[str, Any]]:
     """REAL history only. Returns [] when no real source exists."""
-    spec = collector._spec(symbol)
-    if (spec or {}).get("crypto_id"):
-        return await collector._fetch_crypto_history(symbol, 400)
     tf = "1h" if is_real_forex_pair(symbol) else "1d"
     return await collector.fetch_historical_candles(symbol=symbol, interval=tf, limit=400)
 
@@ -291,7 +287,7 @@ async def main() -> int:
     all_records: List[Dict[str, Any]] = []
     per_symbol: List[Dict[str, Any]] = []
 
-    for symbol in REAL_SYMBOLS + CRYPTO_SYMBOLS + OTC_SYMBOLS:
+    for symbol in REAL_SYMBOLS + OTC_SYMBOLS:
         asset_class = resolve_asset_class(symbol)
         try:
             candles = await fetch_real(collector, symbol)

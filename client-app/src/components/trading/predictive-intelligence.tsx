@@ -633,7 +633,7 @@ function SymbolSearchInput() {
       )}
       {isOpen && results.length > 0 && (
         <div className="absolute top-full right-0 mt-1 w-64 bg-well border border-line-strong rounded-card shadow-2xl z-50 max-h-60 overflow-y-auto">
-          {(["forex", "crypto", "commodity", "otc"] as const).map(
+          {(["forex", "commodity", "otc"] as const).map(
             (category) => {
               const grouped = results.filter(
                 (r) =>
@@ -647,9 +647,7 @@ function SymbolSearchInput() {
                       ? "Currencies"
                       : category === "commodity"
                         ? "Commodities"
-                        : category === "crypto"
-                          ? "Crypto"
-                          : "OTC"}
+                        : "OTC"}
                   </div>
                   {grouped.map((r) => (
                     <button

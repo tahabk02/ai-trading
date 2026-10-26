@@ -1559,19 +1559,19 @@ export const predictSignal = async (req: Request, res: Response) => {
 // same /predict pipeline via a minimal Express shim — every freshness gate,
 // the 5s result cache, ATR targeting and the real-tape fallbacks apply
 // identically, and the shared cache collapses duplicates against single /predict
-// calls from other surfaces. `silent: true` is injected so a 34-card refresh
+// calls from other surfaces. `silent: true` is injected so a 26-card refresh
 // never fires 34 global high-confidence toasts.
 //
-// Concurrency is BOUNDED: the grid must not storm the AI Engine the way 44
+// Concurrency is BOUNDED: the grid must not storm the AI Engine the way 26
 // parallel clients would. Duplicate work already made impossible by the 5s
 // cache — this pool only bounds truly fresh computations.
 // ════════════════════════════════════════════════════════════════════
-// PART 40 [395] — the batch cap MUST cover the whole strict-44 universe
+// PART 40 [395] — the batch cap MUST cover the whole strict-26 universe
 // (symbolRegistry.service.ts: the client grid sends ALL_MARKET_SYMBOLS = the
-// 44 canonical instruments). A cap below 44 rejected every grid refresh with
-// "symbols is limited to 40 instruments", so the cards could never receive
+// 26 canonical instruments). A lower cap would reject every grid refresh with
+// "symbols is limited to 26 instruments", so the cards could never receive
 // the engine's regime_gate/suppressed_reason and fell back to "awaiting".
-const MULTI_PREDICT_MAX_SYMBOLS = 44;
+const MULTI_PREDICT_MAX_SYMBOLS = 26;
 const MULTI_PREDICT_CONCURRENCY = 6;
 
 type SymbolPredictOutcome = {

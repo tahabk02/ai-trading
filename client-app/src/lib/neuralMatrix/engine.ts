@@ -1,10 +1,10 @@
 /**
  * NEURAL MATRIX — DETERMINISTIC SIMULATION RUNTIME
  * ============================================================================
- * A fixed-topology agent network: three market channels (REAL / OTC / CRYPTO)
- * each run a small pipeline of ingest → analysis agents that converge on a
- * per-lane consensus node, and all three consensus nodes feed a single emitter
- * that publishes the fused verdict.
+ * A fixed-topology agent network: two market channels (REAL / OTC) each run a
+ * small pipeline of ingest ��' analysis agents that converge on a per-lane
+ * consensus node, and both consensus nodes feed a single emitter that publishes
+ * the fused verdict.
  *
  * WHY THIS LIVES OUTSIDE REACT
  * ----------------------------
@@ -28,7 +28,7 @@
  *
  * COST BOUND (why O(n²) repulsion is fine here)
  * --------------------------------------------
- * The topology is FIXED at 19 nodes. Full pairwise separation is 171 distance
+ * The topology is FIXED at 13 nodes. Full pairwise separation is 78 distance
  * checks per step — well under a tenth of a millisecond, and it buys exact,
  * artefact-free node separation. A spatial hash would cost more in bookkeeping
  * than it saves at this node count. Revisit only if the topology ever becomes
@@ -155,14 +155,6 @@ const LANE_BLUEPRINTS: readonly LaneBlueprint[] = [
     analysts: ["DRIFT", "QUANT-MOM", "SPREAD-Q", "HEDGE"],
     consensus: "OTC-CONS",
   },
-  {
-    lane: "crypto",
-    title: "CRYPTO 24/7",
-    badge: "CRY",
-    ingest: "CRY-FEED",
-    analysts: ["FLOW-IMB", "FUNDING", "VOL-CLUST", "ON-CHAIN"],
-    consensus: "CRY-CONS",
-  },
 ] as const;
 
 /** Column x-anchors: ingest | analysts | consensus | emitter. */
@@ -205,7 +197,7 @@ function makeNode(
  *
  * Edges are: ingest → each analyst → lane consensus → emitter. Every analyst
  * fans into the consensus, so the emitter's colour is genuinely a blend of all
- * twelve analysis agents rather than a hardcoded hue.
+ * eight analysis agents rather than a hardcoded hue.
  */
 export function buildTopology(): {
   nodes: MatrixNode[];
@@ -276,7 +268,7 @@ export function buildTopology(): {
     }
   }
 
-  // ── EMITTER — the single fused-output node, fed by all three lane consensus.
+  // ── EMITTER — the single fused-output node, fed by both lane consensus.
   const emitIdx = push(
     makeNode("emitter-verdict", "VERDICT", "real", "emitter", COL_EMITTER, 0.5, 0.35),
   );
@@ -402,7 +394,7 @@ const EDGE_SCRATCH: number[] = [];
  * Candidates are collected into a scratch array rather than indexed
  * arithmetically: outgoing edges are NOT contiguous in the edge list (analyst
  * edges interleave with consensus edges), so `first + k` would walk off the
- * node's own fan and pick a stranger's conduit. 19 nodes means the scratch
+ * node's own fan and pick a stranger's conduit. 13 nodes means the scratch
  * array never exceeds 5 entries.
  */
 function pickOutgoingEdge(
@@ -465,7 +457,7 @@ export function step(state: MatrixState, feed: MatrixFeed, dtMs: number): void {
   }
 
   // ── 3. PAIRWISE SEPARATION (collision) ─────────────────────────────────
-  // 19 nodes ⇒ 171 pairs. Exact separation beats a spatial hash at this size.
+  // 13 nodes ⇒ 78 pairs. Exact separation beats a spatial hash at this size.
   for (let i = 0; i < nodes.length; i += 1) {
     const a = nodes[i];
     for (let j = i + 1; j < nodes.length; j += 1) {

@@ -2,7 +2,7 @@
  * aiEngineHttp.ts — shared HTTP agent for outbound calls to the AI Engine.
  *
  * Every /tick-signal and /predict request previously used axios' default agent
- * (keep-alive OFF), so each of the ~1 Hz × 44-symbol live-quant dispatches
+ * (keep-alive OFF), so each of the ~1 Hz × 26-symbol live-quant dispatches
  * opened and tore down a NEW TCP connection to port 8000. Under a dashboard
  * session the engine's accept-side sockets piled up in CLOSE_WAIT until the
  * listener starved (predicts and /health timed out or refused).

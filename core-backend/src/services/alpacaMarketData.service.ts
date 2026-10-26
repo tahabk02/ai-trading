@@ -4,8 +4,8 @@
  * 100% REAL DATA FROM ALPACA. ZERO MOCK. ZERO SYNTHETIC.
  *
  * Integration points:
- *  1. REST API — Fetch authentic historical OHLCV bars (crypto + stocks)
- *     Endpoint: GET /v2/stocks/{symbol}/bars, /v2/crypto/bars
+ *  1. REST API — Fetch authentic historical OHLCV bars (stocks)
+ *     Endpoint: GET /v2/stocks/{symbol}/bars
  *  2. WebSocket — Real-time live streaming trades/quotes
  *     Endpoint: wss://stream.data.alpaca.markets/v2/sip
  *     Subscribe: trades, quotes for real-time tick data
@@ -13,8 +13,6 @@
  *     (1m, 2m, 3m, etc.) updating dynamically every second
  *
  * Symbol mapping:
- *   "BTC/USD" → Alpaca crypto: BTC/USD (IEX or SIP)
- *   "ETH/USD" → Alpaca crypto: ETH/USD
  *   "AAPL"    → Alpaca stock: AAPL
  *   OTC forex pairs → Not available on Alpaca, fall back to existing sources
  *
@@ -77,12 +75,6 @@ export interface AlpacaStreamMessage {
 }
 
 // ── Symbol mapping ──
-
-/** Symbols available on Alpaca's market data API */
-const ALPACA_CRYPTO_SYMBOLS: Record<string, string> = {
-  "BTC/USD": "BTC/USD",
-  "ETH/USD": "ETH/USD",
-};
 
 /** Timeframe mapping: our format → Alpaca bars API timeframe */
 const ALPACA_TIMEFRAME_MAP: Record<string, string> = {
@@ -175,15 +167,13 @@ export class AlpacaMarketDataService {
   }
 
   /** Check if a symbol is supported by Alpaca's data API. */
-  isAlpacaSupported(symbol: string): boolean {
-    const norm = (symbol || "").trim().toUpperCase();
-    return norm in ALPACA_CRYPTO_SYMBOLS;
+  isAlpacaSupported(_symbol: string): boolean {
+    return false;
   }
 
   /** Map our symbol to Alpaca's format. Returns null if unsupported. */
-  toAlpacaSymbol(symbol: string): string | null {
-    const norm = (symbol || "").trim().toUpperCase();
-    return ALPACA_CRYPTO_SYMBOLS[norm] ?? null;
+  toAlpacaSymbol(_symbol: string): string | null {
+    return null;
   }
 
   /** Check if credentials are configured. */
@@ -199,7 +189,6 @@ export class AlpacaMarketDataService {
    * Fetch real historical OHLCV bars from Alpaca's REST API.
    *
    * Supports:
-   *  - Crypto: GET /v2/crypto/bars?symbols=BTC/USD&timeframe=1Day&limit=200
    *  - Stocks: GET /v2/stocks/{symbol}/bars?timeframe=1Day&limit=200
    *
    * Returns bars in our standard ForexCandle format.
@@ -238,16 +227,11 @@ export class AlpacaMarketDataService {
     }
 
     try {
-      const isCrypto = alpacaSymbol.includes("/");
       const alpacaTf = ALPACA_TIMEFRAME_MAP[timeframe] || "1Day";
 
       let bars: any[] = [];
 
-      if (isCrypto) {
-        bars = await this.fetchCryptoBars(alpacaSymbol, alpacaTf, limit);
-      } else {
-        bars = await this.fetchStockBars(alpacaSymbol, alpacaTf, limit);
-      }
+      bars = await this.fetchStockBars(alpacaSymbol, alpacaTf, limit);
 
       if (bars.length > 0) {
         this.barCache.set(cacheKey, { bars, ts: Date.now() });
@@ -283,40 +267,6 @@ export class AlpacaMarketDataService {
     }
   }
 
-  private async fetchCryptoBars(
-    symbol: string,
-    timeframe: string,
-    limit: number,
-  ): Promise<any[]> {
-    // Alpaca crypto bars: /v2/crypto/bars?symbols=BTC/USD&timeframe=1Day&limit=200
-    const url = `${this.REST}/v2/crypto/bars`;
-    const response = await this.client.get(url, {
-      params: {
-        symbols: symbol,
-        timeframe,
-        limit: Math.min(limit, 1000),
-        feed: "sip",
-      },
-    });
-
-    const data = response.data;
-    const barsMap = data?.bars?.[symbol] ?? data?.bars ?? {};
-
-    // Alpaca returns bars grouped by symbol
-    const rawBars = Array.isArray(barsMap) ? barsMap : [];
-
-    return rawBars.map((bar: any) => ({
-      timestamp: new Date(bar.t).getTime(),
-      open: Number(bar.o),
-      high: Number(bar.h),
-      low: Number(bar.l),
-      close: Number(bar.c),
-      volume: Number(bar.v ?? 0),
-      vwap: bar.vw ? Number(bar.vw) : undefined,
-      trade_count: bar.n ? Number(bar.n) : undefined,
-    }));
-  }
-
   private async fetchStockBars(
     symbol: string,
     timeframe: string,
@@ -347,7 +297,7 @@ export class AlpacaMarketDataService {
   }
 
   /**
-   * Fetch the latest quote for a crypto symbol from Alpaca REST.
+   * Fetch the latest quote for a stock symbol from Alpaca REST.
    * Used as a spot price fallback when WebSocket is not connected.
    */
   async getLatestQuote(
@@ -357,39 +307,15 @@ export class AlpacaMarketDataService {
     if (!alpacaSymbol || !this.hasCredentials()) return null;
 
     try {
-      const isCrypto = alpacaSymbol.includes("/");
-      let url: string;
-
-      if (isCrypto) {
-        url = `${this.REST}/v2/crypto/latest/quotes`;
-        const response = await this.client.get(url, {
-          params: { symbols: alpacaSymbol },
-        });
-        const quote = response.data?.quotes?.[alpacaSymbol];
-        if (quote) {
-          const bid = Number(quote.bp ?? 0);
-          const ask = Number(quote.ap ?? 0);
-          const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
-          if (mid > 0) {
-            this.lastQuote.set(symbol.trim().toUpperCase(), {
-              bid,
-              ask,
-              ts: Date.now(),
-            });
-            return { bid, ask, mid };
-          }
-        }
-      } else {
-        url = `${this.REST}/v2/stocks/${alpacaSymbol}/quotes/latest`;
-        const response = await this.client.get(url);
-        const quote = response.data?.quote;
-        if (quote) {
-          const bid = Number(quote.bp ?? 0);
-          const ask = Number(quote.ap ?? 0);
-          const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
-          if (mid > 0) {
-            return { bid, ask, mid };
-          }
+      const url = `${this.REST}/v2/stocks/${alpacaSymbol}/quotes/latest`;
+      const response = await this.client.get(url);
+      const quote = response.data?.quote;
+      if (quote) {
+        const bid = Number(quote.bp ?? 0);
+        const ask = Number(quote.ap ?? 0);
+        const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
+        if (mid > 0) {
+          return { bid, ask, mid };
         }
       }
     } catch (error: unknown) {
@@ -440,9 +366,9 @@ export class AlpacaMarketDataService {
    *  1. TCP open
    *  2. Auth frame:   {"action": "auth", "key": "...", "secret": "..."}
    *  3. Server reply:  [{"T":"success","msg":"authenticated"}]
-   *  4. Subscribe:    {"action": "subscribe", "trades": ["BTC/USD"], "quotes": ["BTC/USD"]}
-   *  5. Trade events: [{"T":"t","S":"BTC/USD","p":50000,"s":1,"t":"..."}]
-   *  6. Quote events: [{"T":"q","S":"BTC/USD","bp":49999,"ap":50001,"t":"..."}]
+   *  4. Subscribe:    {"action": "subscribe", "trades": ["AAPL"], "quotes": ["AAPL"]}
+   *  5. Trade events: [{"T":"t","S":"AAPL","p":190.25,"s":1,"t":"..."}]
+   *  6. Quote events: [{"T":"q","S":"AAPL","bp":190.24,"ap":190.26,"t":"..."}]
    */
   connectWebSocket(): void {
     if (!this.hasCredentials()) {
@@ -830,7 +756,7 @@ export class AlpacaMarketDataService {
   }
 
   /**
-   * Check if a symbol is available from Alpaca (crypto = yes, forex = no).
+   * Check if a symbol is available from Alpaca (forex = no).
    */
   canProvideData(symbol: string): boolean {
     return this.isAlpacaSupported(symbol) && this.hasCredentials();

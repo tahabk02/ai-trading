@@ -57,4 +57,4 @@ async def train_pipeline(symbol: str):
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(train_pipeline("BTC/USDT"))
+    asyncio.run(train_pipeline("EUR/USD"))

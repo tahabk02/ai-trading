@@ -5,7 +5,7 @@ import type { ForexSpotResult } from "../../services/forexData.service";
 /**
  * PART 28.1 [211] — Yahoo Finance intraday fallback contract.
  *
- * The 10 real pairs are fed by the keyless Yahoo chart API. This test pins the
+ * The 5 real pairs are fed by the keyless Yahoo chart API. This test pins the
  * automatic tiered fallback that [211] requires documented + proven: when Yahoo
  * fails (429 / shape-drift / blocked), getLiveSpotFresh() MUST continue through
  * Frankfurter (ECB daily) and then open.er-api WITHOUT any manual intervention,
@@ -118,7 +118,7 @@ describe("PART 28.1 [211]: real-pair Yahoo intraday → ECB fallback engages aut
   it("[211] an OTC pair is untouched by the Yahoo tier (real-pairs only)", async () => {
     const r = await forexDataService.getLiveSpotFresh("EUR/USD");
     expect(yahooSpy).not.toHaveBeenCalled();
-    // EUR/USD is NOT in the 10 real pairs — its tier-zero path is the ECB
+    // EUR/USD is NOT in the 5 real pairs — its tier-zero path is the ECB
     // fallback we stubbed, not Yahoo.
     expect(r.source).toBe("frankfurter");
   });

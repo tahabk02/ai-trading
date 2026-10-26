@@ -238,6 +238,12 @@ export class PocketOptionBridgeService {
       );
       return;
     }
+    if (!symbolRegistry.isValidSymbolSync(normalized)) {
+      logger.info("[PO Bridge] Ignoring subscription for retired symbol", {
+        symbol: normalized,
+      });
+      return;
+    }
     this.poArmedByClient.add(normalized);
     // Gate on the relay's `ready` frame (assets initialised) — do NOT race
     // Python's startup: flushStagedSubscriptions only sends once assetsReady.

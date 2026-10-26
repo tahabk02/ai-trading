@@ -85,9 +85,9 @@ describe("spot-rate exhaustion: last known good + circuit breaker", () => {
   });
 
   it("refuses the held print once it is older than the hold window", async () => {
-    seedHeld("GBP/USD", 1.27104, 200_000);
+    seedHeld("EUR/JPY", 161.204, 200_000);
 
-    const r = await forexDataService.getLiveSpotFresh("GBP/USD");
+    const r = await forexDataService.getLiveSpotFresh("EUR/JPY");
 
     expect(r.success).toBe(false);
     expect(r.price).toBeNull();

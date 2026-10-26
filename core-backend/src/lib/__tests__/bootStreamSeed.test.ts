@@ -2,9 +2,9 @@
  * bootStreamSeed.test.ts — PART 15.1 [62] REGRESSION: boot-seed gap closed.
  *
  * [52] found that tick streams were auto-started ONLY for symbolRegistry
- * getAll("otc"), so the 10 real non-OTC forex pairs (EUR/SEK … EUR/NOK)
+ * getAll("otc"), so the 5 real non-OTC forex pairs (EUR/SEK … USD/CZK)
  * produced no live quote until a Pro chart subscribed to one individually —
- * leaving the market terminal grid with -- placeholders on 10 cards.
+ * leaving the market terminal grid with -- placeholders on 5 cards.
  *
  * [61] extends the boot seed to otc + forex explicitly. This test asserts the
  * EXACT [62] contract: after boot (i.e. after getBootStreamSeed + the feed
@@ -18,7 +18,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { symbolRegistry } from "../../services/symbolRegistry.service";
 import { realtimeTickBuffer } from "../../services/realtimeTickBuffer.service";
 
-const REAL_PAIRS_SAMPLE = ["EUR/NOK", "EUR/SEK", "EUR/DKK", "USD/CZK", "USD/PLN"];
+const REAL_PAIRS_SAMPLE = ["EUR/HUF", "EUR/SEK", "USD/NOK", "USD/CZK", "USD/PLN"];
 
 describe("PART 15.1 [62] — boot seed covers real non-OTC forex", () => {
   afterEach(() => {
@@ -33,9 +33,9 @@ describe("PART 15.1 [62] — boot seed covers real non-OTC forex", () => {
     for (const sym of REAL_PAIRS_SAMPLE) {
       expect(seeded.has(sym)).toBe(true);
     }
-    // The 10 real pairs are part of the seed (not just OTC/crypto).
+    // The 5 real pairs are part of the seed (not just OTC).
     const realSeeded = seed.filter((e) => e.type === "forex");
-    expect(realSeeded.length).toBe(10);
+    expect(realSeeded.length).toBe(5);
   });
 
   it("calls getAll('otc') + getAll('forex') explicitly — crypto NOT swept in", async () => {
@@ -55,17 +55,17 @@ describe("PART 15.1 [62] — boot seed covers real non-OTC forex", () => {
   });
 
   it("[52] GAP CLOSED: a real pair has a live quote at boot with NO individual client subscription", async () => {
-    // Simulate what the boot seed does: the stream for EUR/NOK is started by
+    // Simulate what the boot seed does: the stream for EUR/HUF is started by
     // the seed (no client subscribe), then the feed prints a genuine tick the
     // same way pollLiveTick does.
     const seed = await symbolRegistry.getBootStreamSeed();
-    expect(seed.some((e) => e.symbol === "EUR/NOK")).toBe(true);
+    expect(seed.some((e) => e.symbol === "EUR/HUF")).toBe(true);
 
-    realtimeTickBuffer.append("EUR/NOK", 11.4732, { tsMs: Date.now(), bid: 11.47, ask: 11.48 });
+    realtimeTickBuffer.append("EUR/HUF", 11.4732, { tsMs: Date.now(), bid: 11.47, ask: 11.48 });
 
-    const quotes = realtimeTickBuffer.getQuotesSnapshot(["EUR/NOK"]);
+    const quotes = realtimeTickBuffer.getQuotesSnapshot(["EUR/HUF"]);
     expect(quotes.length).toBe(1);
-    expect(quotes[0].symbol).toBe("EUR/NOK");
+    expect(quotes[0].symbol).toBe("EUR/HUF");
     expect(quotes[0].price).toBe(11.4732);
     expect(quotes[0].bid).toBe(11.47);
     expect(quotes[0].ask).toBe(11.48);
@@ -76,11 +76,11 @@ describe("PART 15.1 [62] — boot seed covers real non-OTC forex", () => {
     realtimeTickBuffer.append("EUR/SEK", 11.2, { tsMs: Date.now() });
     realtimeTickBuffer.append("USD/PLN", 4.01, { tsMs: Date.now() });
 
-    const quotes = realtimeTickBuffer.getQuotesSnapshot(["EUR/SEK", "USD/PLN", "GBP/USD"]);
+    const quotes = realtimeTickBuffer.getQuotesSnapshot(["EUR/SEK", "USD/PLN", "USD/CHF"]);
     const symbols = quotes.map((q) => q.symbol);
     expect(symbols).toContain("EUR/SEK");
     expect(symbols).toContain("USD/PLN");
     // A pair with no genuine ticks yet stays absent (honest empty — no -- fabrication).
-    expect(symbols).not.toContain("GBP/USD");
+    expect(symbols).not.toContain("USD/CHF");
   });
 });

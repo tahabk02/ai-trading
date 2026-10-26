@@ -136,7 +136,7 @@ const prisma = new PrismaClient();
  *     try/catch. They are called straight from HTTP routes
  *     (routes/history.routes.ts, routes/health.routes.ts), so a DB outage
  *     turned every history request into an unhandled rejection → HTTP 500.
- *  2. `run()` DOES catch per symbol, but with ~44 symbols that is 44 identical
+ *  2. `run()` DOES catch per symbol, but with ~26 symbols that is 26 identical
  *     "Can't reach database server" traces every 60 seconds. The real problem
  *     (the database is down) is buried under the symptom (one symbol failed).
  *

@@ -27,8 +27,8 @@ describe("Pro deep-link contract (/dashboard/pro?symbol=…&tf=…)", () => {
     expect(buildProHref("eurusd", 60)).toBe(
       `${PRO_TERMINAL_ROUTE}?symbol=EUR%2FUSD&tf=60`,
     );
-    expect(buildProHref("gbpjpy", 180)).toBe(
-      `${PRO_TERMINAL_ROUTE}?symbol=GBP%2FJPY&tf=180`,
+    expect(buildProHref("eurjpy", 180)).toBe(
+      `${PRO_TERMINAL_ROUTE}?symbol=EUR%2FJPY&tf=180`,
     );
     // Non-positive / absent tf → back-compat bare href (no stale &tf=).
     expect(buildProHref("EUR/USD", 0)).toBe(
@@ -73,8 +73,8 @@ describe("Pro deep-link contract (/dashboard/pro?symbol=…&tf=…)", () => {
     // Compact / separator-chaotic input normalizes to the canonical form.
     expect(resolveProSymbol("eurusd")).toEqual({ symbol: "EUR/USD" });
     expect(resolveProSymbol("eur-usd")).toEqual({ symbol: "EUR/USD" });
-    expect(resolveProSymbol("gbp/jpy")).toEqual({ symbol: "GBP/JPY" });
-    expect(normalizeSymbolQuery(" BTC/USD ")).toBe("BTC/USD");
+    expect(resolveProSymbol("eur/jpy")).toEqual({ symbol: "EUR/JPY" });
+    expect(normalizeSymbolQuery(" USD/JPY ")).toBe("USD/JPY");
   });
 
   it("test_pro_page_redirects_when_symbol_missing", () => {

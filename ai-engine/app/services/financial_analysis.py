@@ -274,7 +274,7 @@ class FinancialAnalysisService:
     Usage::
 
         report = FinancialAnalysisService().analyze(
-            symbol="BTC/USD",
+            symbol="EUR/USD",
             candles=[{"open":…, "high":…, "low":…, "close":…}, …],
             live_price=…,
             timeframe="1h",

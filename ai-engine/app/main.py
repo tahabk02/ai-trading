@@ -76,18 +76,15 @@ if (
 import os
 
 # ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WARMUP SYMBOLS — FULL 34-PAIR UNIVERSE (incl. CRYPTO)
-# Mirrors core-backend symbolRegistry.service.ts. BTC/USD & ETH/USD
-# warm up through CoinGecko real market history via the collector.
+# STRICT OTC WARMUP SYMBOLS — 21-PAIR UNIVERSE
+# Mirrors core-backend symbolRegistry.service.ts.
 # ═══════════════════════════════════════════════════════════════════
 DEFAULT_WARMUP_SYMBOLS = (
-    "EUR/USD,GBP/USD,USD/JPY,USD/CHF,USD/CAD,AUD/USD,NZD/USD,"
-    "BTC/USD,ETH/USD,"
-    "EUR/GBP,EUR/JPY,EUR/CHF,EUR/AUD,EUR/CAD,EUR/NZD,EUR/TRY,"
-    "GBP/JPY,GBP/CHF,GBP/AUD,GBP/CAD,"
+    "EUR/USD,USD/JPY,USD/CHF,USD/CAD,AUD/USD,"
+    "EUR/JPY,EUR/CHF,EUR/AUD,EUR/CAD,"
     "AUD/JPY,CAD/JPY,CHF/JPY,"
-    "AUD/CAD,AUD/NZD,NZD/JPY,CAD/CHF,EUR/RUB,"
-    "USD/TRY,USD/ZAR,USD/MXN,USD/SGD,MAD/USD,KES/USD"
+    "AUD/CAD,AUD/NZD,CAD/CHF,EUR/RUB,"
+    "USD/TRY,USD/MXN,USD/SGD,MAD/USD,KES/USD"
 )
 
 WARMUP_SYMBOLS = os.environ.get(
@@ -122,8 +119,7 @@ async def _warmup_one_symbol(
                 logger.debug("Warmup: model already cached", symbol=symbol, timeframe=tf)
                 return
 
-            # Fetch real candles via the collector — crypto majors
-            # (BTC/USD, ETH/USD) auto-route to CoinGecko real history.
+            # Fetch real candles via the collector.
             from .data.collector import is_otc_pair
 
             if not is_otc_pair(symbol):

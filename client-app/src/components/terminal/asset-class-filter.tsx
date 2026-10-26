@@ -3,7 +3,7 @@
 /**
  * asset-class-filter.tsx — MARKET TERMINAL ASSET FILTER BAR.
  *
- * Multi-select venue classes (OTC / Real / Crypto), a free-text pair+currency
+ * Multi-select venue classes (OTC / Real), a free-text pair+currency
  * search, and a favorites-only isolate toggle. Every visible control is
  * ALWAYS enabled: filtering is a view concern, never gated on market state,
  * feed health, or the operator's tradability tier. A disabled filter control

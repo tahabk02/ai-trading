@@ -1,4 +1,4 @@
-# universe_regime_audit.py -- PART 19 [109]/[110] 44-SYMBOL REGIME+TIER AUDIT
+# universe_regime_audit.py -- PART 19 [109]/[110] 26-SYMBOL REGIME+TIER AUDIT
 # (pure ASCII)
 #
 # For the exact same symbols the client receives via symbolRegistry.getAll()
@@ -35,15 +35,13 @@ from app.services.quality_gate import build_factor_inputs_from_candles
 
 SYMBOLS_API = "http://localhost:4000/api/v1/symbols?limit=1000"
 
-# PART 12/14 prior audit (recorded findings from the earlier audit runs).
-# EUR/GBP and EUR/NOK were FLAGGED trending pending [47]/[48]; EUR/NOK is NOT
-# part of the current 44-name engine universe and so cannot be re-audited here.
+# PART 12/14 prior audit (retained symbols only).
 PRIOR_FINDINGS = {
     "EUR/USD": "random_walk",
-    "GBP/USD": "random_walk",
+    "USD/CHF": "random_walk",
     "USD/JPY": "random_walk",
-    "EUR/GBP": "random_walk",  # later flagged trending -- pending [47]/[48]
-    "EUR/NOK": "trending",     # flagged pending [47]/[48]; not in 44-universe
+    "AUD/CHF": "random_walk",
+    "EUR/HUF": "trending",
 }
 
 
@@ -56,19 +54,13 @@ async def fetch_registry() -> list:
 
 
 async def audit_one(collector, analyzer, sym: str) -> dict:
-    spec = collector._spec(sym)
-    crypto_id = (spec or {}).get("crypto_id")
-    if crypto_id:
-        # REAL daily history from CoinGecko market_chart (not Frankfurter).
-        candles = await collector._fetch_crypto_history(sym, 160)
-    else:
-        # PART 28 [208]: the 10 REAL non-OTC pairs are re-audited on REAL
-        # INTRADAY history (Yahoo Finance H1 bars via the collector) instead of
-        # the old daily-close tape. OTC pairs keep their daily closes.
-        tf = "1h" if is_real_forex_pair(sym) else "1d"
-        candles = await collector.fetch_historical_candles(
-            symbol=sym, interval=tf, limit=160
-        )
+    # PART 28 [208]: the 5 REAL non-OTC pairs are re-audited on REAL
+    # INTRADAY history (Yahoo Finance H1 bars via the collector) instead of
+    # the old daily-close tape. OTC pairs keep their daily closes.
+    tf = "1h" if is_real_forex_pair(sym) else "1d"
+    candles = await collector.fetch_historical_candles(
+        symbol=sym, interval=tf, limit=160
+    )
     if not candles:
         return {"symbol": sym, "status": "NO_DATA", "closes": 0}
     closes = [float(c["close"]) for c in candles]
@@ -131,7 +123,7 @@ async def main() -> int:
         print((".. %s" % sym).ljust(12), row.get("status", "?"))
 
     print("")
-    print("=== PART 19 [109] 44-SYMBOL TABLE ===")
+    print("=== PART 19 [109] 26-SYMBOL TABLE ===")
     header = "{:<10} {:<8} {:<16} {:<4} {:<12} {:<9} {:<6}".format(
         "SYMBOL", "TYPE", "REGIME", "TIER", "REGIME_GATE", "CONF", "CLOSES"
     )
@@ -173,7 +165,7 @@ async def main() -> int:
     for prior_sym, prior_regime in PRIOR_FINDINGS.items():
         row = by_sym.get(prior_sym)
         if row is None:
-            print("SKIP %s: not in current 44-universe (prior flag stands: %s)" % (
+            print("SKIP %s: not in current 26-universe (prior flag stands: %s)" % (
                 prior_sym, prior_regime))
             continue
         if row.get("status") != "OK":
@@ -186,7 +178,7 @@ async def main() -> int:
         else:
             print("DRIFT_FLAG %s: fresh=%s prior=%s -- explanation: live "
                   "historical closes re-classified on the bias-corrected "
-                  "Hurst/ADF tape; EUR/GBP was already flagged trending "
+                  "Hurst/ADF tape; the pair was already flagged trending "
                   "pending [47]/[48]" % (prior_sym, fresh, prior_regime))
 
     print("")

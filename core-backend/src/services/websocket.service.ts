@@ -140,7 +140,7 @@ export class WebSocketService {
    * (e.g. a subscribed chart), OR the market terminal is watching ALL symbols.
    * Used to throttle expensive per-symbol compute (the AI Engine's live-quant
    * scorer) to symbols the user is actually watching — the grid counts as
-   * watching every pair, so its 34-card session evaluates the full universe.
+   * watching every pair, so its 26-card session evaluates the full universe.
    */
   public hasActiveSubscribers(symbol: string): boolean {
     const server = this.io;

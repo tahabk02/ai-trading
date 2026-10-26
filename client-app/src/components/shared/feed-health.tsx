@@ -34,7 +34,7 @@ export interface FeedHealthProps {
   /**
    * PART 42.1 [422] — true when every REAL (forex) instrument is in its weekly
    * closed window. A closed market is a STATE, not a feed fault: the bar says
-   * "MARKET CLOSED" instead of "PRICE STALE". OTC/crypto remain 24/7.
+   * "MARKET CLOSED" instead of "PRICE STALE". OTC symbols remain 24/7.
    */
   marketClosed?: boolean;
   /** Optional override for the packet-age source. Tests inject a fake clock. */

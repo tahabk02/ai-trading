@@ -160,7 +160,7 @@ export function useMarketTerminal() {
       // executable state without any client-side guesswork.
       const minTier = useMarketTerminalStore.getState().minTier;
       // Mark the batch symbols as "pending" so cards show a refreshing state.
-      // ONE store write for the whole batch (was 44 setPrediction calls,
+      // ONE store write for the whole batch (was 26 setPrediction calls,
       // each spreading the full predictions record and notifying every card).
       useMarketTerminalStore.getState().markPredictionsPending(symbols);
       apiClient

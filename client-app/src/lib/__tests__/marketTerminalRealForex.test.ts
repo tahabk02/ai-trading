@@ -13,21 +13,21 @@ import {
 describe("PART 15 — real forex terminal wiring", () => {
   const ALL_REAL_SYMBOLS = REAL_FOREX_PAIRS.map((p) => p.symbol);
 
-  it("ALL_MARKET_SYMBOLS has exactly 44 unique instruments (32 OTC + 2 crypto + 10 real)", () => {
-    expect(new Set(ALL_MARKET_SYMBOLS).size).toBe(44);
-    expect(ALL_MARKET_SYMBOLS).toHaveLength(44);
+  it("ALL_MARKET_SYMBOLS has exactly 26 unique instruments (21 OTC + 5 real)", () => {
+    expect(new Set(ALL_MARKET_SYMBOLS).size).toBe(26);
+    expect(ALL_MARKET_SYMBOLS).toHaveLength(26);
   });
 
-  it("every REAL_FOREX_PAIRS symbol is a distinct member of the 44", () => {
+  it("every REAL_FOREX_PAIRS symbol is a distinct member of the 26", () => {
     for (const sym of ALL_REAL_SYMBOLS) {
       expect(ALL_MARKET_SYMBOLS).toContain(sym);
       expect(REAL_MARKET_SYMBOLS.has(sym)).toBe(true);
     }
-    expect(ALL_REAL_SYMBOLS.length).toBe(10);
-    expect(REAL_MARKET_SYMBOLS.size).toBe(10);
+    expect(ALL_REAL_SYMBOLS.length).toBe(5);
+    expect(REAL_MARKET_SYMBOLS.size).toBe(5);
   });
 
-  it("OTC_FOREX_PAIRS spreads the real pairs (44 entries) for whitelist continuity", () => {
+  it("OTC_FOREX_PAIRS spreads the real pairs (26 entries) for whitelist continuity", () => {
     expect(OTC_FOREX_PAIRS.map((p) => p.symbol)).toEqual(
       expect.arrayContaining(ALL_REAL_SYMBOLS),
     );
@@ -36,14 +36,12 @@ describe("PART 15 — real forex terminal wiring", () => {
     }
   });
 
-  it("the REAL badge renders for every real pair; OTC/crypto badges stay distinct", () => {
+  it("the REAL badge renders for every real pair; OTC badges stay distinct", () => {
     for (const sym of ALL_REAL_SYMBOLS) {
       expect(assetClassBadgeLabel(sym)).toBe("REAL");
     }
     expect(assetClassBadgeLabel("EUR/USD")).toBe("OTC");
-    expect(assetClassBadgeLabel("GBP/USD")).toBe("OTC");
-    expect(assetClassBadgeLabel("BTC/USD")).toBe("CRYPTO");
-    expect(assetClassBadgeLabel("ETH/USD")).toBe("CRYPTO");
+    expect(assetClassBadgeLabel("USD/JPY")).toBe("OTC");
   });
 
   it("[47]/[48] superseded by PART 28.2: the intraday engine verdict (regime_gate) drives the card", () => {
@@ -161,12 +159,10 @@ describe("PART 28.2 [214]/[215] — data-driven real-forex regime unlock", () =>
     }
   });
 
-  it("the 2 intraday-cleared real pairs (EUR/CZK, EUR/DKK) resolve interactive; the 8 random_walk real pairs stay scored-only", () => {
-    const cleared = new Set(["EUR/CZK", "EUR/DKK"]);
+  it("the current real set has no hard-coded clearance: each pair stays scored-only until an explicit tradable gate", () => {
     for (const sym of ALL_REAL_SYMBOLS) {
-      const b = realForexCardBehavior(sym, cleared.has(sym) ? "tradable" : "scored_only");
-      expect(b.interactive).toBe(cleared.has(sym));
-      expect(b.scoredOnly).toBe(!cleared.has(sym));
+      expect(realForexCardBehavior(sym, undefined).scoredOnly).toBe(true);
+      expect(realForexCardBehavior(sym, "tradable").scoredOnly).toBe(false);
     }
   });
 });
