@@ -86,14 +86,16 @@ def resolve_user_agent(value: str | None) -> str:
 
 
 class _PhpSessionParser:
-    """Minimal, length-aware PHP array parser for Pocket Option sessions.
+    """Minimal, length-aware PHP container parser for Pocket Option sessions.
 
-    The SDK's Rust parser trusts the declared ``a:N`` entry count. Pocket Option
-    can emit a newer session with more fields while the header still says
-    ``a:4``; PHP then expects ``}`` after four entries and crashes on the fifth
-    string key (``Expected '}' but got 's'``). This parser ignores the declared
-    count and consumes entries until the closing brace so the count can be
-    corrected without dropping fields that the server may have added.
+    The SDK's Rust parser trusts declared ``a:N`` / ``O:N`` headers and only
+    supports PHP arrays at the top level. Pocket Option can emit a newer session
+    with more fields while the header still says ``a:4``; PHP then expects ``}``
+    after four entries and crashes on the fifth string key (``Expected '}' but
+    got 's'``). It can also wrap newer metadata in PHP objects, or use a stale
+    string byte-length. This parser consumes entries until the closing brace,
+    accepts objects, and tolerates a string length that disagrees with the
+    actual quoted payload so the session can be re-serialized canonically.
     """
 
     def __init__(self, data: bytes):
@@ -101,6 +103,8 @@ class _PhpSessionParser:
         self.pos = 0
         self.depth = 0
         self.top_level_count = 0
+        self.container_kind = ""
+        self.repaired_strings = False
 
     def _expect(self, token: bytes) -> None:
         if not self.data.startswith(token, self.pos):
@@ -125,13 +129,43 @@ class _PhpSessionParser:
         self._expect(b"s:")
         length = self._read_int(b":")
         self._expect(b'"')
+        expected_end = self.pos + length
+        if (
+            expected_end <= len(self.data)
+            and self.data.startswith(b'";', expected_end)
+        ):
+            end = expected_end
+        else:
+            end = self.data.find(b'";', self.pos)
+            if end < 0:
+                raise ValueError("unterminated PHP session string")
+            self.repaired_strings = True
+        value = self.data[self.pos:end]
+        self.pos = end + 2
+        return value
+
+    def _read_object_name(self) -> bytes:
+        length = self._read_int(b":")
+        self._expect(b'"')
         end = self.pos + length
-        if length < 0 or end > len(self.data):
-            raise ValueError("invalid PHP session string length")
+        if end > len(self.data):
+            raise ValueError("invalid PHP object class length")
         value = self.data[self.pos:end]
         self.pos = end
-        self._expect(b'";')
+        self._expect(b'":')
         return value
+
+    def _read_entries(self) -> Dict[bytes, object]:
+        entries: Dict[bytes, object] = {}
+        count = 0
+        while not self.data.startswith(b"}", self.pos):
+            key = self._read_string()
+            entries[key] = self._read_value()
+            count += 1
+            if count > 10_000:
+                raise ValueError("PHP session array is too large")
+        self._expect(b"}")
+        return entries
 
     def _read_value(self) -> object:
         if self.data.startswith(b"s:", self.pos):
@@ -150,6 +184,8 @@ class _PhpSessionParser:
             return None
         if self.data.startswith(b"a:", self.pos):
             return self._read_array()
+        if self.data.startswith(b"O:", self.pos):
+            return self._read_object()
         raise ValueError("unsupported PHP session value")
 
     def _read_array(self) -> Dict[bytes, object]:
@@ -158,27 +194,56 @@ class _PhpSessionParser:
         self._expect(b"a:")
         self._read_int(b":")  # count is advisory only (see class docstring)
         self._expect(b"{")
-        entries: Dict[bytes, object] = {}
-        count = 0
-        while not self.data.startswith(b"}", self.pos):
-            key = self._read_string()
-            entries[key] = self._read_value()
-            count += 1
-            if count > 10_000:
-                raise ValueError("PHP session array is too large")
-        self._expect(b"}")
+        entries = self._read_entries()
         self.depth -= 1
         if top_level:
-            self.top_level_count = count
+            self.container_kind = "array"
+            self.top_level_count = len(entries)
         return entries
+
+    def _read_object(self) -> Dict[bytes, object]:
+        top_level = self.depth == 0
+        self.depth += 1
+        self._expect(b"O:")
+        self._read_object_name()
+        self._read_int(b":")  # property count is advisory only
+        self._expect(b"{")
+        entries = self._read_entries()
+        self.depth -= 1
+        if top_level:
+            self.container_kind = "object"
+            self.top_level_count = len(entries)
+        return entries
+
+    def parse(self) -> tuple[Dict[bytes, object], bytes]:
+        if self.data.startswith(b"a:"):
+            entries = self._read_array()
+        elif self.data.startswith(b"O:"):
+            entries = self._read_object()
+        else:
+            raise ValueError("unsupported PHP session container")
+        return entries, self.data[self.pos:]
 
 
 _PHP_SESSION_KEY_TOKEN = re.compile(rb's:\d+:"[a-z]+(?:_[a-z]+)+";')
+_PHP_REQUIRED_SESSION_FIELDS = frozenset(
+    {
+        b"session_id",
+        b"ip_address",
+        b"user_agent",
+        b"last_activity",
+    }
+)
 
 
 def _php_declared_count(text: str) -> Optional[int]:
     match = re.match(r"a:(\d+):", text)
     return int(match.group(1)) if match else None
+
+
+def _php_session_header(text: str) -> str:
+    match = re.match(r"([aO]):(\d+):", text)
+    return f"{match.group(1)}:{match.group(2)}" if match else "unknown"
 
 
 def _replace_php_count(data: bytes, actual: int) -> bytes:
@@ -188,16 +253,39 @@ def _replace_php_count(data: bytes, actual: int) -> bytes:
     return b"a:%d" % actual + data[colon:]
 
 
-def _fix_php_session_count(text: str) -> str:
-    """Strict length-aware pass: fix the header without altering fields."""
+def _serialize_php_value(value: object) -> bytes:
+    if isinstance(value, bytes):
+        return b's:%d:"' % len(value) + value + b'";'
+    if isinstance(value, bool):
+        return b"b:1;" if value else b"b:0;"
+    if isinstance(value, int):
+        return b"i:%d;" % value
+    if isinstance(value, float):
+        return b"d:" + repr(value).encode("ascii") + b";"
+    if value is None:
+        return b"N;"
+    if isinstance(value, dict):
+        return _serialize_php_array(value)
+    raise ValueError("unsupported PHP session value")
+
+
+def _serialize_php_array(entries: Dict[bytes, object]) -> bytes:
+    body = b"".join(
+        _serialize_php_value(key) + _serialize_php_value(value)
+        for key, value in entries.items()
+    )
+    return b"a:%d:{%s}" % (len(entries), body)
+
+
+def _fix_php_session(text: str) -> tuple[str, _PhpSessionParser]:
+    """Re-serialize a PHP session with correct headers and string lengths."""
     data = text.encode("utf-8", "surrogatepass")
     parser = _PhpSessionParser(data)
-    entries = parser._read_array()
-    if b"session_id" not in entries:
-        raise ValueError("missing PHP session_id")
-    return _replace_php_count(data, parser.top_level_count).decode(
-        "utf-8", "surrogatepass"
-    )
+    entries, trailing = parser.parse()
+    if not _PHP_REQUIRED_SESSION_FIELDS.issubset(entries):
+        raise ValueError("incomplete PHP session")
+    normalized = _serialize_php_array(entries) + trailing
+    return normalized.decode("utf-8", "surrogatepass"), parser
 
 
 def _fix_php_session_count_fallback(text: str) -> str:
@@ -223,20 +311,23 @@ def _fix_php_session_count_fallback(text: str) -> str:
 
 
 def normalize_php_session(value: str) -> str:
-    """Correct a stale PHP ``a:N`` count without dropping any session fields.
+    """Repair a PHP object/array session for the SDK's Rust parser.
 
-    Handles JSON-escaped quotes copied from a captured frame and URL-encoded
-    cookie values. A value that cannot be parsed is returned unchanged so the
-    SDK remains the final authority and the caller can surface its precise
-    error.
+    Corrects stale ``a:N`` counts, converts PHP objects (including nested
+    object-valued fields) to arrays, and rewrites string byte-lengths from the
+    actual quoted payload. Handles JSON-escaped quotes copied from a captured
+    frame and URL-encoded cookie values. A value that cannot be parsed is
+    returned unchanged so the SDK remains the final authority.
     """
     text = (value or "").strip()
-    if not text.startswith("a:") and not text.lower().startswith("a%3"):
+    if not re.match(r"(?:a|O):", text) and not re.match(
+        r"(?:a|O)%3", text, re.IGNORECASE
+    ):
         return text
     candidates = []
     if '\\"' in text:
         candidates.append(text.replace('\\"', '"').replace("\\\\", "\\"))
-    if text.lower().startswith("a%3"):
+    if re.match(r"(?:a|O)%3", text, re.IGNORECASE):
         try:
             from urllib.parse import unquote
 
@@ -250,23 +341,29 @@ def normalize_php_session(value: str) -> str:
             continue
         seen.add(candidate)
         try:
-            normalized = _fix_php_session_count(candidate)
+            normalized, parser = _fix_php_session(candidate)
         except (TypeError, ValueError) as exc:
             # Only fall back for value types the strict tokenizer does not
             # know. A malformed string length/sheared token is not something a
             # header rewrite can fix, and rewriting it would corrupt input.
-            if "unsupported PHP session value" not in str(exc):
+            if (
+                "unsupported PHP session value" not in str(exc)
+                or candidate.startswith("O:")
+            ):
                 continue
             try:
                 normalized = _fix_php_session_count_fallback(candidate)
             except (TypeError, ValueError):
                 continue
+            parser = None
         if normalized != text:
             logger.info(
-                "PHP_SESSION_NORMALIZED - corrected PHP array count "
-                "declared=%s corrected=%s (all session fields preserved)",
-                _php_declared_count(candidate),
+                "PHP_SESSION_NORMALIZED - header=%s corrected=a:%s "
+                "container=%s strings_repaired=%s (all session fields preserved)",
+                _php_session_header(candidate),
                 _php_declared_count(normalized),
+                parser.container_kind if parser else "array",
+                parser.repaired_strings if parser else False,
             )
         return normalized
     return text

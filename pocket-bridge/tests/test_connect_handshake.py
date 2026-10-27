@@ -147,6 +147,72 @@ def test_real_php_ssid_is_sent_as_a_full_42_auth_frame(
     assert isinstance(auth["isDemo"], int)
 
 
+def test_sdk_payload_diagnostics_are_loud_and_redacted(
+    monkeypatch, tmp_path, fake_client, capsys
+):
+    monkeypatch.setenv("POCKET_OPTION_UID", "12345678")
+    monkeypatch.setenv("POCKET_OPTION_IS_DEMO", "0")
+    bridge = _bridge(monkeypatch, tmp_path, ssid=PHP_SSID_WITH_STALE_COUNT)
+
+    asyncio.run(bridge._import_client())
+
+    err = capsys.readouterr().err
+    assert "SDK_PAYLOAD_DIAG" in err
+    assert "payload_type=str" in err
+    assert "payload_len=" in err
+    assert "payload_repr=" in err
+    assert "auth_uid=12345678 auth_uid_type=int" in err
+    assert "auth_isDemo=0 auth_isDemo_type=int" in err
+    assert "session_php_container=array" in err
+    assert "session_php_header=a:5" in err
+    assert "session_php_declared=5" in err
+    assert "session_starts_php=True" in err
+    assert "<REDACTED_SESSION" in err
+    assert PHP_SSID_WITH_STALE_COUNT not in err
+    assert "device_id" not in err
+
+
+def test_object_php_session_is_redacted_without_known_session():
+    object_session = (
+        'O:8:"stdClass":1:{s:10:"session_id";s:32:'
+        '"0123456789abcdef0123456789abcdef";}'
+    )
+    redacted = bridge_mod._redact_diagnostic_text(object_session)
+
+    assert "<REDACTED_SESSION" in redacted
+    assert "session_id" not in redacted
+    assert "0123456789abcdef" not in redacted
+
+
+def test_sdk_init_exception_logs_trace_and_redacts_session(
+    monkeypatch, tmp_path, capsys
+):
+    from BinaryOptionsToolsV2 import PocketOptionError
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    class _BoomClient:
+        def __init__(self, payload, **kwargs):
+            raise PocketOptionError(f"Failed to parse ssid: {payload}")
+
+    monkeypatch.setattr(po, "PocketOptionAsync", _BoomClient)
+    monkeypatch.setenv("POCKET_OPTION_UID", "12345678")
+    monkeypatch.setenv("POCKET_OPTION_IS_DEMO", "0")
+    bridge = _bridge(monkeypatch, tmp_path, ssid=PHP_SSID_WITH_STALE_COUNT)
+
+    with pytest.raises(PocketOptionError):
+        asyncio.run(bridge._import_client())
+
+    err = capsys.readouterr().err
+    assert "SDK_INIT_EXCEPTION" in err
+    assert "exception_type=PocketOptionError" in err
+    assert "is_pocket_option_error=True" in err
+    assert "exception_args=" in err
+    assert "Traceback (most recent call last)" in err
+    assert "<REDACTED_SESSION" in err
+    assert PHP_SSID_WITH_STALE_COUNT not in err
+    assert "device_id" not in err
+
+
 def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client):
     """Unset POCKET_OPTION_WS_URLS keeps the SDK's own streaming defaults
     (pinning url= previously killed the tick stream) while still shipping the

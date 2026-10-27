@@ -1,9 +1,11 @@
 """Real-account PHP session normalization for BinaryOptionsToolsV2.
 
-The Rust SDK's PHP parser trusts the declared ``a:N`` count. Pocket Option can
-append fields while the header still says ``a:4``, which makes the SDK fail with
-``Expected '}' but got 's'`` at the first extra string key. These tests pin the
-count correction, field preservation, and supported wrapper fallbacks.
+The Rust SDK's PHP parser trusts declared ``a:N`` counts and string byte-lengths,
+and accepts only arrays at the top level. Pocket Option can append fields while
+the header still says ``a:4``, wrap fields in PHP objects, or emit a stale string
+length, all of which can produce ``Expected '}' but got 's'``. These tests pin
+count/length repair, object-to-array conversion, field preservation, and
+supported wrapper fallbacks.
 """
 
 from __future__ import annotations
@@ -55,14 +57,46 @@ MISMATCHED_264 = (
     's:9:"device_id";s:5:"abcde";}'
 ) + HASH
 
-#: Unknown PHP value type: strict tokenization fails, regex fallback must still
-#: count the five top-level keys.
-FALLBACK_ONLY = (
-    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+#: Object-valued session: the Rust SDK only accepts a top-level PHP array.
+OBJECT_SESSION = (
+    'O:8:"stdClass":4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;}'
+) + HASH
+
+OBJECT_SESSION_AS_ARRAY = 'a:4:{' + OBJECT_SESSION[len('O:8:"stdClass":4:{'):]
+
+#: Nested object value: the SDK's parser supports nested arrays, not objects.
+NESTED_OBJECT_FIELD = (
+    'a:5:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
     's:10:"ip_address";s:7:"0.0.0.0";'
     's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
     's:13:"last_activity";i:1732926685;'
-    's:9:"device_id";O:8:"stdClass":0:{};}'
+    's:9:"device_id";O:8:"stdClass":2:{s:1:"a";s:1:"b";s:1:"c";s:1:"d";}}'
+) + HASH
+
+NESTED_OBJECT_FIELD_FIXED = (
+    'a:5:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;'
+    's:9:"device_id";a:2:{s:1:"a";s:1:"b";s:1:"c";s:1:"d";}}'
+) + HASH
+
+#: Stale PHP string byte-length while the array count itself is correct.
+STALE_STRING_LENGTH = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:999:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;}'
+) + HASH
+
+STALE_STRING_LENGTH_FIXED = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;}'
 ) + HASH
 
 
@@ -97,10 +131,20 @@ def test_264_char_production_session_count_is_recalculated():
     assert normalized.endswith(HASH)
 
 
-def test_regex_fallback_counts_keys_when_strict_parser_fails():
-    normalized = normalize_php_session(FALLBACK_ONLY)
-    assert normalized.startswith("a:5:{")
-    assert 's:9:"device_id";O:8:"stdClass":0:{};' in normalized
+def test_object_values_are_converted_to_arrays():
+    normalized = normalize_php_session(NESTED_OBJECT_FIELD)
+    assert normalized == NESTED_OBJECT_FIELD_FIXED
+
+
+def test_top_level_object_session_is_converted_to_array():
+    normalized = normalize_php_session(OBJECT_SESSION)
+    assert normalized == OBJECT_SESSION_AS_ARRAY
+    assert normalized.startswith("a:4:{")
+
+
+def test_stale_php_string_length_is_recalculated():
+    normalized = normalize_php_session(STALE_STRING_LENGTH)
+    assert normalized == STALE_STRING_LENGTH_FIXED
 
 
 def test_raw_php_session_is_wrapped_with_real_account_metadata(monkeypatch):

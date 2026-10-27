@@ -14,10 +14,13 @@ never authenticates and the relay reports ``status: awaiting_ssid``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import sys
 import time
+import traceback
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -83,6 +86,134 @@ _TRANSPORT_ERROR_MARKERS = (
     "unreachable",
     "network is unreachable",
 )
+
+
+_JSON_SESSION_FIELD_RE = re.compile(
+    r'("(?:session|ssid|token|cookie|password|secret)"\s*:\s*)'
+    r'"((?:[^"\\]|\\.)*)"',
+    re.IGNORECASE,
+)
+_PHP_SESSION_BLOB_RE = re.compile(
+    r'(?:a:\d+:\{|O:\d+:"(?:[^"\\]|\\.)*":\d+:\{).*?\}'
+    r"(?:[0-9a-fA-F]{32})?",
+    re.DOTALL,
+)
+
+
+def _secret_digest(value: str) -> str:
+    return hashlib.sha256(
+        value.encode("utf-8", "surrogatepass")
+    ).hexdigest()[:12]
+
+
+def _redact_diagnostic_text(text: str, session: str = "") -> str:
+    """Remove session material while preserving structural escape artifacts."""
+    if not isinstance(text, str):
+        text = repr(text)
+    placeholder = f"<REDACTED_SESSION len={len(session)} sha256={_secret_digest(session)}>"
+    if session:
+        # Replace raw, JSON-escaped, and repr-escaped variants. Tracebacks can
+        # render exception args at more than one escaping level.
+        variants = [session]
+        for _ in range(3):
+            variants.append(
+                json.dumps(variants[-1], ensure_ascii=False)[1:-1]
+            )
+        for secret in variants:
+            if secret:
+                text = text.replace(secret, placeholder)
+    text = _JSON_SESSION_FIELD_RE.sub(
+        lambda match: match.group(1) + f'"{placeholder}"',
+        text,
+    )
+    return _PHP_SESSION_BLOB_RE.sub(placeholder, text)
+
+
+def _payload_auth(payload: object) -> dict:
+    """Best-effort extract the auth object for diagnostics (never logged raw)."""
+    if not isinstance(payload, str):
+        return {}
+    text = payload
+    try:
+        if text.startswith("42["):
+            parsed = json.loads(text[2:])
+        elif text.startswith("["):
+            parsed = json.loads(text)
+        elif text.startswith("{"):
+            parsed = json.loads(text)
+        else:
+            return {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if isinstance(parsed, list) and len(parsed) > 1 and isinstance(parsed[1], dict):
+        return parsed[1]
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _sdk_payload_diagnostics(payload: object, auth: dict) -> str:
+    """Build a redacted structural snapshot of the exact SDK input."""
+    payload_type = type(payload).__name__
+    embedded = _payload_auth(payload)
+    effective = embedded or (auth if isinstance(auth, dict) else {})
+    session = effective.get("session")
+    if not isinstance(session, str):
+        session = ""
+    if isinstance(payload, str) and payload.startswith("a:"):
+        session = payload
+
+    uid = effective.get("uid")
+    is_demo = effective.get("isDemo", effective.get("is_demo"))
+    header_match = re.match(r"([aO]):(\d+):", session)
+    header = (
+        f"{header_match.group(1)}:{header_match.group(2)}"
+        if header_match
+        else "n/a"
+    )
+    if session.startswith("a:"):
+        container = "array"
+    elif session.startswith("O:"):
+        container = "object"
+    elif session:
+        container = "other"
+    else:
+        container = "none"
+    declared_match = re.match(r"a:(\d+):", session)
+    declared = declared_match.group(1) if declared_match else "n/a"
+    redacted = _redact_diagnostic_text(str(payload), session)
+    text = payload if isinstance(payload, str) else ""
+    starts_42_auth = text.startswith('42["auth",')
+    return "\n".join(
+        (
+            "SDK_PAYLOAD_DIAG",
+            f"  payload_type={payload_type}",
+            f"  payload_len={len(payload) if hasattr(payload, '__len__') else 'n/a'}",
+            f"  payload_sha256_12={_secret_digest(text or repr(payload))}",
+            f"  payload_starts_42_auth={starts_42_auth}",
+            f"  payload_backslashes={text.count(chr(92))}",
+            f"  payload_newlines={text.count(chr(10))}",
+            f"  payload_carriage_returns={text.count(chr(13))}",
+            f"  payload_quotes={text.count(chr(34))}",
+            f"  payload_repr={redacted!r}",
+            f"  auth_uid={uid!r} auth_uid_type={type(uid).__name__}",
+            f"  auth_isDemo={is_demo!r} "
+            f"auth_isDemo_type={type(is_demo).__name__}",
+            f"  session_type={type(session).__name__}",
+            f"  session_len={len(session)}",
+            f"  session_sha256_12={_secret_digest(session)}",
+            f"  session_php_container={container}",
+            f"  session_php_header={header}",
+            f"  session_php_declared={declared}",
+            f"  session_starts_php={session.startswith('a:')}",
+            f"  session_starts_42={session.startswith('42[')}",
+        )
+    )
+
+
+def _emit_sdk_payload_diagnostics(payload: object, auth: dict) -> str:
+    text = _sdk_payload_diagnostics(payload, auth)
+    logger.warning(text)
+    print(text, file=sys.stderr, flush=True)
+    return text
 
 
 class ModuleUnavailableError(Exception):
@@ -442,9 +573,47 @@ class PocketOptionBridge:
                 len(self.session.cookies),
             )
         self.cookie_header = self.session.cookie_header()
+
+        diag_auth = _payload_auth(payload) or auth_dict
+        diag_session = (
+            diag_auth.get("session") if isinstance(diag_auth, dict) else ""
+        )
+        if not isinstance(diag_session, str):
+            diag_session = ""
+        if isinstance(payload, str) and payload.startswith("a:"):
+            diag_session = payload
+        _emit_sdk_payload_diagnostics(payload, auth_dict)
+
+        try:
+            from BinaryOptionsToolsV2 import PocketOptionError
+        except ImportError:  # pragma: no cover - package checked above
+            PocketOptionError = None  # type: ignore[assignment,misc]
+
         try:
             self.client = PocketOptionAsync(payload, **kwargs)
         except Exception as exc:
+            trace = _redact_diagnostic_text(
+                traceback.format_exc(), diag_session
+            )
+            args = repr(
+                tuple(
+                    _redact_diagnostic_text(str(arg), diag_session)
+                    for arg in exc.args
+                )
+            )
+            is_po_error = (
+                PocketOptionError is not None
+                and isinstance(exc, PocketOptionError)
+            )
+            detail = (
+                "SDK_INIT_EXCEPTION\n"
+                f"  exception_type={type(exc).__name__}\n"
+                f"  is_pocket_option_error={is_po_error}\n"
+                f"  exception_args={args}\n"
+                f"  traceback:\n{trace}"
+            )
+            logger.critical(detail)
+            print(detail, file=sys.stderr, flush=True)
             if "Failed to parse ssid" in str(exc):
                 logger.critical(
                     "SSID_PARSE_FAILED source=%s format=%s session_len=%d "
