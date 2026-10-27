@@ -37,9 +37,11 @@ from .config import (
     auth_message,
     canonical_symbol,
     credential_login_status,
+    force_php_array_header,
     load_stored_session,
     mask_secret,
     mask_uid,
+    normalize_auth_fields,
     parse_ssid,
     read_env_ssid,
     session_reload_needed,
@@ -104,6 +106,11 @@ def _secret_digest(value: str) -> str:
     return hashlib.sha256(
         value.encode("utf-8", "surrogatepass")
     ).hexdigest()[:12]
+
+
+def _php_header(value: str) -> str:
+    match = re.match(r"([aO]):(\d+):", value or "")
+    return f"{match.group(1)}:{match.group(2)}" if match else "unknown"
 
 
 def _redact_diagnostic_text(text: str, session: str = "") -> str:
@@ -512,6 +519,59 @@ class PocketOptionBridge:
         if cb is not None:
             await cb()
 
+    def _retry_with_forced_php_header(
+        self, exc: Exception, auth: dict, kwargs: Dict[str, object]
+    ):
+        """Last-resort a:5 retry after the Rust SDK rejects the session.
+
+        Normal normalization remains exact-count based. This only runs after
+        ``Failed to parse ssid``, so a valid four-field session (which still
+        parses normally) is never rewritten to an invalid a:5 body.
+        """
+        error_text = str(exc).lower()
+        if (
+            "failed to parse ssid" not in error_text
+            and "error parsing session data" not in error_text
+        ):
+            return None
+        session = auth.get("session")
+        if not isinstance(session, str) or not session:
+            return None
+        forced = force_php_array_header(session, 5)
+        if forced == session:
+            return None
+        before = _php_header(session)
+        after = _php_header(forced)
+        logger.warning(
+            "AUTH_FRAME_SESSION_MUTATED before=%s after=%s reason=sdk_parse_retry",
+            before,
+            after,
+        )
+        forced_auth = normalize_auth_fields(dict(auth))
+        forced_auth["session"] = forced
+        forced_payload = "42" + json.dumps(
+            ["auth", forced_auth], separators=(",", ":")
+        )
+        _emit_sdk_payload_diagnostics(forced_payload, forced_auth)
+        from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
+
+        try:
+            client = PocketOptionAsync(forced_payload, **kwargs)
+        except Exception as retry_exc:  # noqa: BLE001 - original error wins
+            logger.critical(
+                "AUTH_FRAME_RETRY_FAILED forced_header=%s error_type=%s error=%s",
+                after,
+                type(retry_exc).__name__,
+                _redact_diagnostic_text(str(retry_exc), forced),
+            )
+            return None
+        logger.warning(
+            "AUTH_FRAME_RETRY_RECOVERED forced_header=%s session_len=%d",
+            after,
+            len(forced),
+        )
+        return client
+
     async def _import_client(self):
         if self.client is not None:
             return self.client
@@ -592,6 +652,12 @@ class PocketOptionBridge:
         try:
             self.client = PocketOptionAsync(payload, **kwargs)
         except Exception as exc:
+            recovered = self._retry_with_forced_php_header(
+                exc, auth_dict, kwargs
+            )
+            if recovered is not None:
+                self.client = recovered
+                return self.client
             trace = _redact_diagnostic_text(
                 traceback.format_exc(), diag_session
             )

@@ -448,6 +448,27 @@ def _extract_php_session_text(value: str) -> str:
     return text
 
 
+def force_php_array_header(value: str, count: int = 5) -> str:
+    """Force a PHP array header while preserving the body and trailing hash.
+
+    This is intentionally NOT part of normal normalization: forcing the wrong
+    count corrupts the SDK parse. It exists only as a last-resort retry after
+    the SDK has rejected an otherwise normalized frame.
+    """
+    if count < 0:
+        raise ValueError("PHP array count must be non-negative")
+    text = _extract_php_session_text(value)
+    if not text or not re.match(r"(?:a|O):", text):
+        return text
+    data = text.encode("utf-8", "surrogatepass")
+    try:
+        start, end = _find_php_body(data)
+    except ValueError:
+        return text
+    forced = b"a:%d:{%s}" % (count, data[start + 1:end]) + data[end + 1:]
+    return forced.decode("utf-8", "surrogatepass")
+
+
 def normalize_php_session(value: str) -> str:
     """Unconditionally repair a PHP object/array session for the Rust SDK.
 

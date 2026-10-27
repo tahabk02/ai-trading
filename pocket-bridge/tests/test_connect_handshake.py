@@ -213,6 +213,50 @@ def test_sdk_init_exception_logs_trace_and_redacts_session(
     assert "device_id" not in err
 
 
+def test_sdk_parse_failure_retries_with_forced_a5(
+    monkeypatch, tmp_path, capsys, caplog
+):
+    from BinaryOptionsToolsV2 import PocketOptionError
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    stale_auth = {
+        "session": PHP_SSID_WITH_STALE_COUNT,
+        "uid": 12345678,
+        "isDemo": 0,
+        "platform": 2,
+    }
+    stale_payload = "42" + json.dumps(
+        ["auth", stale_auth], separators=(",", ":")
+    )
+
+    class _RetryClient:
+        instances: list = []
+
+        def __init__(self, payload, **kwargs):
+            self.payload = payload
+            self.session = json.loads(payload[2:])[1]["session"]
+            self.__class__.instances.append(self)
+            if self.session.startswith("a:4:"):
+                raise PocketOptionError(
+                    "Failed to parse ssid: Expected '}' but got 's'"
+                )
+
+    monkeypatch.setattr(po, "PocketOptionAsync", _RetryClient)
+    bridge = _bridge(monkeypatch, tmp_path)
+    monkeypatch.setattr(bridge, "_auth_dict", lambda: stale_auth)
+    monkeypatch.setattr(bridge, "_auth_payload", lambda: stale_payload)
+
+    with caplog.at_level(logging.WARNING, logger="pocket_bridge.bridge"):
+        client = asyncio.run(bridge._import_client())
+
+    assert client.session.startswith("a:5:{")
+    assert len(_RetryClient.instances) == 2
+    assert _RetryClient.instances[0].session.startswith("a:4:{")
+    assert "AUTH_FRAME_SESSION_MUTATED before=a:4 after=a:5" in caplog.text
+    assert "AUTH_FRAME_RETRY_RECOVERED forced_header=a:5" in caplog.text
+    assert "SDK_PAYLOAD_DIAG" in capsys.readouterr().err
+
+
 def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client):
     """Unset POCKET_OPTION_WS_URLS keeps the SDK's own streaming defaults
     (pinning url= previously killed the tick stream) while still shipping the

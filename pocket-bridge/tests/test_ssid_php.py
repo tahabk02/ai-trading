@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 from pocket_bridge.config import (
     auth_message,
+    force_php_array_header,
     normalize_php_session,
     parse_ssid,
 )
@@ -242,6 +243,12 @@ def test_url_encoded_php_session_is_repaired():
 
 def test_canonical_session_is_idempotent():
     assert normalize_php_session(CANONICAL) == CANONICAL
+
+
+def test_forced_header_preserves_body_and_trailing_hash():
+    forced = force_php_array_header(CANONICAL, 5)
+    assert forced == CANONICAL.replace("a:4:{", "a:5:{", 1)
+    assert forced.endswith(HASH)
 
 
 def test_unparseable_php_is_left_for_the_sdk_error():
