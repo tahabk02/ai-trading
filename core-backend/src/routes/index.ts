@@ -10,6 +10,7 @@ import tradesRoutes from "./trades.routes";
 import historyRoutes from "./history.routes";
 import signalOutcomeRoutes from "./signalOutcome.routes";
 import auditRoutes from "./audit.routes";
+import timeRoutes from "./time.routes";
 
 const router = Router();
 
@@ -25,5 +26,6 @@ router.use("/", tradesRoutes); // POST/GET /trades
 router.use("/", historyRoutes); // GET /history + /health/history (30-min data layer)
 router.use("/", signalOutcomeRoutes); // POST/GET /signal-outcomes + /signal-outcomes/stats
 router.use("/", auditRoutes); // GET /audit/execution-logs (PART 44 [456])
+router.use("/", timeRoutes); // GET /clock + /expiry/target (broker-clock aligned)
 
 export default router;

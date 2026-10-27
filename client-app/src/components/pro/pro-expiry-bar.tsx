@@ -13,6 +13,7 @@ import {
   type ExpiryOptionState,
 } from "@/lib/expirySelection";
 import { timeframeToSeconds } from "@/lib/realtimeCandleAggregator";
+import { clientClockSync } from "@/lib/timeSync";
 import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
 
 export const PRO_EXPIRY_OPTIONS = [
@@ -73,10 +74,13 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   const setSelectedHorizonMinutes = useTradingStore(
     (s) => s.setSelectedHorizonMinutes,
   );
+  const expiryTarget = useTradingStore((s) => s.expiryTarget);
+  const clockSync = useTradingStore((s) => s.clockSync);
 
   const [isMounted, setIsMounted] = useState(false);
   const [remainingS, setRemainingS] = useState<number>(expirationSeconds);
-  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [nowMs, setNowMs] = useState<number>(() => clientClockSync.now());
+  const [localNowMs, setLocalNowMs] = useState<number>(() => Date.now());
   const countdownAnchorRef = useRef(0);
 
   useEffect(() => {
@@ -84,24 +88,30 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   }, []);
 
   useEffect(() => {
-    const anchorMs = Date.now();
+    const anchorMs = clientClockSync.now();
     countdownAnchorRef.current = anchorMs;
     setRemainingS(
       expiryCountdownRemainingSeconds(anchorMs, anchorMs, expirationSeconds),
     );
     const iv = setInterval(() => {
-      const tickMs = Date.now();
+      const tickMs = clientClockSync.now();
+      const state = useTradingStore.getState();
+      let target = state.expiryTarget;
+      if (target?.actionable && tickMs >= target.expiresAtMs) {
+        state.refreshExpiryTarget();
+        target = useTradingStore.getState().expiryTarget;
+      }
       setRemainingS(
-        expiryCountdownRemainingSeconds(
-          tickMs,
-          countdownAnchorRef.current,
-          expirationSeconds,
-        ),
+        target?.actionable
+          ? Math.max(0, Math.ceil((target.expiresAtMs - tickMs) / 1000))
+          : expiryCountdownRemainingSeconds(
+              tickMs,
+              countdownAnchorRef.current,
+              expirationSeconds,
+            ),
       );
-      // PART 24 [161] — every 250ms tick re-evaluates the per-expiry action
-      // window against the SAME wall clock the countdown runs on, so the
-      // selector reflects the live "too late to act" boundary as it sweeps.
       setNowMs(tickMs);
+      setLocalNowMs(Date.now());
     }, 250);
     return () => clearInterval(iv);
   }, [expirationSeconds]);
@@ -164,6 +174,10 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
   // Status is reported for the horizon the operator actually SELECTED — not
   // preemptively for every option.
   const selectedOption = bySeconds.get(expirationSeconds as number) ?? null;
+  const clockFresh =
+    clockSync.calibrated &&
+    clockSync.lastSyncAtMs != null &&
+    localNowMs - clockSync.lastSyncAtMs <= 30_000;
 
   return (
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 bg-surface border border-line rounded-card w-full">
@@ -176,6 +190,32 @@ export const ProExpiryBar: React.FC<ProExpiryBarProps> = ({
           className="text-[10px] sm:text-[11px] font-black font-mono tabular-nums text-st-info bg-st-info/15 border border-st-info/40 rounded-md px-1.5 py-0.5"
         >
           {isMounted ? formatProCountdown(remainingS) : "--:--"}
+        </span>
+        <span
+          data-testid="pro-clock-status"
+          data-state={
+            !clockFresh
+              ? "local"
+              : expiryTarget?.actionable
+                ? "aligned"
+                : "locked_out"
+          }
+          title={
+            clockFresh
+              ? `Broker clock synced (${clockSync.offsetMs >= 0 ? "+" : ""}${clockSync.offsetMs}ms, ${clockSync.latencyMs ?? 0}ms RTT)`
+              : "Broker clock not calibrated or sync is stale - using local time"
+          }
+          className={`text-[9px] font-black uppercase tracking-wider rounded px-1.5 py-0.5 border ${
+            clockFresh && expiryTarget?.actionable
+              ? "text-st-pos border-st-pos/40 bg-st-pos/10"
+              : "text-st-warn border-st-warn/40 bg-st-warn/10"
+          }`}
+        >
+          {!clockFresh
+            ? "LOCAL"
+            : expiryTarget?.actionable
+              ? "ALIGNED"
+              : "NO WINDOW"}
         </span>
         {/* role=group + aria-pressed: a toggle group that is never disabled. */}
         <div

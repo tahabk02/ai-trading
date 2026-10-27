@@ -34,6 +34,7 @@ import { restoredFeedStatus } from "../lib/feedStatus";
 import { feedStateReporter, FeedStateReport } from "../lib/feedStateLog";
 import { feedMetrics } from "../lib/feedMetrics";
 import { isForexMarketClosed } from "../lib/marketSchedule";
+import { brokerClock } from "../lib/serverClock";
 
 export interface LiveMarketTick {
   symbol: string;
@@ -861,6 +862,18 @@ export class LiveTickIngestionService {
       }
     }
     const isPo = (source || "").toLowerCase() === "pocket_option";
+    if (isPo && resolvedTs) {
+      const brokerTsMs = Date.parse(resolvedTs);
+      const latencyMs =
+        diag?.receivedUtcMs != null && diag?.tsUtc != null
+          ? Math.max(0, diag.receivedUtcMs - diag.tsUtc)
+          : undefined;
+      brokerClock.observe({
+        brokerTsMs,
+        localReceivedMs: Date.now(),
+        latencyMs,
+      });
+    }
 
     const tick: LiveMarketTick = {
       symbol: norm,

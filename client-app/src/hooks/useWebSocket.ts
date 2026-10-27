@@ -225,6 +225,8 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
   const applyServerCandle = useTradingStore((state) => state.applyServerCandle);
   const seedServerCandles = useTradingStore((state) => state.seedServerCandles);
   const setFeedStatus = useTradingStore((state) => state.setFeedStatus);
+  const beginClockSync = useTradingStore((state) => state.beginClockSync);
+  const syncBrokerClock = useTradingStore((state) => state.syncBrokerClock);
   const selectedTimeframe = useTradingStore((state) => state.selectedTimeframe);
   const selectedHorizonMinutes = useTradingStore(
     (state) => state.selectedHorizonMinutes,
@@ -614,6 +616,11 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
       );
     };
     socket.on("feed_status", onFeedStatus);
+    const onTimeSync = (payload: unknown) => {
+      if (!payload || typeof payload !== "object") return;
+      syncBrokerClock(payload as Parameters<typeof syncBrokerClock>[0]);
+    };
+    socket.on("time_sync", onTimeSync);
 
     // ── FORCE INITIAL TICK HANDSHAKE (every "SYNCHRONISÉ") ──
     // The instant the transport reports a live connection, dispatch the
@@ -636,6 +643,7 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
       socket.off("candle", onCandle);
       socket.off("history_candles", onHistoryCandles);
       socket.off("feed_status", onFeedStatus);
+      socket.off("time_sync", onTimeSync);
       socket.off("connect", onConnected);
     };
   }, [
@@ -649,7 +657,25 @@ const lastSubscribedMinTierRef = useRef<SignalTier | null>(null);
     seedServerCandles,
     setFeedStatus,
     emitSubscribe,
+    syncBrokerClock,
   ]);
+
+  useEffect(() => {
+    if (!socket || !socketConnected) return;
+    const request = () => {
+      if (!socket.connected) return;
+      beginClockSync();
+      socket.emit("time_sync");
+    };
+    const warmupIds = [0, 600, 1_200].map((delay) =>
+      window.setTimeout(request, delay),
+    );
+    const id = window.setInterval(request, 20_000);
+    return () => {
+      for (const warmupId of warmupIds) window.clearTimeout(warmupId);
+      window.clearInterval(id);
+    };
+  }, [socket, socketConnected, beginClockSync]);
 
   // ── RECONNECT RESILIENCE ──
   // After every successful (re)connect, re-join the active symbol's room.

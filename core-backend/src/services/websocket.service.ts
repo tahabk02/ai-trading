@@ -508,6 +508,7 @@ export class WebSocketService {
       scored_only?: boolean;
       executable?: boolean;
       regime_gate?: string | null;
+      market_regime?: Record<string, unknown> | null;
       suppressed_reason?: string | null;
     }) {
     if (!this.io) return;

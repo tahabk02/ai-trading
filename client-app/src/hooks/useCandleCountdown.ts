@@ -28,6 +28,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { RealtimeCandleAggregator } from "@/lib/realtimeCandleAggregator";
+import { clientClockSync } from "@/lib/timeSync";
 
 export interface CandleCountdownState {
   /** Whole seconds remaining to the next rollover (0 when unmounted). */
@@ -42,6 +43,7 @@ export function useCandleCountdown(
   windowSeconds: number,
   tickMs = 250,
   aggregator?: RealtimeCandleAggregator | null,
+  targetExpiryMs?: number | null,
 ): CandleCountdownState {
   const [mounted, setMounted] = useState(false);
   const [remainingSeconds, setRemainingSeconds] = useState(0);
@@ -50,6 +52,7 @@ export function useCandleCountdown(
   const aggregatorRef = useRef<RealtimeCandleAggregator | null | undefined>(
     aggregator,
   );
+  const targetRef = useRef<number | null>(targetExpiryMs ?? null);
 
   useEffect(() => {
     windowRef.current = Math.max(1, Math.floor(windowSeconds) || 1);
@@ -58,6 +61,10 @@ export function useCandleCountdown(
   useEffect(() => {
     aggregatorRef.current = aggregator;
   }, [aggregator]);
+
+  useEffect(() => {
+    targetRef.current = targetExpiryMs ?? null;
+  }, [targetExpiryMs]);
 
   useEffect(() => {
     let interval = 0;
@@ -96,6 +103,17 @@ export function useCandleCountdown(
     const tick = () => {
       if (dispose) return;
       const win = windowRef.current;
+      const target = targetRef.current;
+      if (target != null && Number.isFinite(target) && target > 0) {
+        const nowMs = clientClockSync.now();
+        const remainMs = Math.max(0, target - nowMs);
+        const totalMs = Math.max(1, win * 1000);
+        setRemainingSeconds(Math.ceil(remainMs / 1000));
+        setProgressPct(
+          Math.min(1, Math.max(0, (totalMs - remainMs) / totalMs)),
+        );
+        return;
+      }
       const agg = readAggregator();
       if (agg) {
         // Bucket boundary — exact expiry against the aggregator's grid.
@@ -106,7 +124,7 @@ export function useCandleCountdown(
       // Fallback (no aggregator yet): epoch-aligned rollover on the minute
       // grid (Pocket-style :00/:01/:02...). For 1m this equals 60 − (s % 60);
       // for longer windows it tracks the instantly-fixed grid of the selection.
-      const nowMs = Date.now();
+      const nowMs = clientClockSync.now();
       const inWindow = nowMs % (win * 1000);
       const remainMs = (win * 1000 - inWindow) || win * 1000;
       const pct =

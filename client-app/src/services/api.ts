@@ -567,6 +567,7 @@ export interface TradeRequest {
   direction: "CALL" | "PUT";
   investment: number;
   expiration: number;
+  timeframeSeconds?: number;
 }
 
 export interface TradeResponse {

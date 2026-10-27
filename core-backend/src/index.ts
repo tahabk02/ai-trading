@@ -30,6 +30,7 @@ import { realtimeTickBuffer } from "./services/realtimeTickBuffer.service";
 import { buildMarketQuotesSnapshot } from "./services/marketQuotes.service";
 import { SOCKET_SERVER_OPTIONS } from "./config/socket.config";
 import { feedMetrics } from "./lib/feedMetrics";
+import { brokerClock } from "./lib/serverClock";
 import { createProcessErrorReporter } from "./lib/processErrorHandler";
 import { rateLimit } from "./middlewares/rateLimit.middleware";
 import { errorMiddleware } from "./middlewares/error.middleware";
@@ -306,6 +307,19 @@ io.on("connection", (socket) => {
     ip: socket.handshake.address,
     transport: socket.conn.transport.name,
   });
+
+  const emitTimeSync = () => {
+    const localNowMs = Date.now();
+    const snap = brokerClock.snapshot(localNowMs);
+    socket.emit("time_sync", {
+      ...snap,
+      brokerNowMs: brokerClock.now(localNowMs),
+      localNowMs,
+      timestamp: new Date(localNowMs).toISOString(),
+    });
+  };
+  socket.on("time_sync", emitTimeSync);
+  emitTimeSync();
 
   // ── feed_status ON CONNECT (MASTER MISSION part 2) ──
   // A fresh socket gets an immediate payload BEFORE its first subscribe: the

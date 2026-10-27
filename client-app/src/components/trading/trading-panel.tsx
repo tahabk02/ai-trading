@@ -35,6 +35,7 @@ import {
 import { expirySelectorState } from "@/lib/expirySelection";
 import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
 import { isPoOfflineOtc } from "@/lib/quoteProvenance";
+import { clientClockSync } from "@/lib/timeSync";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
 // Mirrors the backend PO expiration whitelist exactly (seconds). The chart
@@ -108,6 +109,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   const expirationSeconds = useTradingStore((s) => s.expirationSeconds);
   const countdownSeconds = useTradingStore((s) => s.countdownSeconds);
   const isTradeActive = useTradingStore((s) => s.isTradeActive);
+  const tradeExpiresAtMs = useTradingStore((s) => s.tradeExpiresAtMs);
   const lastTradeResult = useTradingStore((s) => s.lastTradeResult);
   const setExpirationSeconds = useTradingStore((s) => s.setExpirationSeconds);
   const selectedExpirationSeconds = useTradingStore(
@@ -151,14 +153,22 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
 
   useEffect(() => {
     if (isTradeActive) {
+      const syncedNowMs = clientClockSync.now();
       expiryDeadlineRef.current =
-        Date.now() + Math.max(1, selectedExpirationSeconds) * 1000;
-      setExpiryRemainingS(Math.max(1, selectedExpirationSeconds));
+        tradeExpiresAtMs != null && tradeExpiresAtMs > syncedNowMs
+          ? tradeExpiresAtMs
+          : syncedNowMs + Math.max(1, selectedExpirationSeconds) * 1000;
+      setExpiryRemainingS(
+        Math.max(
+          1,
+          Math.ceil((expiryDeadlineRef.current - syncedNowMs) / 1000),
+        ),
+      );
     } else {
       expiryDeadlineRef.current = null;
       setExpiryRemainingS(null);
     }
-  }, [isTradeActive, selectedExpirationSeconds]);
+  }, [isTradeActive, selectedExpirationSeconds, tradeExpiresAtMs]);
 
   useEffect(() => {
     if (!isMounted) return;
@@ -168,7 +178,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         setExpiryRemainingS(Math.max(60, selectedExpirationSeconds));
         return;
       }
-      const rem = Math.max(0, (deadline - Date.now()) / 1000);
+      const rem = Math.max(0, (deadline - clientClockSync.now()) / 1000);
       setExpiryRemainingS(rem);
       if (rem <= 0) expiryDeadlineRef.current = null;
     }, 250);
@@ -239,7 +249,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
     (predictionData as { suppressed_reason?: string | null } | null)
       ?.suppressed_reason ?? null,
     chartWindowSeconds,
-    Date.now(),
+    clientClockSync.now(),
     TIMER_OPTIONS,
     MIN_EXECUTABLE_TIER,
   );

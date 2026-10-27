@@ -11,6 +11,8 @@ import {
 } from "../lib/executionEngine";
 import { recordExecutionAudit } from "../lib/auditLogger";
 import type { RiskRuleSnapshot } from "../lib/auditLogger";
+import { brokerClock } from "../lib/serverClock";
+import { resolveExpiryTarget } from "../lib/expiryMapping";
 
 // ── In-memory trade store (replace with DB in production) ──
 interface TradeRecord {
@@ -45,6 +47,7 @@ export const executeTrade = async (req: Request, res: Response) => {
       direction?: "CALL" | "PUT";
       investment?: number;
       expiration?: number;
+      timeframeSeconds?: number;
       /** Optional ops/backtest dry-run override (PART 44 [455]). */
       dryRun?: boolean;
     };
@@ -118,6 +121,36 @@ export const executeTrade = async (req: Request, res: Response) => {
         "validation_error",
         'direction must be either "CALL" or "PUT".',
         { whitelistPassed: true },
+      );
+    }
+
+    const expirationSeconds = Number(expiration);
+    if (!Number.isFinite(expirationSeconds) || expirationSeconds <= 0) {
+      return reject(
+        400,
+        "validation_error",
+        "expiration must be a positive number of seconds.",
+        { whitelistPassed: true },
+      );
+    }
+    const requestedTimeframeSeconds = Number(body.timeframeSeconds);
+    const timeframeSeconds =
+      Number.isFinite(requestedTimeframeSeconds) &&
+      requestedTimeframeSeconds > 0
+        ? requestedTimeframeSeconds
+        : 60;
+    const preflightExpiryTarget = resolveExpiryTarget({
+      nowMs: brokerClock.now(),
+      expirationSeconds,
+      timeframeSeconds,
+    });
+    if (!preflightExpiryTarget.actionable) {
+      return reject(
+        409,
+        "expiry_locked_out",
+        `Expiry cannot be aligned to a candle close (${preflightExpiryTarget.lockReason ?? "locked_out"}). Choose a different expiry.`,
+        { whitelistPassed: true },
+        { expiryTarget: preflightExpiryTarget },
       );
     }
 
@@ -196,9 +229,24 @@ export const executeTrade = async (req: Request, res: Response) => {
           ? EXECUTION_PROVENANCE.HELD_PRICE
           : EXECUTION_PROVENANCE.NONE;
 
+    const expiryTarget = resolveExpiryTarget({
+      nowMs: brokerClock.now(),
+      expirationSeconds,
+      timeframeSeconds,
+    });
+    if (!expiryTarget.actionable) {
+      return reject(
+        409,
+        "expiry_locked_out",
+        `Expiry can no longer be aligned to a candle close (${expiryTarget.lockReason ?? "locked_out"}). Choose a different expiry.`,
+        riskRules,
+        { expiryTarget },
+      );
+    }
+
     tradeCounter++;
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiration * 1000);
+    const now = new Date(expiryTarget.nowMs);
+    const expiresAt = new Date(expiryTarget.expiresAtMs);
 
     const trade: TradeRecord = {
       id: `trade_${Date.now()}_${tradeCounter}`,
@@ -206,7 +254,7 @@ export const executeTrade = async (req: Request, res: Response) => {
       direction,
       investment: Math.round(investment),
       entry_price: entryPrice,
-      expiration,
+      expiration: expirationSeconds,
       payout: dynamicPayout,
       status: "OPEN",
       created_at: now.toISOString(),
@@ -222,7 +270,7 @@ export const executeTrade = async (req: Request, res: Response) => {
       provenance,
       latencyMs: Date.now() - t0,
       error: null,
-      result: trade,
+      result: { ...trade, expiry_target: expiryTarget },
     });
     recordExecutionAudit({
       source: "trade",

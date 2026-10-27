@@ -30,6 +30,15 @@ import {
   type TierSelection,
 } from "@/lib/signalTiers";
 import { ExpirySignalLock } from "@/lib/signalLock";
+import {
+  clientClockSync,
+  type ClientClockSnapshot,
+  type TimeSyncPayload,
+} from "@/lib/timeSync";
+import {
+  resolveExpiryTarget,
+  type ExpiryTarget,
+} from "@/lib/expiryTarget";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
 
 // ── localStorage key ──
@@ -394,6 +403,18 @@ function snapToNearestExpiration(seconds: number): POExpiration {
   return best as POExpiration;
 }
 
+export function computeClientExpiryTarget(
+  expirationSeconds: number,
+  timeframeSeconds: number,
+  nowMs: number = clientClockSync.now(),
+): ExpiryTarget {
+  return resolveExpiryTarget({
+    nowMs,
+    expirationSeconds,
+    timeframeSeconds,
+  });
+}
+
 export interface TradingState {
   feedStatus:
     | "awaiting_ssid"
@@ -526,6 +547,11 @@ export interface TradingState {
    *  persisted value is re-applied post-mount via hydrateLeadOffset(). */
   selectedLeadOffsetMs: number | null;
 
+  /** Latest broker-clock calibration snapshot shared by countdown + target UI. */
+  clockSync: ClientClockSnapshot;
+  /** Candle-boundary aligned expiry target for the selected projection expiry. */
+  expiryTarget: ExpiryTarget | null;
+
   /** Full list of available symbols for autocomplete search */
   symbolsList: SymbolEntry[];
 
@@ -629,7 +655,10 @@ export interface TradingState {
   flushPriceCache: () => void;
   fetchSymbols: () => Promise<void>;
   fetchRecentSignals: () => Promise<void>;
-  // ── Real-time aggregator actions ──
+  beginClockSync: () => void;
+  syncBrokerClock: (payload: TimeSyncPayload) => void;
+  refreshExpiryTarget: () => void;
+  // �� Real-time aggregator actions ��
   ingestLiveTick: (rawTick: unknown) => void;
   setAggregatorTimeframe: (timeframe: string) => void;
   hardResetLiveData: () => void;
@@ -973,6 +1002,8 @@ const lastRealtimePublish = new Map<string, number>();
     // server markup matches first paint; hydrateLeadOffset() re-applies the
     // user's persisted choice post-mount.
     selectedLeadOffsetMs: null,
+    clockSync: clientClockSync.snapshot(0),
+    expiryTarget: null,
     symbolsList: OTC_FOREX_PAIRS.map((p) => ({
       symbol: p.symbol,
       name: p.name,
@@ -1193,6 +1224,7 @@ const lastRealtimePublish = new Map<string, number>();
         quoteStreamWaiting: false,
         _priceVersion: state._priceVersion + 1,
       }));
+      get().refreshExpiryTarget();
 
       // ── SYNC AGGREGATOR TIMEFRAME ──
       // Re-bucket the retained real ticks immediately so the chart never
@@ -1680,6 +1712,7 @@ const lastRealtimePublish = new Map<string, number>();
       // target-price horizon on the chart — it NEVER changes the candle build
       // bucket (`selectedTimeframe`) or the trade execution expiry.
       set({ selectedExpirationSeconds: snapped });
+      get().refreshExpiryTarget();
     },
 
     executeTrade: async (direction: "CALL" | "PUT") => {
@@ -1888,14 +1921,29 @@ const lastRealtimePublish = new Map<string, number>();
       // PART 46 [518] — the same click stamps the optimistic entry price,
       // direction and absolute expiry consumed by the chart overlay; the
       // backend response reconciles the price/expiry below.
-      const entryEpochMs = Date.now();
+      const expiryNowMs = clientClockSync.now();
+      const tradeExpiryTarget = resolveExpiryTarget({
+        nowMs: expiryNowMs,
+        expirationSeconds,
+        timeframeSeconds: get().selectedTimeframeSeconds,
+      });
+      if (!tradeExpiryTarget.actionable) {
+        set({
+          lastTradeResult: `Expiry locked out (${tradeExpiryTarget.lockReason ?? "alignment"}). Choose a different expiry.`,
+        });
+        return;
+      }
+      const entryEpochMs = expiryNowMs;
       set({
         isTradeActive: true,
-        countdownSeconds: expirationSeconds,
+        countdownSeconds: Math.max(
+          1,
+          Math.ceil(tradeExpiryTarget.remainingMs / 1000),
+        ),
         tradeEntryEpochMs: entryEpochMs,
         tradeEntryPrice: currentPrice,
         tradeDirection: direction,
-        tradeExpiresAtMs: entryEpochMs + expirationSeconds * 1000,
+        tradeExpiresAtMs: tradeExpiryTarget.expiresAtMs,
       });
 
       const countdownInterval = setInterval(() => {
@@ -1921,6 +1969,7 @@ const lastRealtimePublish = new Map<string, number>();
           direction,
           investment: 0, // Signal-only mode — no investment amount
           expiration: expirationSeconds,
+          timeframeSeconds: get().selectedTimeframeSeconds,
         });
 
         const trade = execution.result;
@@ -2316,6 +2365,30 @@ const lastRealtimePublish = new Map<string, number>();
      * updates the in-progress OHLCV candle and fires onCandleClose on bucket
      * rollover, which triggers the async /predict dispatch.
      */
+    beginClockSync: () => {
+      clientClockSync.beginSync(Date.now());
+    },
+
+    syncBrokerClock: (payload: TimeSyncPayload) => {
+      const snap = clientClockSync.ingest(payload, Date.now());
+      const target = computeClientExpiryTarget(
+        get().selectedExpirationSeconds,
+        get().selectedTimeframeSeconds,
+      );
+      set({ clockSync: snap, expiryTarget: target });
+    },
+
+    refreshExpiryTarget: () => {
+      const target = computeClientExpiryTarget(
+        get().selectedExpirationSeconds,
+        get().selectedTimeframeSeconds,
+      );
+      set({
+        clockSync: clientClockSync.snapshot(),
+        expiryTarget: target,
+      });
+    },
+
     ingestLiveTick: (rawTick: unknown) => {
       const state = get();
       const norm = (state.activeSymbol || "").trim().toUpperCase();
@@ -2753,6 +2826,14 @@ export const selectSelectedTimeframe = (state: TradingState) =>
   state.selectedTimeframe;
 export const selectSelectedExpiration = (state: TradingState) =>
   state.selectedExpirationSeconds;
+export const selectClockSync = (state: TradingState) => state.clockSync;
+export const selectExpiryTarget = (state: TradingState) => state.expiryTarget;
+export const selectSyncBrokerClock = (state: TradingState) =>
+  state.syncBrokerClock;
+export const selectBeginClockSync = (state: TradingState) =>
+  state.beginClockSync;
+export const selectRefreshExpiryTarget = (state: TradingState) =>
+  state.refreshExpiryTarget;
 export const selectSetSelectedTimeframe = (state: TradingState) =>
   state.setSelectedTimeframe;
 export const selectSelectedHorizon = (state: TradingState) =>

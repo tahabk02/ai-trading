@@ -235,9 +235,8 @@ describe("PART 46 chart wiring (source-level)", () => {
     expect(store).toMatch(/tradeExpiresAtMs: number \| null/);
     expect(store).toMatch(/tradeEntryPrice: currentPrice/);
     expect(store).toMatch(/tradeDirection: direction/);
-    expect(store).toMatch(
-      /tradeExpiresAtMs: entryEpochMs \+ expirationSeconds \* 1000/,
-    );
+    expect(store).toMatch(/resolveExpiryTarget\(\{/);
+    expect(store).toMatch(/tradeExpiresAtMs: tradeExpiryTarget\.expiresAtMs/);
     // Broker response reconciliation, then cleared on every teardown path.
     expect(store).toMatch(/backendEntryPrice/);
     expect(store).toMatch(/backendExpiresAtMs/);

@@ -13,6 +13,7 @@ import { orderbookHealth } from "../controllers/orderbook.controller";
 import { historyCollector } from "../services/historyCollector.service";
 import packageJson from "../../package.json";
 import { allowedOrigins } from "../config/cors";
+import { buildClockSnapshot } from "./time.routes";
 
 // MASTER MISSION 1.3 — byte-truth service version read straight from the
 // built package (never a hand-edited duplicate string).
@@ -118,6 +119,9 @@ export const rootHealthRouter: Router = (() => {
   });
   r.get("/cors", (_req: Request, res: Response) => {
     res.json({ allowed: allowedOrigins });
+  });
+  r.get("/clock", (_req: Request, res: Response) => {
+    res.json(buildClockSnapshot());
   });
   r.get("/ai", async (_req: Request, res: Response) => {
     try {
@@ -442,6 +446,10 @@ function safeEqualString(a: string, b: string): boolean {
  * is "ok" while no upstream failure was recorded, "down" after a timeout /
  * upstream failure until the next successful call.
  */
+router.get("/clock", (_req: Request, res: Response) => {
+  res.json(buildClockSnapshot());
+});
+
 router.get("/orderbook", (_req: Request, res: Response) => {
   res.json({
     status: orderbookHealth.last_error == null ? "ok" : "down",

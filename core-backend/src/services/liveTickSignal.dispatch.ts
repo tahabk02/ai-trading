@@ -31,6 +31,10 @@ import type { SignalTier } from "../lib/signalTiers";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { publishDurableSignal } from "../messaging/signalStream";
 import { isAlertEligible } from "../lib/alertGate";
+import {
+  analyzeMarketRegime,
+  summarizeRegime,
+} from "../lib/marketRegime";
 
 const buildAiEngineTickSignalUrl = (baseUrl: string): string => {
   const cleaned = baseUrl.replace(/\/+$/, "");
@@ -312,6 +316,18 @@ public clearSelectedHorizonMinutes(symbol: string): void {
 
     const spread = realtimeTickBuffer.getLatestSpread(symbol);
     const prices = window.map((w) => Number(w.price));
+    const regime = analyzeMarketRegime({ symbol, prices });
+    if (regime.gate === "block") {
+      this.broadcastFallback(
+        symbol,
+        "REGIME_BLOCKED",
+        `${regime.regime}: ${regime.reason}`,
+        prices[prices.length - 1],
+        undefined,
+        summarizeRegime(regime),
+      );
+      return;
+    }
     // Forward the operator's selected expiry so the fast path scores the SAME
     // horizon as /predict. Absent → the engine's own default (never invented).
     const horizonMinutes = this.getSelectedHorizonMinutes(symbol);
@@ -336,6 +352,7 @@ public clearSelectedHorizonMinutes(symbol: string): void {
           : undefined,
       ...(horizonMinutes !== null ? { horizon_minutes: horizonMinutes } : {}),
       ...(minTier !== null ? { min_tier: minTier } : {}),
+      market_regime: summarizeRegime(regime),
     };
 
     try {
@@ -351,7 +368,10 @@ public clearSelectedHorizonMinutes(symbol: string): void {
           },
         },
       );
-      this.broadcast(symbol, data);
+      this.broadcast(symbol, {
+        ...data,
+        market_regime: summarizeRegime(regime),
+      });
     } catch (err) {
       // Fast-path failure is non-fatal — the next coalesced beat re-arms.
       logger.debug("[LiveTickDispatch] /tick-signal dispatch failed", {
@@ -421,6 +441,7 @@ public clearSelectedHorizonMinutes(symbol: string): void {
     detail: string,
     lastPrice?: number,
     aiEngine?: unknown,
+    marketRegime?: unknown,
   ): void {
     const price = lastPrice && Number.isFinite(lastPrice) ? lastPrice : 0;
     this.broadcast(symbol, {
@@ -429,6 +450,7 @@ public clearSelectedHorizonMinutes(symbol: string): void {
       waiting_detail: detail,
       current_price: price > 0 ? price : undefined,
       ...(aiEngine ? { aiEngine } : {}),
+      ...(marketRegime ? { market_regime: marketRegime } : {}),
     });
   }
 
@@ -517,6 +539,10 @@ public clearSelectedHorizonMinutes(symbol: string): void {
         executable: data?.executable === true,
         regime_gate:
           typeof data?.regime_gate === "string" ? data.regime_gate : null,
+        market_regime:
+          data?.market_regime && typeof data.market_regime === "object"
+            ? data.market_regime
+            : null,
         suppressed_reason:
           typeof data?.suppressed_reason === "string"
             ? data.suppressed_reason
