@@ -11,6 +11,7 @@ supported wrapper fallbacks.
 from __future__ import annotations
 
 import json
+import logging
 from urllib.parse import quote
 
 from pocket_bridge.config import (
@@ -99,6 +100,20 @@ STALE_STRING_LENGTH_FIXED = (
     's:13:"last_activity";i:1732926685;}'
 ) + HASH
 
+#: A camelCase key plus an unknown PHP value type defeats the old
+#: snake_case-only fallback regex. The forced scanner must count five entries.
+CAMEL_CASE_UNKNOWN_VALUE = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;'
+    's:8:"deviceId";C:5:"Extra":3:{abc}}'
+) + HASH
+
+CAMEL_CASE_UNKNOWN_FIXED = CAMEL_CASE_UNKNOWN_VALUE.replace("a:4:{", "a:5:{", 1)
+
+EMBEDDED_SESSION = "cookie=ssid=" + MISMATCHED_264
+
 
 def _frame(session: str, **overrides) -> str:
     auth = {
@@ -147,6 +162,18 @@ def test_stale_php_string_length_is_recalculated():
     assert normalized == STALE_STRING_LENGTH_FIXED
 
 
+def test_forced_fallback_counts_camel_case_keys_and_unknown_values():
+    normalized = normalize_php_session(CAMEL_CASE_UNKNOWN_VALUE)
+    assert normalized == CAMEL_CASE_UNKNOWN_FIXED
+    assert normalized.endswith(HASH)
+
+
+def test_embedded_session_is_extracted_and_repaired():
+    assert normalize_php_session(EMBEDDED_SESSION) == MISMATCHED_264.replace(
+        "a:4:{", "a:5:{", 1
+    )
+
+
 def test_raw_php_session_is_wrapped_with_real_account_metadata(monkeypatch):
     monkeypatch.setenv("POCKET_OPTION_UID", "12345678")
     monkeypatch.setenv("POCKET_OPTION_IS_DEMO", "0")
@@ -170,6 +197,10 @@ def test_full_frame_with_mismatched_php_session_is_normalized(monkeypatch):
     assert isinstance(auth["isDemo"], int)
 
 
+def test_normalizer_strips_a_full_socketio_frame():
+    assert normalize_php_session(_frame(MISMATCHED)) == MISMATCHED_FIXED
+
+
 def test_auth_message_never_forwards_the_bad_php_count():
     payload = auth_message(
         {"session": MISMATCHED, "uid": "12345678", "isDemo": "0", "platform": 2}
@@ -177,6 +208,17 @@ def test_auth_message_never_forwards_the_bad_php_count():
     parsed = json.loads(payload[2:])
     assert parsed[0] == "auth"
     assert parsed[1]["session"] == MISMATCHED_FIXED
+
+
+def test_auth_message_logs_the_forced_header_mutation(caplog):
+    with caplog.at_level(logging.WARNING, logger="pocket_bridge.config"):
+        payload = auth_message(
+            {"session": MISMATCHED, "uid": 12345678, "isDemo": 0, "platform": 2}
+        )
+
+    assert "PHP_SESSION_NORMALIZED - header=a:4 corrected=a:5" in caplog.text
+    assert "AUTH_FRAME_SESSION_MUTATED before=a:4 after=a:5" in caplog.text
+    assert json.loads(payload[2:])[1]["session"] == MISMATCHED_FIXED
 
 
 def test_frame_metadata_wins_over_a_broken_env_fallback(monkeypatch):

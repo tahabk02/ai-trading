@@ -225,7 +225,6 @@ class _PhpSessionParser:
         return entries, self.data[self.pos:]
 
 
-_PHP_SESSION_KEY_TOKEN = re.compile(rb's:\d+:"[a-z]+(?:_[a-z]+)+";')
 _PHP_REQUIRED_SESSION_FIELDS = frozenset(
     {
         b"session_id",
@@ -246,11 +245,103 @@ def _php_session_header(text: str) -> str:
     return f"{match.group(1)}:{match.group(2)}" if match else "unknown"
 
 
-def _replace_php_count(data: bytes, actual: int) -> bytes:
-    colon = data.find(b":", 2)
-    if colon < 0 or not data[2:colon].isdigit():
-        raise ValueError("invalid PHP session array header")
-    return b"a:%d" % actual + data[colon:]
+def _find_php_body(data: bytes) -> tuple[int, int]:
+    """Return the opening/closing brace indexes of the first PHP body."""
+    start = data.find(b"{")
+    if start < 0:
+        raise ValueError("missing PHP session body")
+    depth = 0
+    in_string = False
+    for index in range(start, len(data)):
+        char = data[index]
+        if in_string:
+            if char == 0x22:  # double quote
+                in_string = False
+            continue
+        if char == 0x22:
+            in_string = True
+        elif char == 0x7B:  # {
+            depth += 1
+        elif char == 0x7D:  # }
+            depth -= 1
+            if depth == 0:
+                return start, index
+    raise ValueError("unterminated PHP session body")
+
+
+def _skip_php_string(data: bytes, index: int) -> int:
+    if not data.startswith(b"s:", index):
+        raise ValueError("expected PHP string token")
+    colon = data.find(b":", index + 2)
+    if colon < 0 or not data[index + 2:colon].isdigit():
+        raise ValueError("invalid PHP string length")
+    length = int(data[index + 2:colon])
+    quote = colon + 1
+    if quote >= len(data) or data[quote:quote + 1] != b'"':
+        raise ValueError("invalid PHP string opening quote")
+    content = quote + 1
+    expected = content + length
+    if expected + 2 <= len(data) and data[expected:expected + 2] == b'";':
+        return expected + 2
+    closing = data.find(b'";', content)
+    if closing < 0:
+        raise ValueError("unterminated PHP string")
+    return closing + 2
+
+
+def _skip_php_value(data: bytes, index: int) -> int:
+    if data.startswith(b"s:", index):
+        return _skip_php_string(data, index)
+    if data.startswith((b"i:", b"d:", b"b:"), index):
+        end = data.find(b";", index)
+        if end < 0:
+            raise ValueError("unterminated PHP scalar")
+        return end + 1
+    if data.startswith(b"N;", index):
+        return index + 2
+    if data.startswith((b"a:", b"O:", b"C:"), index):
+        _, end = _find_php_body(data[index:])
+        next_index = index + end + 1
+        if data[next_index:next_index + 1] == b";":
+            next_index += 1
+        return next_index
+    if data.startswith((b"R:", b"r:"), index):
+        end = data.find(b";", index)
+        if end < 0:
+            raise ValueError("unterminated PHP reference")
+        return end + 1
+    end = data.find(b";", index)
+    if end < 0:
+        raise ValueError("unknown PHP value")
+    return end + 1
+
+
+def _count_php_top_level_keys(data: bytes) -> int:
+    """Count direct key/value entries, independent of nested values/types."""
+    start, end = _find_php_body(data)
+    index = start + 1
+    count = 0
+    while index < end:
+        while index < end and data[index] in b" \t\r\n":
+            index += 1
+        if index >= end:
+            break
+        if data.startswith(b"s:", index):
+            index = _skip_php_string(data, index)
+        elif data.startswith(b"i:", index):
+            end_key = data.find(b";", index)
+            if end_key < 0 or end_key > end:
+                raise ValueError("unterminated PHP integer key")
+            index = end_key + 1
+        else:
+            raise ValueError("unexpected PHP session key token")
+        count += 1
+        while index < end and data[index] in b" \t\r\n":
+            index += 1
+        if index >= end:
+            raise ValueError("PHP session key without value")
+        index = _skip_php_value(data, index)
+    return count
 
 
 def _serialize_php_value(value: object) -> bytes:
@@ -289,51 +380,96 @@ def _fix_php_session(text: str) -> tuple[str, _PhpSessionParser]:
 
 
 def _fix_php_session_count_fallback(text: str) -> str:
-    """Regex fallback for sessions the strict parser cannot tokenize.
+    """Force an exact header count when the strict parser cannot tokenize.
 
-    Counts top-level snake_case keys (``session_id``, ``device_id``, ...)
-    rather than every ``s:`` token so ordinary string values do not inflate
-    the count. The strict parser remains the primary path; this only runs when
-    an unknown PHP value type blocks full tokenization.
+    Counts direct top-level key/value entries with a brace/string-aware
+    scanner, so nested arrays, objects, camelCase keys and unknown value types
+    cannot inflate or suppress the count. The original body is preserved.
     """
     data = text.encode("utf-8", "surrogatepass")
-    start = data.find(b"{")
-    end = data.rfind(b"}")
-    if start < 0 or end <= start:
-        raise ValueError("unterminated PHP session array")
+    start, end = _find_php_body(data)
     body = data[start + 1:end]
-    if b'"session_id"' not in body:
-        raise ValueError("missing PHP session_id")
-    actual = len(_PHP_SESSION_KEY_TOKEN.findall(body))
-    if actual < 2:
+    missing = [
+        field.decode("ascii")
+        for field in _PHP_REQUIRED_SESSION_FIELDS
+        if b'"' + field + b'"' not in body
+    ]
+    if missing:
+        raise ValueError(
+            "incomplete PHP session (missing " + ", ".join(sorted(missing)) + ")"
+        )
+    actual = _count_php_top_level_keys(data)
+    if actual < len(_PHP_REQUIRED_SESSION_FIELDS):
         raise ValueError("could not count PHP session entries")
-    return _replace_php_count(data, actual).decode("utf-8", "surrogatepass")
+    normalized = b"a:%d:{%s}" % (actual, body) + data[end + 1:]
+    return normalized.decode("utf-8", "surrogatepass")
+
+
+def _extract_php_session_text(value: str) -> str:
+    """Strip wrappers/escaping and locate the actual PHP session header."""
+    text = (value or "").lstrip("\ufeff").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    if not text:
+        return text
+    if text.startswith("42["):
+        text = text[2:].strip()
+    if text.startswith(("[", "{")):
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, list) and len(parsed) >= 2:
+            if parsed[0] == "auth" and isinstance(parsed[1], dict):
+                parsed = parsed[1]
+            elif (
+                len(parsed) >= 3
+                and parsed[0] in ("42", 42)
+                and parsed[1] == "auth"
+                and isinstance(parsed[2], dict)
+            ):
+                parsed = parsed[2]
+        if isinstance(parsed, dict):
+            for key in ("session", "ssid"):
+                if isinstance(parsed.get(key), str) and parsed[key].strip():
+                    text = parsed[key].strip()
+                    break
+    if not re.match(r"(?:a|O):", text):
+        if "%3" in text.upper():
+            try:
+                from urllib.parse import unquote
+
+                text = unquote(text)
+            except Exception:  # noqa: BLE001 - best-effort unwrapping
+                pass
+        match = re.search(r"(?:a|O):\d+:", text)
+        if match:
+            text = text[match.start():]
+    return text
 
 
 def normalize_php_session(value: str) -> str:
-    """Repair a PHP object/array session for the SDK's Rust parser.
+    """Unconditionally repair a PHP object/array session for the Rust SDK.
 
-    Corrects stale ``a:N`` counts, converts PHP objects (including nested
-    object-valued fields) to arrays, and rewrites string byte-lengths from the
-    actual quoted payload. Handles JSON-escaped quotes copied from a captured
-    frame and URL-encoded cookie values. A value that cannot be parsed is
-    returned unchanged so the SDK remains the final authority.
+    Strips outer wrappers, corrects stale ``a:N`` counts, converts PHP objects
+    (including nested object-valued fields) to arrays, rewrites string
+    byte-lengths from the actual quoted payload, and preserves the trailing
+    32-hex hash. The strict parser is primary; a top-level key scanner forces
+    the exact count when an unknown value type blocks full tokenization. A value
+    that cannot be identified as a PHP session is returned unchanged.
     """
-    text = (value or "").strip()
-    if not re.match(r"(?:a|O):", text) and not re.match(
-        r"(?:a|O)%3", text, re.IGNORECASE
-    ):
+    text = _extract_php_session_text(value)
+    if not text or not re.match(r"(?:a|O):", text):
         return text
     candidates = []
     if '\\"' in text:
-        candidates.append(text.replace('\\"', '"').replace("\\\\", "\\"))
-    if re.match(r"(?:a|O)%3", text, re.IGNORECASE):
-        try:
-            from urllib.parse import unquote
-
-            candidates.append(unquote(text))
-        except Exception:  # noqa: BLE001 - best-effort normalization
-            pass
+        unescaped = text
+        for _ in range(3):
+            repaired = unescaped.replace('\\"', '"').replace("\\\\", "\\")
+            if repaired == unescaped:
+                break
+            unescaped = repaired
+            candidates.append(unescaped)
     candidates.append(text)
     seen = set()
     for candidate in candidates:
@@ -342,28 +478,29 @@ def normalize_php_session(value: str) -> str:
         seen.add(candidate)
         try:
             normalized, parser = _fix_php_session(candidate)
-        except (TypeError, ValueError) as exc:
-            # Only fall back for value types the strict tokenizer does not
-            # know. A malformed string length/sheared token is not something a
-            # header rewrite can fix, and rewriting it would corrupt input.
-            if (
-                "unsupported PHP session value" not in str(exc)
-                or candidate.startswith("O:")
-            ):
-                continue
+        except (TypeError, ValueError):
             try:
                 normalized = _fix_php_session_count_fallback(candidate)
             except (TypeError, ValueError):
                 continue
             parser = None
+        before_header = _php_session_header(text)
+        after_header = _php_session_header(normalized)
         if normalized != text:
-            logger.info(
-                "PHP_SESSION_NORMALIZED - header=%s corrected=a:%s "
-                "container=%s strings_repaired=%s (all session fields preserved)",
-                _php_session_header(candidate),
-                _php_declared_count(normalized),
-                parser.container_kind if parser else "array",
+            logger.warning(
+                "PHP_SESSION_NORMALIZED - header=%s corrected=%s "
+                "container=%s strings_repaired=%s "
+                "(all session fields preserved)",
+                before_header,
+                after_header,
+                parser.container_kind if parser else "forced-count",
                 parser.repaired_strings if parser else False,
+            )
+        else:
+            logger.debug(
+                "PHP_SESSION_VERIFIED header=%s count=%s",
+                after_header,
+                _php_declared_count(normalized),
             )
         return normalized
     return text
@@ -489,9 +626,34 @@ def parse_ssid(value: str) -> dict:
 
 
 def auth_message(auth: dict) -> str:
-    """Serialize the ONLY frame BinaryOptionsToolsV2 accepts for auth."""
+    """Serialize the ONLY frame BinaryOptionsToolsV2 accepts for auth.
+
+    The session is normalized one final time HERE, synchronously at the
+    packaging boundary, so no caller can hand a stale PHP header to the SDK.
+    """
+    raw_session = auth.get("session") if isinstance(auth, dict) else ""
+    before = _php_session_header(raw_session) if isinstance(raw_session, str) else "unknown"
+    normalized = normalize_auth_fields(auth)
+    session = normalized.get("session")
+    if isinstance(session, str) and session:
+        session = normalize_php_session(session)
+        normalized["session"] = session
+        after = _php_session_header(session)
+        if before != after:
+            logger.warning(
+                "AUTH_FRAME_SESSION_MUTATED before=%s after=%s len=%d",
+                before,
+                after,
+                len(session),
+            )
+        logger.info(
+            "AUTH_FRAME_PACKAGED session_header=%s declared=%s len=%d",
+            after,
+            _php_declared_count(session),
+            len(session),
+        )
     return "42" + json.dumps(
-        ["auth", normalize_auth_fields(auth)],
+        ["auth", normalized],
         separators=(",", ":"),
     )
 
