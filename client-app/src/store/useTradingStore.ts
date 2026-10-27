@@ -423,6 +423,11 @@ export interface TradingState {
     | "live"
     | "stalled"
     | "disconnected";
+  /**
+   * Backend-authoritative PO bridge liveness. Unlike `feedStatus`, this is
+   * never set by a single price tick, so a proxy print cannot claim PO online.
+   */
+  poBridgeOnline: boolean;
   /** Currently selected trading symbol */
   activeSymbol: string;
 
@@ -969,6 +974,7 @@ const lastRealtimePublish = new Map<string, number>();
     // ── State defaults ──
     activeSymbol: DEFAULT_SYMBOL, // "EUR/USD" — strict OTC whitelist default
     feedStatus: "awaiting_ssid",
+    poBridgeOnline: false,
     currentPrice: 0,
     lastPriceUpdate: null,
     predictionData: null,
@@ -2404,7 +2410,8 @@ const lastRealtimePublish = new Map<string, number>();
       set({ feedStatus: "live" });
     },
 
-    setFeedStatus: (status) => set({ feedStatus: status }),
+    setFeedStatus: (status) =>
+      set({ feedStatus: status, poBridgeOnline: status === "live" }),
 
     /**
      * Switch the aggregator timeframe — re-buckets retained real ticks
@@ -2495,6 +2502,7 @@ const lastRealtimePublish = new Map<string, number>();
         predictionBySymbol: {},
         currentPrice: 0,
         feedStatus: "awaiting_ssid",
+        poBridgeOnline: false,
         lastPriceUpdate: null,
         lastQuantDispatch: null,
         quoteStreamWaiting: false,

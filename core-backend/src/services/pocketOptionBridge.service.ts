@@ -46,6 +46,10 @@ import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { websocketService } from "./websocket.service";
 import { symbolRegistry } from "./symbolRegistry.service";
 import { poAuthManager } from "./poAuthManager";
+import {
+  deriveBridgeFeedStatus,
+  type BridgeFeedStatus,
+} from "../lib/bridgeFeedStatus";
 
 // ─── Bridge Process Constants ───
 const BRIDGE_PYTHON_MODULE = "pocket_bridge.main";
@@ -71,16 +75,10 @@ const READINESS_FALLBACK_MS = 5_000;
 // HEARTBEAT_STALE_MS means the feed is dead even if the WS transport is still
 // up — the client is told `disconnected` (never fabricated live). Keep this
 // above two heartbeat windows so one slow probe can never flicker the UI.
+type FeedStatus = BridgeFeedStatus;
+
 const HEARTBEAT_STALE_MS = 70_000;
 const FEED_STATUS_WATCHDOG_MS = 5_000;
-
-type FeedStatus =
-  | "live"
-  | "stalled"
-  | "disconnected"
-  | "awaiting_ssid"
-  | "auth_failed"
-  | "degraded";
 
 interface BridgeTickFrame {
   symbol: string;
@@ -308,18 +306,18 @@ export class PocketOptionBridgeService {
     // ticks never arrive. An SSID is never forged or validated beyond
     // presence — the bridge/server probes the live session itself.
     const ssid = secrets.POCKET_OPTION_SSID || "";
+    const ssidFile = (secrets.POCKET_OPTION_SSID_FILE || "").trim();
     const ssidPresent = typeof ssid === "string" && ssid.trim().length > 0;
-    if (!ssidPresent) {
+    if (!ssidPresent && !ssidFile) {
       logger.warn(
-        "[PO Bridge] POCKET_OPTION_SSID is not set — running in awaiting_ssid state (real PO live ticks disabled; no fabricated prices). Set POCKET_OPTION_SSID to enable the PO SSOT tier.",
+        "[PO Bridge] POCKET_OPTION_SSID is not set — running in awaiting_ssid state (real PO live ticks disabled; no fabricated prices). Set POCKET_OPTION_SSID or POCKET_OPTION_SSID_FILE to enable the PO SSOT tier.",
       );
     } else {
       logger.info(
-        "[PO Bridge] POCKET_OPTION_SSID is configured — PO SSOT tier enabled",
-        {
-          ssidLength: ssid.length,
-          ssidPrefix: `${ssid.slice(0, 8)}…`,
-        },
+        "[PO Bridge] Pocket Option credentials are configured — PO SSOT tier enabled",
+        ssidFile
+          ? { source: "file", file: ssidFile }
+          : { source: "env", ssidLength: ssid.length },
       );
     }
 
@@ -765,7 +763,10 @@ export class PocketOptionBridgeService {
 
     this.ws.on("open", () => {
       this.connected = true;
-      this.lastStatus = "ONLINE";
+      // The relay transport is reachable, NOT yet authenticated with PO.
+      // `live` is only set by a connected status/heartbeat or a real tick.
+      this.lastRelayStatus = "connecting";
+      this.lastStatus = "DEGRADED";
       this.wsErrorSeen = false;
       this.recordReconnectSuccess();
       logger.info("[PO Bridge] Connected to Pocket Option relay", {
@@ -915,6 +916,7 @@ export class PocketOptionBridgeService {
       });
       return;
     }
+    this.markBridgeLiveFromTick();
     // Forward the PO server timestamp so the candle buffer and tick stream
     // align exactly with Pocket Option's own chart grid — zero divergence.
     const tsMs = toFiniteNumber(tick.ts_ms);
@@ -939,6 +941,17 @@ export class PocketOptionBridgeService {
     );
   }
 
+  /** A genuine PO tick is the strongest proof of auth/live state. */
+  private markBridgeLiveFromTick(): void {
+    const changed =
+      this.lastRelayStatus !== "connected" || this.lastStatus !== "ONLINE";
+    this.lastRelayStatus = "connected";
+    this.lastStatus = "ONLINE";
+    // A tick is proof the relay is alive even if one heartbeat frame is late.
+    this.lastHeartbeatAt = Date.now();
+    if (changed) this.broadcastFeedStatusIfChanged();
+  }
+
   private handleCandle(candle: BridgeCandleFrame): void {
     if (!candle || typeof candle.symbol !== "string" || !candle.symbol) return;
     try {
@@ -956,6 +969,11 @@ export class PocketOptionBridgeService {
   private handleReady(payload?: { assets?: unknown[] }): void {
     if (Array.isArray(payload?.assets) && payload.assets.length > 0) {
       symbolRegistry.replaceFromBridgeAssets(payload.assets);
+    }
+    this.lastRelayStatus = "connected";
+    if (this.lastStatus !== "ONLINE") {
+      this.lastStatus = "ONLINE";
+      this.broadcastFeedStatusIfChanged();
     }
     if (this.readyFallbackTimer) {
       clearTimeout(this.readyFallbackTimer);
@@ -980,6 +998,15 @@ export class PocketOptionBridgeService {
 
     if (status === "awaiting_ssid") {
       this.lastStatus = "awaiting_ssid";
+      this.broadcastFeedStatusIfChanged();
+      return;
+    }
+    if (
+      status === "connecting" ||
+      status === "authenticating" ||
+      status === "authing"
+    ) {
+      this.lastStatus = "DEGRADED";
       this.broadcastFeedStatusIfChanged();
       return;
     }
@@ -1031,7 +1058,12 @@ export class PocketOptionBridgeService {
       else if (
         payload.status === "connection_error" ||
         payload.status === "disconnected" ||
-        payload.status === "stalled"
+        payload.status === "stopped" ||
+        payload.status === "stalled" ||
+        payload.status === "connecting" ||
+        payload.status === "authenticating" ||
+        payload.status === "authing" ||
+        payload.status === "session_expired"
       ) {
         this.lastStatus = "DEGRADED";
       }
@@ -1042,20 +1074,14 @@ export class PocketOptionBridgeService {
   /** Map current bridge state → the mission feed-status contract. 100% real:
    *  grounded on the raw relay status + heartbeat age, never fabricated. */
   private computeFeedStatus(): FeedStatus {
-    if (this.permanentlyDegraded) return "degraded";
-    if (
-      this.lastHeartbeatAt > 0 &&
-      Date.now() - this.lastHeartbeatAt > HEARTBEAT_STALE_MS
-    ) {
-      return "disconnected";
-    }
-    if (this.lastRelayStatus === "awaiting_ssid") return "awaiting_ssid";
-    if (this.lastRelayStatus === "session_expired") return "auth_failed";
-    if (this.lastRelayStatus === "stalled") return "stalled";
-    if (this.lastStatus === "ONLINE" || this.connected) return "live";
-    if (this.lastStatus === "DEGRADED") return "degraded";
-    if (this.lastStatus === "awaiting_ssid") return "awaiting_ssid";
-    return "awaiting_ssid";
+    return deriveBridgeFeedStatus({
+      permanentlyDegraded: this.permanentlyDegraded,
+      lastHeartbeatAt: this.lastHeartbeatAt,
+      nowMs: Date.now(),
+      heartbeatStaleMs: HEARTBEAT_STALE_MS,
+      lastRelayStatus: this.lastRelayStatus,
+      lastStatus: this.lastStatus,
+    });
   }
 
   /**

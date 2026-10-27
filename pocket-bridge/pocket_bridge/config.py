@@ -347,6 +347,103 @@ def encrypt_session_data(text: str) -> str:
     return "FERNET:" + f.encrypt(text.encode("utf-8")).decode("ascii")
 
 
+SSID_FILE_ENV = "POCKET_OPTION_SSID_FILE"
+_SSID_JSON_KEYS = ("POCKET_OPTION_SSID", "ssid", "value")
+
+
+def normalize_ssid_value(value: str) -> str:
+    """Trim file/env wrapping without touching the session frame internals."""
+    text = (value or "").lstrip("\ufeff").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    return text
+
+
+def _decode_ssid_payload(raw: str, depth: int = 0) -> str:
+    """Decode a raw/file SSID payload, including optional wrapper/encryption.
+
+    The frame is never rebuilt or unescaped here: a raw file is byte-faithful
+    apart from a BOM, surrounding whitespace and optional outer quotes. JSON
+    object wrappers (``{"ssid": "..."}`` / ``{"POCKET_OPTION_SSID": "..."}``)
+    and Fernet-encrypted values are accepted for mounted secrets.
+    """
+    if depth > 3:
+        raise ValueError("POCKET_OPTION_SSID_FILE wrapper nesting is too deep")
+    text = normalize_ssid_value(raw)
+    if not text:
+        return ""
+    if text.startswith("FERNET:"):
+        decrypted = decrypt_session_data(text)
+        if decrypted == text:
+            raise ValueError(
+                "POCKET_OPTION_SSID_FILE is encrypted but PO_SESSION_KEY is "
+                "missing or invalid"
+            )
+        return _decode_ssid_payload(decrypted, depth + 1)
+    if text.startswith("{"):
+        try:
+            wrapped = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "POCKET_OPTION_SSID_FILE looks like JSON but is malformed"
+            ) from exc
+        if not isinstance(wrapped, dict):
+            raise ValueError(
+                "POCKET_OPTION_SSID_FILE JSON must be an object wrapper"
+            )
+        session = wrapped.get("session")
+        if isinstance(session, str) and session.strip():
+            auth_fields = {
+                key: wrapped[key]
+                for key in (
+                    "session",
+                    "uid",
+                    "isDemo",
+                    "platform",
+                    "isFastHistory",
+                    "isOptimized",
+                )
+                if key in wrapped
+            }
+            if len(auth_fields) > 1:
+                return auth_message(auth_fields)
+            return _decode_ssid_payload(session, depth + 1)
+        for key in _SSID_JSON_KEYS:
+            value = wrapped.get(key)
+            if isinstance(value, str) and value.strip():
+                return _decode_ssid_payload(value, depth + 1)
+        raise ValueError(
+            "POCKET_OPTION_SSID_FILE JSON must contain "
+            "POCKET_OPTION_SSID/ssid/session/value"
+        )
+    return text
+
+
+def read_ssid_file(path: str | Path) -> str:
+    """Read the exact SSID payload from a mounted/read-only secret FILE."""
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = POCKET_BRIDGE_ROOT / resolved
+    try:
+        raw = resolved.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise ValueError(
+            f"POCKET_OPTION_SSID_FILE cannot be read: {resolved}"
+        ) from exc
+    value = _decode_ssid_payload(raw)
+    if not value:
+        raise ValueError(f"POCKET_OPTION_SSID_FILE is empty: {resolved}")
+    return value
+
+
+def load_ssid() -> str:
+    """Resolve the SSID from a file FIRST, then the legacy environment value."""
+    file_path = (os.getenv(SSID_FILE_ENV, "") or "").strip()
+    if file_path:
+        return read_ssid_file(file_path)
+    return _decode_ssid_payload(os.getenv("POCKET_OPTION_SSID", "") or "")
+
+
 def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     """Write ``text`` to ``path`` atomically; mask world-read on POSIX (0600)."""
     path = Path(path)
@@ -393,6 +490,25 @@ def write_env_ssid(env_path: Path, ssid: str) -> None:
     if not replaced:
         out.append(quoted)
     atomic_write_text(env_path, "\n".join(out) + "\n")
+
+    file_path = (os.getenv(SSID_FILE_ENV, "") or "").strip()
+    if not file_path or not value:
+        return
+    target = Path(file_path).expanduser()
+    if not target.is_absolute():
+        target = POCKET_BRIDGE_ROOT / target
+    if target.resolve() == env_path.resolve():
+        return
+    try:
+        atomic_write_text(target, value + "\n")
+    except OSError as exc:
+        logger.warning(
+            "POCKET_OPTION_SSID_FILE is not writable (%s) - rotated SSID "
+            "persisted to %s only; update the mounted file before the next "
+            "restart",
+            target,
+            env_path,
+        )
 
 
 def read_env_ssid(env_path: Path) -> str:
@@ -757,12 +873,7 @@ class BridgeSettings:
     """Resolved runtime settings for the bridge process."""
 
     #: Full `42["auth",{...}]` session cookie for BinaryOptionsToolsV2.
-    ssid: str = field(
-        default_factory=lambda: (os.getenv("POCKET_OPTION_SSID", "") or "")
-        .strip()
-        .strip("'\"")
-        .strip()
-    )
+    ssid: str = field(default_factory=load_ssid)
 
     auth: dict = field(init=False, repr=False)
 
@@ -910,6 +1021,15 @@ class BridgeSettings:
     @property
     def has_ssid(self) -> bool:
         return bool(self.ssid and self.ssid.strip())
+
+    @property
+    def ssid_source(self) -> str:
+        """Where boot credentials came from: file, env, or the session file."""
+        if (os.getenv(SSID_FILE_ENV, "") or "").strip():
+            return "file"
+        if self.ssid.strip():
+            return "env"
+        return "session"
 
     @property
     def ssid_format(self) -> str:

@@ -306,6 +306,7 @@ class PocketOptionBridge:
             "status": status,
             "ssid_present": self.has_credential,
             "ssid_format": self.settings.ssid_format,
+            "ssid_source": self.settings.ssid_source,
             "last_tick_ts": last_tick_ts,
             "ticks_received": ticks,
             "candles_emitted": self._candle_count,

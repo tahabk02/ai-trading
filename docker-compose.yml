@@ -96,6 +96,7 @@ services:
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: 8788
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      POCKET_OPTION_SSID_FILE: ${POCKET_OPTION_SSID_FILE:-}
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
       TZ: UTC
@@ -164,6 +165,10 @@ services:
       POCKET_BRIDGE_HOST: 0.0.0.0
       POCKET_BRIDGE_PORT: 8788
       POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
+      # Preferred: path to the full `42["auth",{...}]` frame mounted below.
+      # A file value wins over the env value, so Compose/shell quote parsing
+      # can never corrupt a PHP-serialized session.
+      POCKET_OPTION_SSID_FILE: ${POCKET_OPTION_SSID_FILE:-}
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
       POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
@@ -183,6 +188,9 @@ services:
       # stored `ssid` cookie and hot-reloads it; refresh runs INSIDE the
       # container against this same file.
       - ./pocket-bridge/session:/app/session:ro
+      # Quote-safe SSID file. Set POCKET_OPTION_SSID_FILE to
+      # /run/secrets/pocket_option_ssid to use it (contents are gitignored).
+      - ./pocket-bridge/secrets:/run/secrets:ro
     ports:
       - "8788:8788"
       - "8789:8789"   # /health endpoint (relay_port + 1)

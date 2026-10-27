@@ -67,6 +67,7 @@ function arm(overrides: Record<string, unknown> = {}) {
       activeSymbol: "EUR/USD",
       currentPrice: 1.0845,
       feedStatus: "live",
+      poBridgeOnline: false,
       lastPriceUpdate: new Date().toISOString(),
       isKillSwitchLocked: false,
       isTradeActive: false,
@@ -121,6 +122,23 @@ describe("[473]/[474] trading panel — PO-offline OTC is not tradeable", () => 
       /PO OFFLINE/i,
     );
     expect(screen.getByTestId("panel-po-offline-banner")).toBeInTheDocument();
+    expect(screen.getByTestId("action-call")).toBeDisabled();
+    expect(screen.getByTestId("action-put")).toBeDisabled();
+  });
+
+  it("distinguishes an uncovered pair from a globally offline bridge", () => {
+    arm({ poBridgeOnline: true });
+    useMarketTerminalStore.getState().setQuotes([
+      quote({ source: "open_er_api:live" }),
+    ]);
+    ui(<TradingPanel stalePrice={false} />);
+
+    expect(screen.getByTestId("panel-po-offline-signal")).toHaveTextContent(
+      /PO ONLINE - PAIR ON PROXY/i,
+    );
+    expect(screen.getByTestId("panel-po-offline-banner")).toHaveTextContent(
+      /PO Online - Pair Not Covered/i,
+    );
     expect(screen.getByTestId("action-call")).toBeDisabled();
     expect(screen.getByTestId("action-put")).toBeDisabled();
   });

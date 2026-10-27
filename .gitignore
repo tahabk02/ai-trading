@@ -19,6 +19,10 @@ pocket-bridge/session/*.json
 pocket-bridge/session/*cookie*
 pocket-bridge/session/*.txt
 pocket-bridge/session/__pycache__/
+# Mounted SSID / credential files. Keep the directory placeholder so the
+# Compose bind mount always exists, but never commit any secret payload.
+pocket-bridge/secrets/*
+!pocket-bridge/secrets/.gitkeep
 # Local scratch capture of a Pocket Option session cookie. Never commit it.
 temp_pssid.txt
 

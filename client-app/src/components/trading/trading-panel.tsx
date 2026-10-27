@@ -104,6 +104,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
   const activeQuote = useMarketTerminalStore((s) => s.quotes[activeSymbol]);
   const poOffline = isPoOfflineOtc(activeSymbol, activeQuote ?? null);
   const feedStatus = useTradingStore((s) => s.feedStatus);
+  const poBridgeOnline = useTradingStore((s) => s.poBridgeOnline);
   const lastPriceUpdate = useTradingStore((s) => s.lastPriceUpdate);
   const predictionData = useTradingStore((s) => s.predictionData);
   const expirationSeconds = useTradingStore((s) => s.expirationSeconds);
@@ -322,7 +323,7 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 data-testid="panel-po-offline-marker"
                 className="text-[9px] sm:text-[10px] text-st-warn font-bold uppercase tracking-wider whitespace-nowrap"
               >
-                PO OFFLINE
+                {poBridgeOnline ? "PAIR ON PROXY" : "PO OFFLINE"}
               </span>
             )}
             <span className="text-xs sm:text-sm text-ink font-bold font-mono tabular-nums">
@@ -357,7 +358,9 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 data-testid="panel-po-offline-signal"
                 className="truncate"
               >
-                PO OFFLINE — PROXY TICKS
+                {poBridgeOnline
+                  ? "PO ONLINE - PAIR ON PROXY"
+                  : "PO OFFLINE - PROXY TICKS"}
               </span>
             </>
           ) : stalePrice ? (
@@ -531,11 +534,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         )
       )}
 
-      {/* PART 43.5 [474] — PO-OFFLINE OTC BANNER. This OTC pair is priced by a
-          non-PO market proxy while Pocket Option is offline: the proxy tick is
-          NOT a tradeable execution price, so BUY/SELL are locked and the
-          verdict is withheld. Distinct from a feed outage and from a stale
-          tick — the proxy tape may be flowing perfectly; it is simply not PO. */}
+      {/* PART 43.5 [474] — OTC PROXY BANNER. This OTC pair has no fresh PO
+          quote and is priced by a non-PO market proxy. The proxy tick is NOT a
+          tradeable execution price, so BUY/SELL are locked and the verdict is
+          withheld. The bridge's global status is named separately: PO online
+          with one uncovered pair is not the same as PO offline. */}
       {poOffline &&
       feedStatus !== "awaiting_ssid" &&
       feedStatus !== "auth_failed" ? (
@@ -545,12 +548,14 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
         >
           <p className="text-[9px] sm:text-[10px] text-st-warn font-black uppercase tracking-wider flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-st-warn animate-pulse shrink-0" />
-            PO Offline — Proxy Ticks
+            {poBridgeOnline
+              ? "PO Online - Pair Not Covered"
+              : "PO Offline - Proxy Ticks"}
           </p>
           <p className="text-[9px] sm:text-[10px] text-st-warn/90 font-mono mt-1">
-            No Pocket Option price for this OTC pair — the market is closed or
-            PO is unavailable. The proxy feed is not a tradeable execution
-            price; signals and execution resume when PO quotes return.
+            {poBridgeOnline
+              ? "Pocket Option is online, but this OTC pair has no live PO quote. The proxy feed is not a tradeable execution price; signals and execution resume when this pair's PO quotes return."
+              : "No Pocket Option price for this OTC pair - the market is closed or PO is unavailable. The proxy feed is not a tradeable execution price; signals and execution resume when PO quotes return."}
           </p>
         </div>
       ) : null}

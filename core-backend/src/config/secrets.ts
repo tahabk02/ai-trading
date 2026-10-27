@@ -265,6 +265,9 @@ export const secrets = {
   // connects as a client. When no SSID is set, the bridge (and therefore the
   // backend) runs in a clean "awaiting_ssid" state with NO fabricated prices.
   POCKET_OPTION_SSID: process.env.POCKET_OPTION_SSID || "",
+  // Preferred quote-safe source: path to a mounted file containing the exact
+  // `42["auth",{...}]` frame. The Python bridge gives this file precedence.
+  POCKET_OPTION_SSID_FILE: process.env.POCKET_OPTION_SSID_FILE || "",
   POCKET_OPTION_UID: process.env.POCKET_OPTION_UID || "",
   POCKET_OPTION_IS_DEMO: process.env.POCKET_OPTION_IS_DEMO || "0",
   // ── Pocket Option session self-healing (session/capture_session.py +
