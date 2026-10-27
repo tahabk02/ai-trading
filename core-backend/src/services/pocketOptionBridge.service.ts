@@ -67,10 +67,11 @@ const CB_MAX_ATTEMPTS_PER_WINDOW = 4;
 const READINESS_FALLBACK_MS = 5_000;
 
 // ── Feed Heartbeat Constants ──
-// The Python bridge emits a `heartbeat` frame every 5s. A gap longer than
+// The Python bridge emits a `heartbeat` frame every 25s. A gap longer than
 // HEARTBEAT_STALE_MS means the feed is dead even if the WS transport is still
-// up — the client is told `disconnected` (never fabricated live).
-const HEARTBEAT_STALE_MS = 12_000;
+// up — the client is told `disconnected` (never fabricated live). Keep this
+// above two heartbeat windows so one slow probe can never flicker the UI.
+const HEARTBEAT_STALE_MS = 70_000;
 const FEED_STATUS_WATCHDOG_MS = 5_000;
 
 type FeedStatus =
@@ -1015,7 +1016,7 @@ export class PocketOptionBridgeService {
     }
   }
 
-  /** Relay `heartbeat` — the 5s liveness probe. Recorded for the heartbeat-age
+  /** Relay `heartbeat` — the 25s liveness probe. Recorded for the heartbeat-age
    *  rule and used to re-derive + push the authoritative feed_status. */
   private handleHeartbeat(payload: Record<string, unknown>): void {
     this.lastHeartbeatAt = Date.now();

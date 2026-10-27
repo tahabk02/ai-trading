@@ -238,7 +238,7 @@ class PocketOptionBridge:
         self.on_tick = None
         self.on_candle = None
         self.on_status = None
-        #: async callback (payload_dict) -> None invoked every 5s heartbeat with
+        #: async callback (payload_dict) -> None invoked every heartbeat with
         #: {status, ticks_received, last_tick_ts, symbols_subscribed}. Wired by
         #: the entrypoint to relay.broadcast({"type": "heartbeat", ...}) so the
         #: backend applies its heartbeat-age rule (feed == disconnected when the
@@ -261,6 +261,7 @@ class PocketOptionBridge:
         self._first_tick = asyncio.Event()
         self._tick_watch_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._last_keepalive_at: float = 0.0
         self._session_watch_task: Optional[asyncio.Task] = None
         self._refresh_task: Optional[asyncio.Task] = None
         #: monotonically-increasing emit counter on every relayed live tick
@@ -1302,6 +1303,15 @@ class PocketOptionBridge:
         elif reason:
             logger.critical("AUTH FAILED — SSID expired or invalid (%s)", reason)
 
+    def _stream_progressed(self, auth_epoch: int, tick_seq: int) -> bool:
+        """True when a reader authenticated or received ticks since it started.
+
+        This is the anti-stuck signal for the reconnect ladder: a stream that
+        genuinely progressed must restart at the 1s backoff, not inherit the
+        60s cap from a previous outage (the old "reconnect every 60s" loop).
+        """
+        return self.connect_epoch != auth_epoch or self._tick_seq > tick_seq
+
     async def _reader_loop(self, symbol: str, asset: str) -> None:
         if not self.has_credential:
             # start() already emitted the awaiting state. Sit idle so adding a
@@ -1317,6 +1327,8 @@ class PocketOptionBridge:
                     "fresh capture (session_expired)", symbol,
                 )
                 return
+            auth_epoch = self.connect_epoch
+            tick_seq = self._tick_seq
             try:
                 await self.run_reader(symbol, asset)
             except asyncio.CancelledError:
@@ -1357,6 +1369,13 @@ class PocketOptionBridge:
                 # so the next loop-gate rebuilds a fresh auth instead of
                 # re-using a half-open socket.
                 logger.warning("reader(%s) crashed: %s", symbol, exc)
+                if self._stream_progressed(auth_epoch, tick_seq):
+                    if delay_index:
+                        logger.info(
+                            "FEED_BACKOFF_RESET reader=%s — auth/ticks "
+                            "progressed, restarting ladder at 1s", symbol,
+                        )
+                    delay_index = 0
                 try:
                     await self._release_client()
                 except Exception:  # noqa: BLE001 - teardown must not mask
@@ -1365,13 +1384,20 @@ class PocketOptionBridge:
                 delay = RECONNECT_BACKOFF_SECONDS[min(delay_index, len(RECONNECT_BACKOFF_SECONDS) - 1)]
                 logger.info("FEED_RECONNECTING attempt=%d", delay_index + 1)
                 await asyncio.sleep(delay)
-                delay_index += 1
+                delay_index = min(delay_index + 1, len(RECONNECT_BACKOFF_SECONDS) - 1)
                 continue
             # run_reader returned CLEANLY — that is a NORMAL disconnect / stop
             # (no exception, e.g. broker stream ended or session dropped).
             # Reconnect IMMEDIATELY at the base cadence and RESET the backoff so
             # the bridge never lingers in the "stuck at 60s forever" state after
             # a transient drop: reconnect is instant and self-healing.
+            if self._stream_progressed(auth_epoch, tick_seq):
+                if delay_index:
+                    logger.info(
+                        "FEED_BACKOFF_RESET reader=%s — stream had produced "
+                        "progress, restarting ladder at 1s", symbol,
+                    )
+                delay_index = 0
             logger.info("FEED_DISCONNECTED reason=stream_ended")
             logger.info("FEED_RECONNECTING attempt=%d", delay_index + 1)
             await asyncio.sleep(RECONNECT_BACKOFF_SECONDS[min(delay_index, len(RECONNECT_BACKOFF_SECONDS) - 1)])
@@ -1425,34 +1451,140 @@ class PocketOptionBridge:
             await self._set_status("stalled", "no tick after authentication")
 
     async def _heartbeat(self) -> None:
-        """5s aggregate liveness probe proving the AUTHED stream delivers ticks.
+        """Periodic keepalive + liveness watchdog for the AUTHED stream.
 
-        Logs total raw ticks received, the newest PO tick timestamp, and the
-        currently subscribed symbols. A connected-but-silent bridge (auth OK,
-        no ticks) is impossible to mistake for a live feed when this fires.
-        Also emits a ``heartbeat`` relay frame (status + counters) so the
-        backend's heartbeat-age rule can flip the client to ``disconnected``
-        when these stop arriving.
+        Every ``heartbeat_interval`` (25s by default) this:
+          1. sends a raw Socket.IO keepalive to Pocket Option so the server's
+             ~60s idle cutoff can never expire a quiet-but-live socket;
+          2. recycles a half-open client (``is_connected() == False``) instead
+             of waiting for each reader to crash independently;
+          3. recycles a connected-but-silent stream after
+             ``stream_stale_after`` (50s) with no ticks, before the server's
+             own 60s timeout fires;
+          4. relays a ``heartbeat`` frame with counters so the Node backend can
+             apply its heartbeat-age rule.
+
+        A 5s probe cadence checks staleness/half-open sockets; the PO
+        keepalive and relay heartbeat remain 25s. The client recycle
+        deliberately does NOT clear the M20 engine, ``_dynamic_symbols`` or
+        ``_reader_symbols``: dynamic OTC pairs keep their state and are re-armed
+        by ``_ensure_connected`` on the next successful auth.
         """
+        interval = max(5.0, float(self.settings.heartbeat_interval))
+        check_every = min(5.0, interval)
+        next_keepalive = time.monotonic() + interval
         while True:
-            await asyncio.sleep(5.0)
-            total = sum(self._tick_count.values())
-            last_ts = max(self._last_tick_source_ts.values(), default=0)
-            subscribed = ",".join(sorted(self._subs.keys())) or "(none)"
-            logger.info(
-                "HEARTBEAT ticks_received=%d last_tick_ts=%s "
-                "symbols_subscribed=%s status=%s",
-                total, last_ts, subscribed, self.status,
+            await asyncio.sleep(check_every)
+            now = time.monotonic()
+            keepalive_due = now >= next_keepalive
+            if keepalive_due:
+                next_keepalive = now + interval
+            try:
+                await self._heartbeat_tick(
+                    send_keepalive=keepalive_due,
+                    emit=keepalive_due,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one bad probe must not stop it
+                logger.exception("heartbeat probe failed")
+
+    async def _heartbeat_tick(
+        self, *, send_keepalive: bool = True, emit: bool = True
+    ) -> None:
+        """Run one keepalive/staleness probe (testable without sleeping)."""
+        total = sum(self._tick_count.values())
+        last_ts = max(self._last_tick_source_ts.values(), default=0)
+        subscribed = ",".join(sorted(self._subs.keys())) or "(none)"
+        wall_now = time.time()
+        last_tick_age_s: Optional[float] = None
+
+        connected = False
+        try:
+            connected = self.is_connected
+        except Exception:  # noqa: BLE001 - a broken SDK must not kill the probe
+            connected = False
+
+        keepalive_ok: Optional[bool] = None
+        if send_keepalive and connected and self.client is not None:
+            try:
+                await self.client.send_raw_message(self.settings.keepalive_message)
+                keepalive_ok = True
+                self._last_keepalive_at = wall_now
+            except Exception as exc:  # noqa: BLE001 - recycle below
+                keepalive_ok = False
+                logger.warning(
+                    "HEARTBEAT_KEEPALIVE_FAIL message=%s error=%s — "
+                    "releasing half-open client for clean re-auth",
+                    self.settings.keepalive_message, exc,
+                )
+                await self._release_client()
+                if self.status == "connected":
+                    await self._set_status(
+                        "connection_error",
+                        f"heartbeat keepalive failed: {exc}",
+                    )
+                connected = False
+        elif self.client is not None and not connected and self.status == "connected":
+            logger.warning(
+                "HEARTBEAT_SOCKET_CLOSED is_connected=False — "
+                "releasing client so readers rebuild the socket"
             )
-            cb = self.on_heartbeat
-            if cb is not None:
-                try:
-                    await cb({
-                        "status": self.status,
-                        "ticks_received": total,
-                        "last_tick_ts": last_ts,
-                        "symbols_subscribed": subscribed,
-                    })
-                except Exception:  # noqa: BLE001 - a broken heartbeat relay must
-                    # never kill the liveness probe loop.
-                    logger.exception("heartbeat relay failed")
+            await self._release_client()
+            await self._set_status(
+                "connection_error", "socket closed — reconnecting"
+            )
+
+        if self._last_tick_ts:
+            newest = max(self._last_tick_ts.values())
+            last_tick_age_s = max(0.0, wall_now - newest)
+
+        # A connected socket with live subscriptions but no ticks for a full
+        # stale window is dead even if is_connected() still lies. The 5s
+        # watchdog cadence guarantees this fires before the PO 60s cutoff.
+        if (
+            connected
+            and self._subs
+            and last_tick_age_s is not None
+            and last_tick_age_s >= self.settings.stream_stale_after
+        ):
+            logger.warning(
+                "HEARTBEAT_STALE no_ticks_for=%.1fs threshold=%.1fs — "
+                "releasing client while preserving engine/dynamic OTC state",
+                last_tick_age_s, self.settings.stream_stale_after,
+            )
+            await self._release_client()
+            await self._set_status(
+                "stalled",
+                f"no ticks for {last_tick_age_s:.0f}s — reconnecting",
+            )
+            connected = False
+
+        if not emit:
+            return
+        logger.info(
+            "HEARTBEAT interval_s=%.0f ticks_received=%d last_tick_ts=%s "
+            "last_tick_age_s=%s symbols_subscribed=%s keepalive=%s status=%s",
+            self.settings.heartbeat_interval,
+            total,
+            last_ts,
+            f"{last_tick_age_s:.1f}" if last_tick_age_s is not None else "n/a",
+            subscribed,
+            keepalive_ok,
+            self.status,
+        )
+        cb = self.on_heartbeat
+        if cb is not None:
+            try:
+                await cb({
+                    "status": self.status,
+                    "ticks_received": total,
+                    "last_tick_ts": last_ts,
+                    "last_tick_age_s": last_tick_age_s,
+                    "heartbeat_interval_s": self.settings.heartbeat_interval,
+                    "keepalive_ok": keepalive_ok,
+                    "symbols_subscribed": subscribed,
+                })
+            except Exception:  # noqa: BLE001 - a broken heartbeat relay must
+                # never kill the liveness probe loop.
+                logger.exception("heartbeat relay failed")

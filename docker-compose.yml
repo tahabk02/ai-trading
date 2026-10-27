@@ -167,6 +167,14 @@ services:
       POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
       POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
       POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
+      # Never inherit the SDK's 60s handshake default again; 120s lets the
+      # regional endpoint rotation reach a healthy host.
+      POCKET_OPTION_INIT_TIMEOUT: ${POCKET_OPTION_INIT_TIMEOUT:-120}
+      POCKET_OPTION_TIMEOUT_SECS: ${POCKET_OPTION_TIMEOUT_SECS:-30}
+      POCKET_OPTION_RECONNECT_TIME: ${POCKET_OPTION_RECONNECT_TIME:-3}
+      # 25s keepalive inside PO's 60s idle window; recycle at 50s of silence.
+      POCKET_BRIDGE_HEARTBEAT_INTERVAL: ${POCKET_BRIDGE_HEARTBEAT_INTERVAL:-25}
+      POCKET_BRIDGE_STREAM_STALE_SECS: ${POCKET_BRIDGE_STREAM_STALE_SECS:-50}
       TZ: UTC
     env_file:
       - ./pocket-bridge/.env

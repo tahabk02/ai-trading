@@ -65,6 +65,17 @@ logger = logging.getLogger("pocket_bridge.config")
 
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 
+#: A 25s application heartbeat keeps the PO socket alive well inside the
+#: server's 60s idle window while avoiding the old 5s log/relay churn.
+DEFAULT_HEARTBEAT_INTERVAL_SECS = 25.0
+#: Reconnect before the server's ~60s idle timeout can kill a silent stream.
+#: A 5s watchdog checks this, so a silent tape is recycled by ~55s worst case.
+DEFAULT_STREAM_STALE_AFTER_SECS = 50.0
+#: The SDK's native default is 60s, which is the exact timeout we must never
+#: inherit again. Enforce a floor even if an older deployment exports 60.
+MIN_PO_INIT_TIMEOUT_SECS = 90.0
+DEFAULT_PO_KEEPALIVE_MESSAGE = '42["ping"]'
+
 
 def resolve_user_agent(value: str | None) -> str:
     """Resolve unset or SDK-placeholder User-Agents to the pinned browser UA."""
@@ -782,6 +793,40 @@ class BridgeSettings:
     reconnect_delay: float = 5.0
     reconnect_max_delay: float = 60.0
 
+    #: Active PO application heartbeat (seconds). The heartbeat is also
+    #: relayed to the Node backend as a liveness frame, so this value must stay
+    #: comfortably below the backend's heartbeat-age threshold.
+    heartbeat_interval: float = field(
+        default_factory=lambda: float(
+            os.getenv(
+                "POCKET_BRIDGE_HEARTBEAT_INTERVAL",
+                str(DEFAULT_HEARTBEAT_INTERVAL_SECS),
+            )
+        )
+    )
+
+    #: Force a clean client recycle when a connected stream has produced zero
+    #: ticks for this long. Set below the Pocket Option 60s idle cutoff so the
+    #: bridge reconnects on its own terms instead of waiting for the socket to
+    #: die. Per-symbol state and the dynamic OTC subscription set are retained.
+    stream_stale_after: float = field(
+        default_factory=lambda: float(
+            os.getenv(
+                "POCKET_BRIDGE_STREAM_STALE_SECS",
+                str(DEFAULT_STREAM_STALE_AFTER_SECS),
+            )
+        )
+    )
+
+    #: Raw Socket.IO keepalive event sent to Pocket Option every heartbeat.
+    keepalive_message: str = field(
+        default_factory=lambda: (
+            os.getenv("POCKET_OPTION_KEEPALIVE_MESSAGE", DEFAULT_PO_KEEPALIVE_MESSAGE)
+            or DEFAULT_PO_KEEPALIVE_MESSAGE
+        ).strip()
+        or DEFAULT_PO_KEEPALIVE_MESSAGE
+    )
+
     #: Local WebSocket relay the Node backend connects to.
     relay_host: str = field(default_factory=lambda: os.getenv("POCKET_BRIDGE_HOST", "0.0.0.0"))
     relay_port: int = field(default_factory=lambda: int(os.getenv("POCKET_BRIDGE_PORT", "8788")))
@@ -927,6 +972,19 @@ class BridgeSettings:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "auth", parse_ssid(self.ssid))
+        # A 60s native handshake budget is the known regression that produced
+        # the recurring "Connection initialization timed out" loop. Clamp it
+        # even when an old .env/compose file still exports 60.
+        if self.po_init_timeout < MIN_PO_INIT_TIMEOUT_SECS:
+            object.__setattr__(self, "po_init_timeout", MIN_PO_INIT_TIMEOUT_SECS)
+        if self.heartbeat_interval < 5.0:
+            object.__setattr__(self, "heartbeat_interval", 5.0)
+        # Leave at least two heartbeat windows for a quiet tape before treating
+        # the stream as dead; otherwise a single missed frame causes churn.
+        if self.stream_stale_after <= self.heartbeat_interval:
+            object.__setattr__(
+                self, "stream_stale_after", self.heartbeat_interval + 5.0
+            )
 
     @property
     def auth_payload(self) -> str:
