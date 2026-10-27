@@ -85,6 +85,189 @@ def resolve_user_agent(value: str | None) -> str:
     return user_agent
 
 
+class _PhpSessionParser:
+    """Minimal, length-aware PHP array parser for Pocket Option sessions.
+
+    The SDK's Rust parser trusts the declared ``a:N`` entry count. Pocket Option
+    can emit a newer session with more fields while the header still says
+    ``a:4``; PHP then expects ``}`` after four entries and crashes on the fifth
+    string key (``Expected '}' but got 's'``). This parser ignores the declared
+    count and consumes entries until the closing brace so the count can be
+    corrected without dropping fields that the server may have added.
+    """
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos = 0
+        self.depth = 0
+        self.top_level_count = 0
+
+    def _expect(self, token: bytes) -> None:
+        if not self.data.startswith(token, self.pos):
+            raise ValueError("unexpected PHP session token")
+        self.pos += len(token)
+
+    def _read_until(self, delimiter: bytes) -> bytes:
+        end = self.data.find(delimiter, self.pos)
+        if end < 0:
+            raise ValueError("unterminated PHP session value")
+        value = self.data[self.pos:end]
+        self.pos = end + len(delimiter)
+        return value
+
+    def _read_int(self, delimiter: bytes) -> int:
+        raw = self._read_until(delimiter)
+        if not raw.isdigit():
+            raise ValueError("invalid PHP session integer")
+        return int(raw)
+
+    def _read_string(self) -> bytes:
+        self._expect(b"s:")
+        length = self._read_int(b":")
+        self._expect(b'"')
+        end = self.pos + length
+        if length < 0 or end > len(self.data):
+            raise ValueError("invalid PHP session string length")
+        value = self.data[self.pos:end]
+        self.pos = end
+        self._expect(b'";')
+        return value
+
+    def _read_value(self) -> object:
+        if self.data.startswith(b"s:", self.pos):
+            return self._read_string()
+        if self.data.startswith(b"i:", self.pos):
+            self.pos += 2
+            return int(self._read_until(b";"))
+        if self.data.startswith(b"d:", self.pos):
+            self.pos += 2
+            return float(self._read_until(b";"))
+        if self.data.startswith(b"b:", self.pos):
+            self.pos += 2
+            return self._read_until(b";") == b"1"
+        if self.data.startswith(b"N;", self.pos):
+            self.pos += 2
+            return None
+        if self.data.startswith(b"a:", self.pos):
+            return self._read_array()
+        raise ValueError("unsupported PHP session value")
+
+    def _read_array(self) -> Dict[bytes, object]:
+        top_level = self.depth == 0
+        self.depth += 1
+        self._expect(b"a:")
+        self._read_int(b":")  # count is advisory only (see class docstring)
+        self._expect(b"{")
+        entries: Dict[bytes, object] = {}
+        count = 0
+        while not self.data.startswith(b"}", self.pos):
+            key = self._read_string()
+            entries[key] = self._read_value()
+            count += 1
+            if count > 10_000:
+                raise ValueError("PHP session array is too large")
+        self._expect(b"}")
+        self.depth -= 1
+        if top_level:
+            self.top_level_count = count
+        return entries
+
+
+def _fix_php_session_count(text: str) -> str:
+    data = text.encode("utf-8", "surrogatepass")
+    parser = _PhpSessionParser(data)
+    entries = parser._read_array()
+    if b"session_id" not in entries:
+        raise ValueError("missing PHP session_id")
+    actual = parser.top_level_count
+    colon = data.find(b":", 2)
+    if colon < 0 or not data[2:colon].isdigit():
+        raise ValueError("invalid PHP session array header")
+    return (b"a:%d" % actual + data[colon:]).decode("utf-8", "surrogatepass")
+
+
+def normalize_php_session(value: str) -> str:
+    """Correct a stale PHP ``a:N`` count without dropping any session fields.
+
+    Handles JSON-escaped quotes copied from a captured frame and URL-encoded
+    cookie values. A value that cannot be parsed is returned unchanged so the
+    SDK remains the final authority and the caller can surface its precise
+    error.
+    """
+    text = (value or "").strip()
+    if not text.startswith("a:") and not text.lower().startswith("a%3"):
+        return text
+    candidates = []
+    if '\\"' in text:
+        candidates.append(text.replace('\\"', '"').replace("\\\\", "\\"))
+    if text.lower().startswith("a%3"):
+        try:
+            from urllib.parse import unquote
+
+            candidates.append(unquote(text))
+        except Exception:  # noqa: BLE001 - best-effort normalization
+            pass
+    candidates.append(text)
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            normalized = _fix_php_session_count(candidate)
+        except (TypeError, ValueError):
+            continue
+        if normalized != text:
+            logger.info(
+                "PHP_SESSION_NORMALIZED - corrected stale PHP array count "
+                "(all session fields preserved)"
+            )
+        return normalized
+    return text
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _coerce_int(value: object, default: int, field: str) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Pocket Option auth field {field} must be an integer") from exc
+
+
+def normalize_auth_fields(auth: dict) -> dict:
+    """Normalize session + account metadata into the SDK's expected shape."""
+    payload = dict(auth)
+    session = payload.get("session")
+    if isinstance(session, str):
+        payload["session"] = normalize_php_session(session)
+
+    uid = payload.get("uid")
+    if uid is None or uid == "":
+        uid = _env_int("POCKET_OPTION_UID", 0)
+    payload["uid"] = _coerce_int(uid, 0, "uid")
+
+    demo_value = payload.get("isDemo", payload.get("is_demo"))
+    if demo_value is None or demo_value == "":
+        demo_value = _env_int("POCKET_OPTION_IS_DEMO", 0)
+    payload["isDemo"] = _coerce_int(demo_value, 0, "isDemo")
+    payload.pop("is_demo", None)
+
+    payload["platform"] = _coerce_int(payload.get("platform"), 2, "platform")
+    payload.setdefault("isFastHistory", True)
+    return payload
+
+
 def parse_ssid(value: str) -> dict:
     """Return canonical auth fields from a raw session or any captured frame.
 
@@ -144,28 +327,30 @@ def parse_ssid(value: str) -> dict:
                 "POCKET_OPTION_SSID must contain a 42[\"auth\",{...}] session"
             )
 
-        payload.setdefault("uid", int(os.getenv("POCKET_OPTION_UID", "0")))
-        payload.setdefault("isDemo", int(os.getenv("POCKET_OPTION_IS_DEMO", "0")))
-        payload.setdefault("platform", 2)
-        payload.setdefault("isFastHistory", True)
-        return payload
+        return normalize_auth_fields(payload)
 
     if raw.startswith("{") or raw.startswith("]"):
         raise ValueError(
             "POCKET_OPTION_SSID looks like JSON but is not a 42[\"auth\",{...}] frame"
         )
 
-    return {
-        "session": raw,
-        "isDemo": int(os.getenv("POCKET_OPTION_IS_DEMO", "0")),
-        "uid": int(os.getenv("POCKET_OPTION_UID", "0")),
-        "platform": 2,
-        "isFastHistory": True,
-    }
+    return normalize_auth_fields(
+        {
+            "session": raw,
+            "isDemo": _env_int("POCKET_OPTION_IS_DEMO", 0),
+            "uid": _env_int("POCKET_OPTION_UID", 0),
+            "platform": 2,
+            "isFastHistory": True,
+        }
+    )
 
 
 def auth_message(auth: dict) -> str:
-    return "42" + json.dumps(["auth", auth], separators=(",", ":"))
+    """Serialize the ONLY frame BinaryOptionsToolsV2 accepts for auth."""
+    return "42" + json.dumps(
+        ["auth", normalize_auth_fields(auth)],
+        separators=(",", ":"),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -406,7 +591,7 @@ def _decode_ssid_payload(raw: str, depth: int = 0) -> str:
                 if key in wrapped
             }
             if len(auth_fields) > 1:
-                return auth_message(auth_fields)
+                return auth_message(normalize_auth_fields(auth_fields))
             return _decode_ssid_payload(session, depth + 1)
         for key in _SSID_JSON_KEYS:
             value = wrapped.get(key)

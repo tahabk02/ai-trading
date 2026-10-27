@@ -416,7 +416,8 @@ class PocketOptionBridge:
         kwargs: Dict[str, object] = {"config": sdk_config}
         payload = self._auth_payload()
         if self.settings.has_ssid:
-            # The env SSID is the authoritative full message — byte-faithful.
+            # Env/file SSID is authoritative; auth_message still repairs a
+            # stale PHP array count and coerces uid/isDemo to integers.
             via = "env"
             auth_dict = self.settings.auth
         else:
@@ -447,16 +448,28 @@ class PocketOptionBridge:
                 len(self.session.cookies),
             )
         self.cookie_header = self.session.cookie_header()
-        self.client = PocketOptionAsync(payload, **kwargs)
+        try:
+            self.client = PocketOptionAsync(payload, **kwargs)
+        except Exception as exc:
+            if "Failed to parse ssid" in str(exc):
+                logger.critical(
+                    "SSID_PARSE_FAILED source=%s format=%s session_len=%d "
+                    "uid=%s isDemo=%s - the SDK rejected the auth payload",
+                    self.settings.ssid_source,
+                    self.settings.ssid_format,
+                    session_len,
+                    mask_uid(auth_dict.get("uid")),
+                    auth_dict.get("isDemo"),
+                )
+            raise
         return self.client
 
     def _auth_payload(self) -> str:
-        """SSID source of truth: send the EXACT configured auth message.
+        """Build the ONE 42["auth",{...}] frame the SDK accepts.
 
-        The .env holds the frame captured verbatim from Pocket Option (with
-        every field — session/isDemo/uid/platform/isFastHistory/isOptimized);
-        it is sent as-is, never re-built or key-reduced. The stored-session
-        cookie path is used ONLY when no env SSID exists.
+        Env/file SSID wins; ``auth_message`` then repairs a stale PHP array
+        count, preserves every session field, and coerces uid/isDemo to ints.
+        The stored-session cookie path is used ONLY when no env SSID exists.
         """
         if self.settings.has_ssid:
             return self.settings.auth_payload
