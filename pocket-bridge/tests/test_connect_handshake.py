@@ -14,6 +14,7 @@ initialization timed out`` crash loop:
 """
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -30,6 +31,16 @@ from pocket_bridge.m20_engine import M20Engine
 
 TIMEOUT_ERROR = (
     "PocketOptionError, General error: Connection initialization timed out"
+)
+
+PHP_SSID_WITH_STALE_COUNT = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:111:"Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";'
+    's:13:"last_activity";i:1732926685;'
+    's:9:"device_id";s:5:"abcde";}'
+    '00000000000000000000000000000000'
 )
 
 
@@ -107,6 +118,33 @@ def test_sdk_config_raises_handshake_budget(monkeypatch, tmp_path, fake_client):
     assert cfg["connection_initialization_timeout_secs"] > 60
     assert cfg["reconnect_time"] == bridge.settings.po_reconnect_time
     assert cfg["timeout_secs"] == int(bridge.settings.po_request_timeout)
+
+
+def test_real_php_ssid_is_sent_as_a_full_42_auth_frame(
+    monkeypatch, tmp_path, fake_client
+):
+    """The SDK needs ``42["auth",{...}]``, never the bare PHP session.
+
+    Pocket Option can append fields while leaving the PHP header at ``a:4``;
+    the SDK then stops after four entries and reports ``Expected '}' but got
+    's'``. The payload handed to PocketOptionAsync must already be repaired.
+    """
+    monkeypatch.setenv("POCKET_OPTION_UID", "12345678")
+    monkeypatch.setenv("POCKET_OPTION_IS_DEMO", "0")
+    bridge = _bridge(monkeypatch, tmp_path, ssid=PHP_SSID_WITH_STALE_COUNT)
+
+    asyncio.run(bridge._import_client())
+
+    payload = fake_client.instances[-1].payload
+    assert payload.startswith('42["auth",')
+    auth = json.loads(payload[2:])[1]
+    assert auth["session"].startswith("a:5:{")
+    assert 's:9:"device_id";s:5:"abcde";' in auth["session"]
+    assert auth["session"].endswith("00000000000000000000000000000000")
+    assert auth["uid"] == 12345678
+    assert isinstance(auth["uid"], int)
+    assert auth["isDemo"] == 0
+    assert isinstance(auth["isDemo"], int)
 
 
 def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client):
