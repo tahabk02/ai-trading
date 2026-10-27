@@ -414,15 +414,9 @@ class PocketOptionBridge:
                 urls = urls[cut:] + urls[:cut]
             sdk_config["urls"] = urls
         kwargs: Dict[str, object] = {"config": sdk_config}
+        auth_dict = self._auth_dict()
         payload = self._auth_payload()
-        if self.settings.has_ssid:
-            # Env/file SSID is authoritative; auth_message still repairs a
-            # stale PHP array count and coerces uid/isDemo to integers.
-            via = "env"
-            auth_dict = self.settings.auth
-        else:
-            via = "session"
-            auth_dict = self.session.as_auth()
+        via = "env" if self.settings.has_ssid else "session"
         session_len = len(str(auth_dict.get("session", "")))
         logger.info(
             "connecting urls=%s init_timeout=%ss rotate=%s",
@@ -464,19 +458,31 @@ class PocketOptionBridge:
             raise
         return self.client
 
+    def _auth_dict(self) -> dict:
+        """Extract the auth object before it is handed to the SDK.
+
+        Env/file credentials win; the stored-session cookie path is used ONLY
+        when no env SSID exists.
+        """
+        if self.settings.has_ssid:
+            return self.settings.auth
+        return self.session.as_auth()
+
     def _auth_payload(self) -> str:
         """Build the ONE 42["auth",{...}] frame the SDK accepts.
 
-        Env/file SSID wins; ``auth_message`` then repairs a stale PHP array
-        count, preserves every session field, and coerces uid/isDemo to ints.
-        The stored-session cookie path is used ONLY when no env SSID exists.
+        The SDK's Python wrapper explicitly requires this outer frame
+        (``sanitize_and_validate_ssid`` returns early for anything else), and
+        its Rust core parses ``session`` as PHP for real accounts. Passing the
+        bare PHP session reaches the core's JSON parser and fails with
+        ``JSON parsing error``. The production ``Expected '}' but got 's'``
+        comes from a stale ``a:N`` count INSIDE the session, which
+        ``auth_message`` repairs while preserving every field.
         """
-        if self.settings.has_ssid:
-            return self.settings.auth_payload
-        auth = self.session.as_auth()
-        if auth.get("session"):
-            return auth_message(auth)
-        return ""
+        auth = self._auth_dict()
+        if not auth.get("session"):
+            return ""
+        return auth_message(auth)
 
     def _check_dependency(self) -> None:
         """Import (without instantiating) the PO dependency.
