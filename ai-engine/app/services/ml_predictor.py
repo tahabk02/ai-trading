@@ -111,12 +111,12 @@ EPS = 1e-12
 _JPY_QUOTES = frozenset({"JPY"})
 
 # ── ML WARMUP / TRAINING THRESHOLD ──
-# Frankfurter (ECB) publishes BUSINESS DAYS only (~5 of 7 calendar days,
-# minus ECB holidays), so genuine daily windows reliably yield ~85 real
-# bars for a 120-day range. 85 real bars still provide a robust
-# RandomForest/feature window; anything BELOW this floor refuses to train
-# (STRICT ZERO-DEMO — never fabricate or pad with synthetic bars).
-MIN_TRAINING_CANDLES = 85
+# The public /predict fast-path boundary is 100 real bars (signals.py
+# MINIMUM_REQUIRED_BARS). The ML trainer must use the SAME floor: a window
+# admitted to the full pipeline at 100 bars must never abort here at 85,
+# leaving a 15-bar dead zone between the two contracts. Below this floor we
+# refuse to train (STRICT ZERO-DEMO - never fabricate or pad synthetic bars).
+MIN_TRAINING_CANDLES = 100
 
 # ── CPU DISCIPLINE ──
 # Warmup trains up to WARMUP_CONCURRENCY (4) symbols over the 2-thread
@@ -326,7 +326,9 @@ def _compute_atr_simple(highs: list, lows: list, closes: list) -> float:
     return float(np.mean(trs)) if trs else 0.0
 
 
-def pad_candles_if_needed(candles: list, target_count: int = 85) -> list:
+def pad_candles_if_needed(
+    candles: list, target_count: int = MIN_TRAINING_CANDLES
+) -> list:
     """STRICT REAL-DATA GUARD — ZERO SYNTHETIC CANDLE FABRICATION.
 
     ZERO-RNG POLICY: The previous implementation prepended synthetic
@@ -1165,12 +1167,10 @@ async def _predict_with_rf_impl(symbol, timeframe, candles, force_retrain, live_
     if live_price is None or not np.isfinite(live_price):
         raise ValueError("live_price required for " + str(symbol))
     
-    # ➔ MIN_TRAINING_CANDLES bars minimum — Frankfurter (ECB) publishes
-    # business days only, so genuine daily windows yield ~85 REAL bars after
-    # weekends/holidays (this mismatch caused the historical
-    # "got=85, required=90" warmup abort). 85 real bars keep the
-    # RandomForest/feature window robust; below the floor we REFUSE to train
-    # rather than fabricate candles (strict zero-demo policy, enforced).
+    # MIN_TRAINING_CANDLES bars minimum, aligned with the /predict fast-path
+    # boundary (100) so the full pipeline never admits a window the trainer
+    # then rejects. Below the floor we REFUSE to train rather than fabricate
+    # candles (strict zero-demo policy, enforced).
     if not candles:
         raise ValueError("No candles provided for " + str(symbol))
 

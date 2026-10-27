@@ -400,12 +400,12 @@ def compute_market_stress_threshold(
 ) -> Tuple[float, float, Dict[str, float]]:
     """FLAT market-stress threshold for the thermal gate.
 
-    USER REQUIREMENT: the dispatch bar is FLAT at 98% — never below.
-    ``THERMAL_GATE_FLOOR == THERMAL_GATE_CEILING == DEFINITIVE_CONFIDENCE_MIN``,
-    so this function returns exactly 98 under every tape. The multi-variable
-    market-stress blend is still computed from the same real factor stack /
-    realized ATR and surfaced in ``stress_factors`` as PURE DIAGNOSTICS — it
-    is reported alongside the verdict but plays NO role in lowering the bar.
+    USER REQUIREMENT: the dispatch bar is FLAT at the executable T4-LOW tier
+    (80%) — never below. ``THERMAL_GATE_FLOOR == THERMAL_GATE_CEILING ==
+    TIER_THRESHOLDS["T4"]``, so this function returns exactly 80 under every
+    tape. The multi-variable market-stress blend is still computed from the
+    same real factor stack / realized ATR and surfaced in ``stress_factors``
+    as PURE DIAGNOSTICS — it plays NO role in lowering the bar.
 
     The stress blend (now diagnostic-only) still reflects genuine tape reality:
       • vol_stress        — realized ATR expansion (the volatility pillar).
@@ -418,8 +418,8 @@ def compute_market_stress_threshold(
       • taper_agreement   — raw fraction of active factors on-direction
                             (multi-variable agreement breadth).
 
-    Returns ``(98.0, market_stress, stress_factors)`` — the threshold NEVER
-    drifts below ``DEFINITIVE_CONFIDENCE_MIN``.
+    Returns ``(80.0, market_stress, stress_factors)`` — the threshold NEVER
+    drifts below the executable T4-LOW floor.
     """
     dir_sign = 1.0 if direction_sign > 0 else (-1.0 if direction_sign < 0 else 0.0)
 

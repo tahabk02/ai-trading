@@ -635,8 +635,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
             )
           ) : riskState ? (
             <span className="shrink-0 text-[9px] sm:text-[10px] font-mono text-slate-400 tabular-nums">
-              DD {riskState.drawdownPct.toFixed(2)}% /{" "}
-              {riskState.maxDailyDrawdownPct}%
+              DD{" "}
+              {riskState.drawdownPct == null
+                ? "unavailable"
+                : `${riskState.drawdownPct.toFixed(2)}%`}{" "}
+              / {riskState.maxDailyDrawdownPct}%
             </span>
           ) : null}
         </div>

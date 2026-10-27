@@ -4,9 +4,9 @@
  * Coalesces the live tick tape into a ~1s/symbol POST to the AI Engine's
  * high-frequency `/tick-signal` scorer so the strict 10-book multiplicative
  * confluence runs on the ACTUAL live tape (trailing real prices + real bid/ask
- * arms). This is the ONLY way confidence can organically cross the 60%
- * thermal gate on a strong momentum run instead of flatlining at the
- * candle-close HOLD.
+ * arms). This is the ONLY way confidence can organically cross the
+ * executable-tier floor (T4-LOW, 80%) on a strong momentum run instead of
+ * flatlining at the candle-close HOLD.
  *
  * ZERO FABRICATION (0% DEMO):
  *   • The payload is strict real buffer data — realtimeTickBuffer.getRecentWindow
@@ -17,8 +17,9 @@
  *   • Verdicts are broadcast on the dedicated `live_quant_signal` room event and
  *     only when they MEANINGFULLY change (direction / confidence step / gate
  *     crossing) — no 1Hz feed spam, no repeated identical frames.
- *   • A DEFINITIVE (>=60%) verdict also fires the global `high_confidence_signal`
- *     priority toast.
+ *   • A genuine high-confluence verdict also fires the global
+ *     `high_confidence_signal` priority toast, subject to the shared
+ *     confidence and executable-tier predicates.
  */
 
 import axios from "axios";
@@ -31,6 +32,10 @@ import type { SignalTier } from "../lib/signalTiers";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { publishDurableSignal } from "../messaging/signalStream";
 import { isAlertEligible } from "../lib/alertGate";
+import {
+  MIN_EXECUTABLE_CONFIDENCE,
+  isHighConfidence,
+} from "../lib/signalThresholds";
 import {
   analyzeMarketRegime,
   summarizeRegime,
@@ -46,6 +51,30 @@ const buildAiEngineTickSignalUrl = (baseUrl: string): string => {
 const AI_ENGINE_TICK_SIGNAL_URL = buildAiEngineTickSignalUrl(
   secrets.AI_ENGINE_URL,
 );
+
+/**
+ * Convert a real tick entry's own timestamp to epoch seconds. `tsMs` is the
+ * authoritative buffer field; `timestamp` is accepted for older/test feeds.
+ * Returns null rather than inventing a time when neither is usable.
+ */
+function tickTimestampSeconds(entry: {
+  tsMs?: number;
+  timestamp?: string | number;
+}): number | null {
+  let raw: number;
+  if (entry.tsMs != null) {
+    raw = Number(entry.tsMs);
+  } else if (typeof entry.timestamp === "number") {
+    raw = entry.timestamp;
+  } else if (typeof entry.timestamp === "string") {
+    raw = Date.parse(entry.timestamp);
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  // Epoch milliseconds (current era) → seconds; already-seconds passes through.
+  return raw > 1e11 ? raw / 1000 : raw;
+}
 /** Fast-path budget — short enough to never back-pressure the ingest loop. */
 const TICK_SIGNAL_TIMEOUT_MS = 4_000;
 /** Coalescing cadence — at most one /tick-signal per symbol per second. */
@@ -54,10 +83,7 @@ const DISPATCH_INTERVAL_MS = 1_000;
 const FORWARD_WINDOW_TICKS = 60;
 /** Confidence step (0-100 scale) that warrants a fresh live-quant broadcast. */
 const BROADCAST_CONFIDENCE_STEP = 2.0;
-/** THE PLATFORM HIGH-CONFIDENCE ALERT THRESHOLD — mirrors the AI Engine's
- *  DEFINITIVE 98% thermal gate (no signal fires as a priority alert
- *  unless all ten books organically converge past 0.98). */
-const HIGH_CONFIDENCE_THRESHOLD = 98.0;
+
 
 type TickSignalFailureKind =
   | "unreachable"
@@ -336,11 +362,21 @@ public clearSelectedHorizonMinutes(symbol: string): void {
     // operator's selection would be invisible on the live surface. Absent →
     // the engine's own default (never invented here).
     const minTier = this.getSelectedMinTier(symbol);
+    // Dedicated real arrival timestamps (seconds) for velocity/acceleration.
+    // `event_times` is the AI's news calendar and must not be overloaded. Send
+    // the array only when EVERY entry has a real time, so prices/timestamps
+    // can never be misaligned by a dropped point.
+    const seconds = window.map(tickTimestampSeconds);
+    const tickTimestamps =
+      seconds.length === window.length && seconds.every((s) => s != null)
+        ? (seconds as number[])
+        : undefined;
     const payload = {
       symbol,
       timeframe: "1m",
       dataSource: "live_tick_ring",
       prices,
+      ...(tickTimestamps ? { tick_timestamps: tickTimestamps } : {}),
       tick: prices[prices.length - 1],
       bid:
         spread.bid != null && Number.isFinite(spread.bid) && spread.bid > 0
@@ -488,7 +524,8 @@ public clearSelectedHorizonMinutes(symbol: string): void {
     if (prev) {
       const stepped = Math.abs(confidence - prev.confidence);
       const crossedGate =
-        (prev.confidence < 60.0) !== (confidence < 60.0);
+        (prev.confidence < MIN_EXECUTABLE_CONFIDENCE) !==
+        (confidence < MIN_EXECUTABLE_CONFIDENCE);
       if (
         prev.direction === direction &&
         prev.waiting === waiting &&
@@ -571,8 +608,8 @@ public clearSelectedHorizonMinutes(symbol: string): void {
 
     if (
       direction &&
-      confidence >= HIGH_CONFIDENCE_THRESHOLD &&
-      // PART 41 [403] — a high-confidence score is NOT enough. A 98% agreement
+      isHighConfidence(confidence) &&
+      // PART 41 [403] — a high-confidence score is NOT enough. A strong score
       // on a gate that is still `pending_high_precision` (or a non-executable
       // verdict) is silent — no bell, no toast, no sound.
       isAlertEligible({

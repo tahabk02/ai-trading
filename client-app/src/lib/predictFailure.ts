@@ -52,10 +52,18 @@ export function isAwaitingLiveData(body: unknown): boolean {
   );
 }
 
+export function isWaitingPredictionPayload(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const b = body as { market_waiting?: unknown; signal?: unknown };
+  if (b.market_waiting !== true) return false;
+  return b.signal !== "BUY" && b.signal !== "SELL";
+}
+
 /**
  * Recoverable (handled, re-poll with per-symbol backoff) vs. hard error.
  *   • 429                                  → recoverable
  *   • 503 carrying the awaiting-live-data  → recoverable (the waiting state)
+ *   • 200 carrying a market_waiting/no-direction payload → recoverable
  *   • any other status (500/502/504, a bare 503, 4xx) → hard error
  */
 export function isRecoverablePredictFailure(
@@ -63,6 +71,7 @@ export function isRecoverablePredictFailure(
   body: unknown,
 ): boolean {
   if (status === 429) return true;
+  if (status === 200 && isWaitingPredictionPayload(body)) return true;
   if (status === 503 && isAwaitingLiveData(body)) return true;
   return false;
 }

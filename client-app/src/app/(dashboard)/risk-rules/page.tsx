@@ -65,7 +65,7 @@ export default function RiskRulesPage() {
   const exposurePct = riskState
     ? Math.min(
         100,
-        Math.max(0, ((riskState.realizedPnl || 0) / (riskState.equity || 1)) * 100),
+        Math.max(0, ((riskState.realizedPnl || 0) / (riskState.equity ?? 1)) * 100),
       )
     : 0;
 

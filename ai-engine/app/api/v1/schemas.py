@@ -166,6 +166,15 @@ class PredictRequest(BaseModel):
             "blackout in the predictive layer; absent = no invented calendar."
         ),
     )
+    tick_timestamps: Optional[List[float]] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Optional REAL arrival timestamps (epoch seconds) aligned with "
+            "candles/live ticks. Separate from event_times so 3-second velocity "
+            "dynamics can use the tape without treating it as a news calendar."
+        ),
+    )
     dataSource: Optional[str] = Field(
         default="unknown",
         description="Source of the data (e.g. 'alpaca', 'alpaca_historical')",

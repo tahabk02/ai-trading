@@ -14,6 +14,7 @@
 import { Router, Request, Response } from "express";
 import { historyCollector, HISTORY_WINDOW_MINUTES, HistoryBar } from "../services/historyCollector.service";
 import { logger } from "../utils/logger";
+import { requireAiEngineKey } from "../middlewares/internalAuth.middleware";
 
 const router = Router();
 
@@ -111,6 +112,10 @@ router.get("/health/history", async (req: Request, res: Response) => {
  *   (Alpha.5 Pro, Part 6.3). The ai-engine's 60s AssetHistory job pushes its
  *   independently-observed real prices here; idempotent on the
  *   (symbol, timeframe, bucketStartMs) key, zero fabrication.
+ *
+ * The write surface is service-to-service only: an unauthenticated caller
+ * could poison the persisted tape. It therefore requires the same shared
+ * `AI_ENGINE_API_KEY` (`X-API-Key`) the AI engine already holds.
  */
 function isDbUnavailableError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
@@ -119,7 +124,7 @@ function isDbUnavailableError(err: unknown): boolean {
   );
 }
 
-router.post("/history/ingest", async (req: Request, res: Response) => {
+router.post("/history/ingest", requireAiEngineKey, async (req: Request, res: Response) => {
   const t0 = Date.now();
   const body = (req.body ?? {}) as Record<string, unknown>;
   const symbol = String(body.symbol ?? "").trim().toUpperCase();

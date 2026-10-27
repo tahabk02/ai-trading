@@ -5,16 +5,18 @@
  * MAY fire ONLY when the verdict is genuinely executable:
  *
  *   executable === true            — the engine's strict execution surface
- *   tier in T1..T3                 — high-precision dispatch tiers only
+ *   tier in T1..T4                 — every executable tier, including the
+ *                                    user-selectable T4-LOW floor; T5 is
+ *                                    scored-only and can never alert
  *   regime_gate === "tradable"     — the high-precision regime actually passed
  *
  * `broadcastHighConfidenceSignal` and the live-tick high-confidence emit both
  * consult this single predicate so the rail, the terminal and the durable
  * stream can never disagree about what qualifies for an alert. A signal whose
- * regime gate is still pending (98% book agreement or not) MUST be silent.
+ * regime gate is still pending MUST be silent, regardless of confidence.
  */
 
-export const ALERT_EXECUTABLE_TIERS = new Set(["T1", "T2", "T3"]);
+export const ALERT_EXECUTABLE_TIERS = new Set(["T1", "T2", "T3", "T4"]);
 export const ALERT_REGIME_GATE = "tradable";
 
 export interface AlertEligibilityInput {

@@ -105,7 +105,7 @@ describe("POST /api/v1/predict contract", () => {
     ).toContain("symbol");
   });
 
-  it("test_predict_returns_503_with_body_on_ai_timeout", async () => {
+  it("test_predict_returns_graceful_waiting_payload_on_ai_timeout", async () => {
     vi.spyOn(axios, "post").mockRejectedValue(
       new axios.AxiosError("timeout", "ECONNABORTED"),
     );
@@ -114,15 +114,25 @@ describe("POST /api/v1/predict contract", () => {
       request({ symbol: "GBP/USD", timeframe: "1m" }),
       response as never,
     );
-    expect(response.statusCode).toBe(503);
+    expect(response.statusCode).toBe(200);
     expect(
       (
         response as ResponseStub & {
-          body: { error: string; retryAfterMs: number };
+          body: {
+            error: string;
+            retryAfterMs: number;
+            signal: unknown;
+            market_waiting: boolean;
+          };
         }
       ).body,
     ).toEqual(
-      expect.objectContaining({ error: "ai_timeout", retryAfterMs: 1000 }),
+      expect.objectContaining({
+        error: "ai_timeout",
+        retryAfterMs: 1000,
+        signal: null,
+        market_waiting: true,
+      }),
     );
   });
 

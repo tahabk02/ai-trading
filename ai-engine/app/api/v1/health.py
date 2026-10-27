@@ -22,6 +22,8 @@ from app.services.signal_gatekeeper import (
     tier_min_confidence,
 )
 from app.services.accuracy_tracker import accuracy_report, get_accuracy_tracker
+from app.services.asset_class import resolve_asset_class
+from app.services.bayesian_ensemble import get_ensemble
 
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel, Field
@@ -170,6 +172,88 @@ class AccuracyRecordIn(BaseModel):
     entry: Optional[float] = None
     exit_price: Optional[float] = None
     tier: Optional[str] = None
+    regime: Optional[str] = None
+    component_scores: Optional[Dict[str, float]] = None
+
+
+def _realized_direction(direction: Optional[str], outcome: str) -> Optional[str]:
+    side = (direction or "").strip().upper()
+    if side in ("CALL", "LONG"):
+        side = "BUY"
+    elif side in ("PUT", "SHORT"):
+        side = "SELL"
+    if side not in ("BUY", "SELL"):
+        return None
+    if outcome == "WIN":
+        return side
+    return "SELL" if side == "BUY" else "BUY"
+
+
+def _component_scores(record: AccuracyRecordIn) -> Dict[str, float]:
+    """Map the recorded factor snapshot onto the Bayesian ensemble's components.
+
+    Quality factors are direction-relative 0/1 booleans; quant-matrix factors
+    are already signed. We only emit components whose meaning is unambiguous.
+    """
+    if record.component_scores:
+        return {
+            str(k): float(v)
+            for k, v in record.component_scores.items()
+            if float(v) != 0.0
+        }
+
+    factors = record.factors or {}
+    side = (record.direction or "").strip().upper()
+    sign = 1.0 if side in ("BUY", "CALL", "LONG") else -1.0
+    if side not in ("BUY", "SELL", "CALL", "PUT", "LONG", "SHORT"):
+        return {}
+
+    def value(name: str) -> Optional[float]:
+        raw = factors.get(name)
+        if raw is None:
+            return None
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return v if v == v and abs(v) != float("inf") else None
+
+    binary_mode = (
+        record.quality is not None
+        and bool(factors)
+        and all(v in (0.0, 1.0) for v in factors.values())
+    )
+
+    scores: Dict[str, float] = {}
+    if binary_mode:
+        momentum_parts = [value(n) for n in ("mtf", "momentum")]
+        momentum_parts = [v for v in momentum_parts if v is not None]
+        if momentum_parts:
+            scores["momentum"] = sign * (sum(momentum_parts) / len(momentum_parts))
+        pressure = value("pressure")
+        if pressure is not None:
+            scores["order_flow"] = sign * pressure
+            scores["microstructure"] = sign * pressure
+    else:
+        momentum_parts = [value(n) for n in ("micro_momentum", "macd_momentum", "momentum")]
+        momentum_parts = [v for v in momentum_parts if v is not None]
+        if momentum_parts:
+            scores["momentum"] = sum(momentum_parts) / len(momentum_parts)
+        micro_parts = [
+            value(n) for n in ("tick_velocity", "bid_ask_pressure", "price_action_delta")
+        ]
+        micro_parts = [v for v in micro_parts if v is not None]
+        if micro_parts:
+            scores["microstructure"] = sum(micro_parts) / len(micro_parts)
+        flow = value("bid_ask_pressure")
+        if flow is not None:
+            scores["order_flow"] = flow
+
+    return {
+        name: max(-1.0, min(1.0, float(score)))
+        for name, score in scores.items()
+        if abs(score) > 1e-12
+    }
 
 
 @router.get("/health/accuracy")
@@ -193,4 +277,27 @@ async def accuracy_record(record: AccuracyRecordIn) -> Dict[str, Any]:
         exit_price=record.exit_price,
         tier=record.tier,
     )
-    return tracker.report()
+
+    # Feed the same real settled outcome into the adaptive Bayesian ensemble.
+    # This is best-effort: the accuracy ledger must still return if a component
+    # mapping is absent or the ensemble rejects an ambiguous record.
+    bayesian: Dict[str, Any] = {"updated": False, "reason": "no_component_scores"}
+    realized = _realized_direction(record.direction, record.outcome)
+    scores = _component_scores(record)
+    if realized and scores:
+        try:
+            bayesian = {
+                "updated": True,
+                **get_ensemble().record_outcome(
+                    regime=record.regime or "unknown",
+                    component_scores=scores,
+                    realized_direction=realized,
+                    asset_class=resolve_asset_class(record.symbol),
+                ),
+            }
+        except (TypeError, ValueError) as exc:
+            bayesian = {"updated": False, "reason": type(exc).__name__}
+
+    report = tracker.report()
+    report["bayesian_outcome"] = bayesian
+    return report

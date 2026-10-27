@@ -1,14 +1,14 @@
 """
 live_quant.py — PURE REAL-TIME HIGH-FREQUENCY QUANT SIGNAL ENGINE (ZERO MOCK)
 
-60% MULTI-VARIABLE MARKET-STRESS THERMAL GATE (SOLE DISPATCH):
+EXECUTABLE-TIER THERMAL GATE (SOLE DISPATCH):
 
 A sub-millisecond, pure-numpy momentum evaluator designed for the real-time
 1-second tick cadence of binary/OTC feeds (Pocket Option style speed ticks).
 
 It is intentionally SEPARATE from the heavy RandomForest `/predict` path:
 
-  • /predict      → full ML inference requiring >= 85 real bars + model warmup
+  �?� /predict      ��' full ML inference requiring >= 100 real bars + model warmup
                     (seconds of latency, only triggered on candle close).
   • /tick-signal  → vectorized HIGH-FREQUENCY MICRO-MOMENTUM scoring on the
                     ACTUAL live price-action array, works with as few as 2
@@ -47,29 +47,29 @@ v6+ — REAL RSI/MACD/SPREAD CONFIRMATION + THERMAL GATE (SOLE DISPATCH)
     F12 spread_quality— REAL order-book spread tightness, signed by bid/ask
                         pressure (no book ⇒ 0, never fabricated).
   BUY/SELL is ONLY dispatched when the strict 10-book multiplicative confluence
-  clears the 60% bar (FLAT in every market regime — the market-stress
-  blend is computed and surfaced as diagnostics but NEVER lowers the bar from
-  DEFINITIVE_CONFIDENCE_MIN = 98%). USER REQUIREMENT: dispatchable signals
-  clear 60%. Below the bar the tick verdict is filtered to an honest
+  clears the executable T4-LOW bar (FLAT at 80% in every market regime — the
+  market-stress blend is computed and surfaced as diagnostics but NEVER moves
+  the bar). Below the bar the tick verdict is filtered to an honest
   market-waiting (CONFLUENCE_BELOW_THERMAL) state — direction is KEPT, never
-  padded, never coerced. No secondary pathway. No override. The 60% thermal
-  gate is the SOLE dispatch mechanism.
+  padded, never coerced. No secondary pathway. No override. The executable
+  thermal gate is the SOLE dispatch mechanism.
 
-CONFIDENCE > 60% THERMAL GATE
+CONFIDENCE ABOVE THE EXECUTABLE THERMAL GATE
   The emitted confidence of a directional live signal IS the strict
   multiplicative 10-book confluence score computed on the SAME real liquidity
   cloud (queue position + momentum + volatility pillars) the /predict path
   gates on. Weak/silent tapes honestly report their real low confluence; a
   genuinely strong impulse with a LIVE order-book queue organically crosses
-  60% instead of flatlining at the old diluted blend.
+  the executable T4-LOW floor instead of flatlining at the old diluted blend.
 
 ZERO-MOCK GUARANTEES
   • Every input comes from real observed prices/ticks — never fabricated.
   • A neutral tape is allowed to read HOLD (honest), but a genuinely moving
     tape ALWAYS resolves to BUY or SELL from real momentum math.
   • Confidence is GENUINELY continuous over [0, 100]: the number IS the real
-    multiplicative confluence, with the 60% thermal gate as the ONLY
-    dispatch filter. No artificial floor, no ceiling, no secondary pathway.
+    multiplicative confluence, with the executable thermal gate (T4-LOW 80%)
+    as the ONLY dispatch filter. No artificial floor, no ceiling, no
+    secondary pathway.
 """
 
 from __future__ import annotations
@@ -94,7 +94,6 @@ from .quant_matrix import (
 from .book_instruments import (
     book_agreement_detail,
     evaluate_book_confluence,
-    DEFINITIVE_CONFIDENCE_MIN,
 )
 from .signal_gatekeeper import (
     TIER_LABELS,
@@ -207,6 +206,7 @@ def evaluate_live_tick_signal(
     ask_depth: Optional[float] = None,
     symbol: Optional[str] = None,
     event_times: Optional[List[Any]] = None,
+    tick_timestamps: Optional[List[float]] = None,
 ) -> LiveQuantVerdict:
     """Score a REAL price array into BUY / SELL / HOLD in <1ms.
 
@@ -216,7 +216,7 @@ def evaluate_live_tick_signal(
     quoted arms when available — they drive the bid_ask_pressure factor.
     ``bid_depth``/``ask_depth`` are the REAL order-book resting liquidity when
     available — they complete the microstructure pillar on the no-volume tick
-    path and lift verified confluence across the 60% bar.
+    path and lift verified confluence across the executable T4-LOW bar.
 
     Raises ValueError only for an empty/invalid series (never fabricates).
     """
@@ -391,8 +391,8 @@ def evaluate_live_tick_signal(
     sign = 1.0 if direction == "BUY" else -1.0
 
     # ── THERMAL GATE (SOLE DISPATCH MECHANISM) ──
-    # The dispatch bar is FLAT at DEFINITIVE_CONFIDENCE_MIN (98%) — STRICTLY no
-    # signal dispatches below it, in any regime. The stress blend (vol
+    # The dispatch bar is FLAT at the executable T4-LOW tier (80%) — STRICTLY
+    # no signal dispatches below it, in any regime. The stress blend (vol
     # expansion, accelerating velocity, multi-factor coherence, book
     # absorption) is computed and surfaced as diagnostics only — it NEVER
     # lowers the bar. Every stress input is the SAME real factor stack /
@@ -453,13 +453,12 @@ def evaluate_live_tick_signal(
     # ── THE THERMAL GATE (SOLE DISPATCH MECHANISM) ──
     # The emitted confidence of a directional LIVE signal IS the strict
     # multiplicative convergence of the ten trading books (geometric-mean
-    # alignment through a logistic sharpener with the flat 60% bar — never
-    # below the DEFINITIVE_CONFIDENCE_MIN threshold) — NOT the retired diluted
-    # linear average. A BUY/SELL is emitted ONLY when the volatility
-    # (Bollinger/ATR), momentum (Murphy MACD/RSI/EMA, Donchian, Nison) and
-    # microstructure (Aldridge order-book queue — real bid/ask, else the real
-    # tick-position proxy) pillars ALL clear collectively, and the score
-    # SOLIDLY clears the 60% bar. Below it the verdict is an honest
+    # alignment through a logistic sharpener with the flat T4-LOW bar) — NOT
+    # the retired diluted linear average. A BUY/SELL is emitted ONLY when the
+    # volatility (Bollinger/ATR), momentum (Murphy MACD/RSI/EMA, Donchian,
+    # Nison) and microstructure (Aldridge order-book queue — real bid/ask,
+    # else the real tick-position proxy) pillars ALL clear collectively, and
+    # the score SOLIDLY clears the executable bar. Below it the verdict is an honest
     # market-waiting HOLD that names the failing pillar — never a padded or
     # phased signal. No secondary pathway, no adaptive floor relax, no
     # override.
@@ -470,7 +469,7 @@ def evaluate_live_tick_signal(
     )
 
     if definitive:
-        # True CALL/PUT — the books have mathematically converged at >=60%.
+        # True CALL/PUT — the books mathematically converged above the floor.
         # The emitted confidence IS the strict multiplicative book-confluence
         # score. No ceiling, no override, no clipping: the organic UNCLIPPED
         # strength is reported exactly as computed by the logistic sharpener.
@@ -486,7 +485,7 @@ def evaluate_live_tick_signal(
 
     # ── THERMAL GATE — EXECUTION FILTER (direction NEVER HOLD) ──
     # A directional verdict is ALWAYS returned (BUY/SELL). When confluence
-    # strictly clears 60% the verdict is executable (market_waiting=false)
+    # strictly clears the executable floor the verdict is executable (market_waiting=false)
     # with the UNCLIPPED real confidence. Sub-thermal attempts keep their true
     # direction and are flagged market_waiting with CONFLUENCE_BELOW_THERMAL so
     # a host never dispatches a low-confidence state — but HOLD is never
@@ -504,7 +503,7 @@ def evaluate_live_tick_signal(
             market_stress=market_stress,
         )
 
-    # ── MARKET-WAITING FLAG (60% confluence thermal gate, surfaced to UI) ──
+    # ── MARKET-WAITING FLAG (executable confluence gate, surfaced to UI) ──
     # The engine ALWAYS emits a directional signal; below the bar the
     # true direction is kept but flagged market-waiting so the UI renders
     # "converging" instead of dispatching. The state is ALWAYS directional.
@@ -611,6 +610,11 @@ def evaluate_live_tick_signal(
             prices=closes,
             highs=highs,
             lows=lows,
+            # The tick array and its OWN arrival timestamps are forwarded
+            # separately from the news-event calendar so 3-second OTC
+            # velocity/acceleration can be measured from the real tape.
+            tick_prices=closes,
+            tick_timestamps=tick_timestamps,
             bid=bid,
             ask=ask,
             bid_depth=bid_depth,

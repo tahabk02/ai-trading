@@ -587,7 +587,13 @@ class AssetHistoryUpsertJob:
         return int(now_ms // 60000 * 60000)
 
     async def _post_bars(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        resp = await self.client.post(f"{self.backend_url}/history/ingest", json=payload)
+        headers: Dict[str, str] = {}
+        api_key = (settings.AI_ENGINE_API_KEY or "").strip()
+        if api_key:
+            headers["X-API-Key"] = api_key
+        resp = await self.client.post(
+            f"{self.backend_url}/history/ingest", json=payload, headers=headers
+        )
         resp.raise_for_status()
         return resp.json()
 

@@ -61,7 +61,8 @@ async function dispatch(body: unknown): Promise<{ calls: { code: number; body: J
   const target = capture();
   const layer = postLayer();
   expect(layer).toBeDefined();
-  const handle = layer!.route!.stack[0].handle;
+  const stack = layer!.route!.stack;
+  const handle = stack[stack.length - 1].handle;
   await (handle as (req: Request, res: Response, next: () => void) => void)(
     { body } as Request,
     target.res,

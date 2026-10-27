@@ -11,6 +11,7 @@ import historyRoutes from "./history.routes";
 import signalOutcomeRoutes from "./signalOutcome.routes";
 import auditRoutes from "./audit.routes";
 import timeRoutes from "./time.routes";
+import { requireUserAuth } from "../middlewares/auth.middleware";
 
 const router = Router();
 
@@ -19,6 +20,15 @@ router.use("/auth", authRoutes);
 router.use("/", signalRoutes);
 router.use("/users", userRoutes);
 router.use("/health", healthRoutes);
+
+// User/control-plane data is authenticated in production. Local development
+// keeps the single-operator default unless AUTH_REQUIRED=true is set.
+router.use("/settings", requireUserAuth);
+router.use("/risk-rules", requireUserAuth);
+router.use("/risk-state", requireUserAuth);
+router.use("/trades", requireUserAuth);
+router.use("/signal-outcomes", requireUserAuth);
+
 router.use("/", settingsRoutes); // GET/PUT /settings
 router.use("/", riskRuleRoutes); // CRUD /risk-rules
 router.use("/", riskStateRoutes); // GET/POST/PUT /risk-state (kill switch)

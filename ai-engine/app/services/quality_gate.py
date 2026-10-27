@@ -293,11 +293,16 @@ def quality_score(
 
 
 def current_hard_gate() -> float:
-    """Effective emission bar = the STRICT EXECUTABLE tier (T1 PREMIUM 0.95).
+    """Effective emission bar = max(T1 PREMIUM 0.95, raised accuracy gate).
 
-    Kept for API compatibility; the tier ladder (signal_gatekeeper) is the
-    single source of truth and is always in lockstep.
+    The tracker's shipped base is 0.98, but its *raised* value is the only one
+    that may tighten this watershed. An unraised tracker must not silently
+    replace the executable T1 bar; when its watchdog trips, the effective gate
+    rises to the tracker's auto-raised value (never below 0.95).
     """
+    tracker = get_accuracy_tracker()
+    if tracker.is_gate_raised():
+        return max(float(QUALITY_EMIT_BAR), tracker.current_hard_gate())
     return float(QUALITY_EMIT_BAR)
 
 
@@ -321,13 +326,17 @@ def evaluate_quality(
     factors = {name: (1 if int(factors.get(name, 0)) >= 1 else 0) for name in FACTOR_ORDER}
     q = quality_score(factors, weights=weights)
     tier = resolve_tier(q)
-    if is_dispatchable_tier(tier, min_tier=MIN_EXECUTABLE_TIER):
+    gate = current_hard_gate()
+    if (
+        q + 1e-12 >= gate
+        and is_dispatchable_tier(tier, min_tier=MIN_EXECUTABLE_TIER)
+    ):
         return {
             "quality": q,
             "tier": tier,
             "tier_label": TIER_LABELS.get(tier, "WEAK"),
             "decision": "EMIT",
-            "gate": QUALITY_EMIT_BAR,
+            "gate": round(gate, 4),
             "reason": "ALL_FACTORS_ALIGNED",
         }
     w = GATE_WEIGHTS if weights is None else weights
@@ -341,7 +350,7 @@ def evaluate_quality(
         "tier": tier,
         "tier_label": TIER_LABELS.get(tier, "WEAK"),
         "decision": "BLOCK",
-        "gate": QUALITY_EMIT_BAR,
+        "gate": round(gate, 4),
         "reason": f"QUALITY_BELOW_GATE:{failed or 'UNKNOWN'}",
     }
 

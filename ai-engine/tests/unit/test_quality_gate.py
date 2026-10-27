@@ -254,3 +254,28 @@ def test_accuracy_tracker_cap_at_0995():
         t.record_outcome("EUR/USD", "SELL", 98.0, "LOSS", factors={"mtf": 0})
     assert t.current_hard_gate() == pytest.approx(0.995)
     assert t.report()["gate_auto_raised_to"] == pytest.approx(99.5)
+
+
+# ── 12 ── a raised accuracy watchdog tightens the effective quality gate
+
+def test_raised_accuracy_gate_tightens_quality_gate(monkeypatch):
+    class _RaisedTracker:
+        @staticmethod
+        def is_gate_raised() -> bool:
+            return True
+
+        @staticmethod
+        def current_hard_gate() -> float:
+            return 0.985
+
+    monkeypatch.setattr(
+        "app.services.quality_gate.get_accuracy_tracker",
+        lambda: _RaisedTracker(),
+    )
+    assert current_hard_gate() == pytest.approx(0.985)
+
+    verdict = evaluate_quality(
+        {"mtf": 1, "momentum": 1, "volatility": 1, "volume": 1, "pressure": 1}
+    )
+    assert verdict["decision"] == "EMIT"
+    assert verdict["gate"] == pytest.approx(0.985)

@@ -6,7 +6,10 @@ import axios, {
 import { getApiBaseUrl } from "@/utils/getBaseUrl";
 import { OTC_WHITELIST } from "@/constants/symbols";
 import { logDebounced503 } from "@/lib/logDebouncer";
-import { isRecoverablePredictFailure } from "@/lib/predictFailure";
+import {
+  isRecoverablePredictFailure,
+  isWaitingPredictionPayload,
+} from "@/lib/predictFailure";
 import { installPredictBudget, PREDICT_ABORT_MS } from "@/lib/predictBudget";
 import { isTier, type TierSelection } from "@/lib/signalTiers";
 
@@ -606,11 +609,15 @@ export interface TradeExecutionResponse extends ExecutionResponse<TradeResponse>
 // ── ADVANCED RISK MANAGEMENT & KILL SWITCH ──
 export interface RiskStateSnapshot {
   dayKey: string;
-  startingEquity: number;
+  /** null when the risk store is degraded — never a fabricated balance. */
+  startingEquity: number | null;
   realizedPnl: number;
-  equity: number;
-  peakEquity: number;
-  drawdownPct: number;
+  /** null when the risk store is degraded. */
+  equity: number | null;
+  /** null when the risk store is degraded. */
+  peakEquity: number | null;
+  /** null when the risk store is degraded. */
+  drawdownPct: number | null;
   maxDailyDrawdownPct: number;
   tradesToday: number;
   winsToday: number;
@@ -618,6 +625,8 @@ export interface RiskStateSnapshot {
   killSwitchLocked: boolean;
   lockedReason: string | null;
   lockedAt: string | null;
+  degraded?: boolean;
+  riskStateAvailable?: boolean;
 }
 
 export interface AuthResponse {
@@ -987,6 +996,20 @@ const apiClient = {
         },
         { signal: budgetController.signal },
       );
+      if (isWaitingPredictionPayload(data)) {
+        const waiting = new Error(
+          (data as PredictionResponse & { message?: string }).message ||
+            "Waiting for live market data - prediction resumes automatically.",
+        ) as PredictionError;
+        waiting.name = "PredictionWaitingError";
+        waiting.recoverable = true;
+        waiting.status = 200;
+        (waiting as PredictionError & { response?: unknown }).response = {
+          status: 200,
+          data,
+        };
+        throw waiting;
+      }
       return data;
     } catch (proxyError) {
       // ── RECOVERABLE vs HARD FAILURE CLASSIFIER ──

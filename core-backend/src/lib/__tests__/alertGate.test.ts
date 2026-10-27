@@ -3,8 +3,8 @@ import { isAlertEligible } from "../alertGate";
 
 /**
  * PART 41 [403] — the backend alert predicate. A high-confidence signal may be
- * broadcast ONLY when the verdict is executable && tier in T1..T3 && regime
- * gate "tradable". A 98% score on a pending/gated verdict is silent.
+ * broadcast ONLY when the verdict is executable && tier in T1..T4 && regime
+ * gate "tradable". A strong score on a pending/gated verdict is silent.
  */
 describe("isAlertEligible (PART 41 [403])", () => {
   it("allows an executable T1/tradable verdict", () => {
@@ -13,8 +13,8 @@ describe("isAlertEligible (PART 41 [403])", () => {
     ).toBe(true);
   });
 
-  it("allows the whole T1..T3 executable ladder, case/whitespace-tolerant", () => {
-    for (const tier of ["T1", "T2", "T3"]) {
+  it("allows the whole T1..T4 executable ladder, case/whitespace-tolerant", () => {
+    for (const tier of ["T1", "T2", "T3", "T4"]) {
       expect(isAlertEligible({ executable: true, tier, regime_gate: "tradable" })).toBe(true);
     }
     expect(
@@ -22,7 +22,7 @@ describe("isAlertEligible (PART 41 [403])", () => {
     ).toBe(true);
   });
 
-  it("rejects non-executable verdicts even at 98% agreement", () => {
+  it("rejects non-executable verdicts even at a high agreement score", () => {
     expect(
       isAlertEligible({ executable: false, tier: "T1", regime_gate: "tradable" }),
     ).toBe(false);
@@ -31,10 +31,7 @@ describe("isAlertEligible (PART 41 [403])", () => {
     ).toBe(false);
   });
 
-  it("rejects T4/T5 dispatch tiers (off the executable ladder)", () => {
-    expect(
-      isAlertEligible({ executable: true, tier: "T4", regime_gate: "tradable" }),
-    ).toBe(false);
+  it("rejects the scored-only T5 tier", () => {
     expect(
       isAlertEligible({ executable: true, tier: "T5", regime_gate: "tradable" }),
     ).toBe(false);

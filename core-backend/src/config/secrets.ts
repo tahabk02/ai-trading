@@ -143,6 +143,13 @@ export const secrets = {
     (process.env.JWT_SECRET || "").trim() || "insecure-development-only-secret-do-not-use",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || "24h",
 
+  // ── API authentication ──
+  // Secure by default in production: every user/control-plane route requires a
+  // valid Bearer JWT. Local development keeps its zero-setup single-operator
+  // flow unless AUTH_REQUIRED=true is set explicitly. Even with this flag off,
+  // a supplied token is still verified and an invalid one is rejected.
+  AUTH_REQUIRED: boolFlag(process.env.AUTH_REQUIRED, IS_PRODUCTION),
+
   // ── Redis ──
   REDIS_HOST: process.env.REDIS_HOST || "localhost",
   REDIS_PORT: Number(process.env.REDIS_PORT) || 6379,

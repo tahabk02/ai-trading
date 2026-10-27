@@ -92,6 +92,11 @@ export const postSignalOutcome = async (req: Request, res: Response) => {
         body.factors && typeof body.factors === "object"
           ? (body.factors as Record<string, number>)
           : null,
+      regime: typeof body.regime === "string" ? body.regime : null,
+      componentScores:
+        body.componentScores && typeof body.componentScores === "object"
+          ? (body.componentScores as Record<string, number>)
+          : null,
     });
     const latencyMs = Date.now() - t0;
     logger.info(

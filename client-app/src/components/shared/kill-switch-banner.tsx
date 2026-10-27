@@ -59,9 +59,10 @@ export const KillSwitchBanner: React.FC = () => {
   if (!riskState) return null;
 
   const drawdown = riskState.drawdownPct;
+  const hasDrawdown = typeof drawdown === "number";
   const limit = riskState.maxDailyDrawdownPct;
-  const usagePct = Math.min(100, (drawdown / limit) * 100);
-  const nearLimit = drawdown >= limit * 0.7;
+  const usagePct = hasDrawdown ? Math.min(100, (drawdown / limit) * 100) : 0;
+  const nearLimit = hasDrawdown && drawdown >= limit * 0.7;
 
   return (
     <div
@@ -168,7 +169,7 @@ export const KillSwitchBanner: React.FC = () => {
       <div className="flex items-center justify-between gap-4 text-[10px] font-mono">
         <span className="flex items-center gap-1 text-ink-muted">
           <TrendingDown className="w-3 h-3" />
-          DD {drawdown.toFixed(2)}% / {limit}%
+          DD {hasDrawdown ? `${drawdown.toFixed(2)}%` : "unavailable"} / {limit}%
         </span>
         <span className="text-ink-muted">
           P&L{" "}

@@ -1,7 +1,71 @@
 import { PrismaClient } from "@prisma/client";
+import axios from "axios";
 import { logger } from "../utils/logger";
+import { secrets } from "../config/secrets";
+import { AI_ENGINE_HTTP_AGENT } from "../utils/aiEngineHttp";
 
 const prisma = new PrismaClient();
+
+const buildAccuracyRecordUrl = (baseUrl: string): string => {
+  const cleaned = baseUrl.replace(/\/+$/, "");
+  if (cleaned.endsWith("/api/v1")) return `${cleaned}/accuracy/record`;
+  if (cleaned.endsWith("/api")) return `${cleaned}/v1/accuracy/record`;
+  return `${cleaned}/api/v1/accuracy/record`;
+};
+
+/**
+ * Best-effort replication of a REAL closed outcome into the AI Engine's rolling
+ * accuracy tracker and Bayesian ensemble. The local row is authoritative; an
+ * AI outage must never fail or delay the trade-result API.
+ */
+async function forwardOutcomeToAi(
+  input: RecordSignalOutcomeInput,
+  safeTier: string,
+): Promise<void> {
+  const direction = normalizeDirection(input.direction);
+  if (!direction) return;
+
+  try {
+    await axios.post(
+      buildAccuracyRecordUrl(secrets.AI_ENGINE_URL),
+      {
+        symbol: input.symbol.trim().toUpperCase(),
+        direction,
+        confidence: sanitizeFloat(input.confidence),
+        outcome: input.outcome,
+        quality: sanitizeFloat(input.quality),
+        factors: input.factors ?? null,
+        entry: sanitizeFloat(input.entry),
+        exit_price: sanitizeFloat(input.exitPrice),
+        tier: safeTier,
+        ...(input.regime ? { regime: input.regime } : {}),
+        ...(input.componentScores
+          ? { component_scores: input.componentScores }
+          : {}),
+      },
+      {
+        timeout: 3_000,
+        httpAgent: AI_ENGINE_HTTP_AGENT,
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": secrets.AI_ENGINE_API_KEY,
+        },
+      },
+    );
+  } catch (error) {
+    logger.warn("[SignalOutcomeService] AI accuracy forwarding failed", {
+      symbol: input.symbol,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function normalizeDirection(raw: string | null | undefined): "BUY" | "SELL" | null {
+  const value = (raw || "").trim().toUpperCase();
+  if (value === "BUY" || value === "CALL" || value === "LONG") return "BUY";
+  if (value === "SELL" || value === "PUT" || value === "SHORT") return "SELL";
+  return null;
+}
 
 /**
  * SignalOutcomeService — persistent accuracy ledger for dispatched signals.
@@ -25,6 +89,10 @@ export interface RecordSignalOutcomeInput {
   pnl?: number | null;
   timeframe?: string | null;
   signalId?: string | null;
+  /** Market regime at signal time, when known (improves Bayesian attribution). */
+  regime?: string | null;
+  /** Explicit signed component scores; optional if `factors` are descriptive. */
+  componentScores?: Record<string, number> | null;
 }
 
 export interface SignalOutcomeStats {
@@ -79,6 +147,10 @@ export class SignalOutcomeService {
       outcome: input.outcome,
       pnl: sanitizeFloat(input.pnl) ?? undefined,
     });
+
+    // Fire-and-forget: never block the HTTP response or fail the ledger write.
+    void forwardOutcomeToAi({ ...input, symbol }, safeTier);
+
     return row;
   }
 

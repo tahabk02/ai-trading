@@ -13,12 +13,11 @@ Design:
   * ``record_outcome`` is the single ingestion point. The live execution path
     (core-backend fills) posts real closed-trade outcomes to it; tests call it
     directly with the same contract.
-  * AUTO-RAISE WATCHDOG: because the shipped hard gate is 0.98, if the rolling
-    win-rate ever drops strictly below that configured precision target the
-    tracker raises the effective ensemble gate (toward 0.99) so the engine
-    tightens into higher evidence instead of silently degrading. The raised
-    gate is a live value read by quality_gate.evaluate_quality — it genuinely
-    takes effect on the next emission decision.
+  * AUTO-RAISE WATCHDOG: the tracker's precision contract is 0.98. If the
+    rolling win-rate drops below the watchdog trigger, it raises its own gate
+    (toward 0.995) so the engine tightens into higher evidence. quality_gate
+    consults ONLY that raised value; when unraised, the executable T1 (0.95)
+    watershed remains in force.
   * Every metrics field is honest real observed count — no fabrication, no
     demos. An empty window reports an explicit "insufficient_data" state.
 
@@ -175,8 +174,12 @@ class AccuracyTracker:
 
     # ── gate consult ──
     def current_hard_gate(self) -> float:
-        """Effective hard gate = canonical 0.98, auto-raised if the watchdog
-        has tripped (the value quality_gate actually enforces)."""
+        """Tracker's canonical 0.98 contract, auto-raised after a watchdog trip.
+
+        ``quality_gate.current_hard_gate`` only imports this value when
+        ``is_gate_raised()`` is true; an unraised tracker does not replace the
+        executable T1 (0.95) quality watershed.
+        """
         return float(self._gate_override) if self._gate_override is not None else float(HARD_GATE)
 
     def is_gate_raised(self) -> bool:

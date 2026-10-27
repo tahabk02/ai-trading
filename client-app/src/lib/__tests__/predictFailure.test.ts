@@ -11,6 +11,7 @@ import { describe, it, expect } from "vitest";
 import {
   isAwaitingLiveData,
   isRecoverablePredictFailure,
+  isWaitingPredictionPayload,
 } from "@/lib/predictFailure";
 
 describe("[470] isAwaitingLiveData", () => {
@@ -47,6 +48,28 @@ describe("[470] isAwaitingLiveData", () => {
   });
 });
 
+describe("[470] isWaitingPredictionPayload", () => {
+  it("recognises a market-waiting 200 without a fabricated direction", () => {
+    expect(
+      isWaitingPredictionPayload({
+        signal: null,
+        market_waiting: true,
+        recoverable: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat a real directional verdict as waiting", () => {
+    expect(
+      isWaitingPredictionPayload({ signal: "BUY", market_waiting: true }),
+    ).toBe(false);
+    expect(
+      isWaitingPredictionPayload({ signal: "SELL", market_waiting: false }),
+    ).toBe(false);
+    expect(isWaitingPredictionPayload(null)).toBe(false);
+  });
+});
+
 describe("[470] isRecoverablePredictFailure", () => {
   it("treats the awaiting-tick 503 as recoverable (handled, not an error)", () => {
     expect(
@@ -59,6 +82,16 @@ describe("[470] isRecoverablePredictFailure", () => {
 
   it("treats 429 as recoverable (request never accepted)", () => {
     expect(isRecoverablePredictFailure(429, {})).toBe(true);
+  });
+
+  it("treats a 200 market-waiting payload as recoverable", () => {
+    expect(
+      isRecoverablePredictFailure(200, {
+        signal: null,
+        market_waiting: true,
+        error: "ai_timeout",
+      }),
+    ).toBe(true);
   });
 
   it("treats a real 5xx as a hard error", () => {

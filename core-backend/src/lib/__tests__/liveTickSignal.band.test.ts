@@ -175,6 +175,18 @@ describe("[377] the engine's execution surface is forwarded, not dropped", () =>
     expect(frame.market_waiting).toBe(false);
   });
 
+  it("forwards the real tick arrival timestamps separately from event_times", async () => {
+    const S = freshSymbol();
+    await dispatch(S);
+
+    const payload = post.mock.calls[0][1];
+    expect(payload.tick_timestamps).toHaveLength(3);
+    expect(payload.tick_timestamps.every((s: number) => s > 1_000_000_000)).toBe(
+      true,
+    );
+    expect(payload.event_times).toBeUndefined();
+  });
+
   it("forwards a SUPPRESSED band verbatim (regime override ⇒ T5, scored-only)", async () => {
     const S = freshSymbol();
     post.mockResolvedValue(

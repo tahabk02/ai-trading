@@ -67,6 +67,7 @@ services:
       # the fast structural verdict (inference_fallback="ml_budget_exceeded")
       # and warms the model cache in the background. 0 = legacy unbounded.
       AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
+      AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -90,6 +91,7 @@ services:
       # that was the recurring EADDRINUSE-era live-503 root cause. Override
       # from the repo-root .env if the engine is exposed elsewhere.
       AI_ENGINE_URL: ${AI_ENGINE_URL:-http://ai-engine:8000}
+      AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:-}
       JWT_SECRET: ${JWT_SECRET:-ultra-secure-secret-key}
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: 8788
@@ -115,6 +117,8 @@ services:
       dockerfile: Dockerfile
     container_name: dashboard_ui
     environment:
+      API_PROXY_URL: http://core-backend:4000
+      AI_PROXY_URL: http://ai-engine:8000
       NEXT_PUBLIC_API_URL: http://localhost:4000
       NEXT_PUBLIC_WS_URL: http://localhost:4000
       TZ: UTC

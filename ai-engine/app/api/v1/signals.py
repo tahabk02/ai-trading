@@ -173,7 +173,7 @@ STRICT_OTC_WHITELIST = frozenset({
 })
 
 PREDICT_PIPELINE_TIMEOUT_SECONDS = 120.0
-# ── ALIGNED WITH ml_predictor.MIN_TRAINING_CANDLES (85) ──
+# ── ALIGNED WITH ml_predictor.MIN_TRAINING_CANDLES (100) ──
 # STRICT ZERO-FABRICATION: the Node backend now passes ONLY real observed
 # candles (historical bars + live-accumulated appendTick buckets). No
 # deterministic backfill exists anymore — real bars may be short until enough
@@ -646,7 +646,7 @@ async def tick_signal(data: Dict[str, Any]):
     into BUY / SELL (never HOLD) using the pure 9-factor MICRO-MOMENTUM
     confluence
     (tick velocity + acceleration, order-flow imbalance, bid-ask pressure)
-    with NO hardcoded confidence floor, NO 85-bar requirement and NO lagging
+    with NO hardcoded confidence floor, NO full-pipeline bar requirement and NO lagging
     RSI/EMA/MACD arbitration.
 
     Accepts either:
@@ -807,6 +807,7 @@ async def tick_signal(data: Dict[str, Any]):
             ask_depth=ask_depth,
             symbol=symbol,
             event_times=data.get("event_times"),
+            tick_timestamps=data.get("tick_timestamps"),
         )
 
         # Genuine ATR from the verdict's real Wilder ATR diagnostics (robust on
@@ -1204,6 +1205,7 @@ async def predict_signal(data: PredictRequest):
                 None,   # ask_depth
                 symbol,
                 data.event_times,
+                data.tick_timestamps,
             )
         except InferenceAdmissionTimeout as e:
             logger.error(

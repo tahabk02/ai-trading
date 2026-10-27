@@ -27,7 +27,11 @@ from .core.runtime_state import (
 from .services.signal_generator import SignalGenerator
 from .messaging.publisher import RedisPublisher
 from .data.cache import data_cache
-from .services.ml_predictor import predict_with_rf, _model_cache
+from .services.ml_predictor import (
+    predict_with_rf,
+    _model_cache,
+    MIN_TRAINING_CANDLES,
+)
 from .api.v1.endpoints import api_router
 from .api.v1.health import health_live_report, health_report, gate_report
 
@@ -94,10 +98,9 @@ WARMUP_SYMBOLS = os.environ.get(
 WARMUP_SYMBOLS = [s.strip() for s in WARMUP_SYMBOLS if s.strip()]
 WARMUP_TIMEFRAMES = ["1d", "1h"]
 # ── ALIGNED WITH ML FLOOR (ml_predictor.MIN_TRAINING_CANDLES) ──
-# Frankfurter business-day cadence yields ~85 real daily bars per window;
-# the collector now expands its calendar window so >= this many REAL
-# observations arrive naturally. Below-floor feeds skip warmup — never pad.
-WARMUP_MIN_BARS = 85
+# The trainer refuses <100 real bars, so warming a model on a shorter window
+# would only guarantee a failed fit. Below-floor feeds skip warmup — never pad.
+WARMUP_MIN_BARS = MIN_TRAINING_CANDLES
 
 # ── Warmup concurrency / rate-limit guards ──
 WARMUP_CONCURRENCY = 4       # max 4 simultaneous API requests

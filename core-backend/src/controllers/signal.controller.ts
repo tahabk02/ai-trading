@@ -16,6 +16,12 @@ import {
 import { clampMinTierToEngineSet, readMinTier } from "../lib/signalTiers";
 import type { SignalTier } from "../lib/signalTiers";
 import { isAlertEligible } from "../lib/alertGate";
+import {
+  HIGH_CONFIDENCE_ALERT_THRESHOLD,
+  isHighConfidence,
+} from "../lib/signalThresholds";
+import { isCacheUnavailable, isDbUnavailable } from "../lib/storageAvailability";
+import { normalizeSignalLimit } from "../lib/signalQuery";
 
 const prisma = new PrismaClient();
 
@@ -99,12 +105,10 @@ const TIMEFRAME_DESIRED_BARS: Record<string, number> = {
   "1d": 200,
 };
 
-/** HIGH-CONFIDENCE NOTIFICATION THRESHOLD — fires a priority WS toast above this.
- *  Mirrors the AI Engine's ALERT threshold. Since v12 the AI Engine's
- *  `high_confidence_alert` fires on an organically converged DEFINITIVE
- *  (>=98%) 10-book verdict (no secondary pathway, no dynamic floor), the
- *  priority toast threshold is locked to that same 98% thermal gate. */
-export const HIGH_CONFIDENCE_THRESHOLD = 98.0;
+/** HIGH-CONFIDENCE NOTIFICATION THRESHOLD — fires a priority WS toast above
+ *  this. Re-exported for compatibility; the value lives in
+ *  lib/signalThresholds.ts and mirrors the AI Engine's ALERT threshold. */
+export const HIGH_CONFIDENCE_THRESHOLD = HIGH_CONFIDENCE_ALERT_THRESHOLD;
 
 // ════════════════════════════════════════════════════════════════════
 // SHORT-TTL /predict RESULT CACHE — kills the duplicate-inference storm
@@ -323,6 +327,91 @@ export function buildStaleFallbackPayload(
     proxyLatencyMs: elapsedMs,
     timestamp: new Date().toISOString(),
   };
+}
+
+export interface PredictFallbackInput {
+  symbol: string;
+  timeframe: string;
+  requestedTimeframe?: string;
+  livePrice?: number | null;
+  atr?: number;
+  reason: string;
+  detail: string;
+  message: string;
+  error?: string;
+  connecting?: boolean;
+  collecting?: boolean;
+  liveTickAgeMs?: number | null;
+  barsCollected?: number;
+  barsRequired?: number;
+  elapsedMs?: number;
+  retryAfterMs?: number;
+  aiFailure?: AiEngineFailure;
+  candles?: ForexCandle[];
+}
+
+export function buildPredictFallbackPayload(
+  input: PredictFallbackInput,
+): Record<string, unknown> {
+  const livePrice =
+    typeof input.livePrice === "number" &&
+    Number.isFinite(input.livePrice) &&
+    input.livePrice > 0
+      ? input.livePrice
+      : 0;
+  const payload: Record<string, unknown> = {
+    symbol: input.symbol,
+    timeframe: input.timeframe,
+    ...(input.requestedTimeframe
+      ? { requestedTimeframe: input.requestedTimeframe }
+      : {}),
+    signal: null,
+    confidence: null,
+    target_price: livePrice,
+    current_price: livePrice,
+    currentPrice: livePrice,
+    delta_pct: 0,
+    market_waiting: true,
+    executable: false,
+    regime_gate: "pending_data",
+    waiting_reason: input.reason,
+    waiting_detail: input.detail,
+    message: input.message,
+    recoverable: true,
+    ...(input.error ? { error: input.error } : {}),
+    ...(input.connecting ? { connecting: true } : {}),
+    ...(input.collecting ? { collecting: true } : {}),
+    ...(input.liveTickAgeMs != null
+      ? { live_tick_age_ms: input.liveTickAgeMs }
+      : {}),
+    ...(input.barsCollected != null
+      ? { bars_collected: input.barsCollected }
+      : {}),
+    ...(input.barsRequired != null ? { bars_required: input.barsRequired } : {}),
+    ...(input.retryAfterMs != null
+      ? { retryAfterMs: input.retryAfterMs }
+      : {}),
+    ...(input.aiFailure
+      ? {
+          aiEngineAvailable: false,
+          aiEngineFailure: {
+            kind: input.aiFailure.kind,
+            code: input.aiFailure.code,
+            detail: input.aiFailure.detail,
+          },
+        }
+      : {}),
+    ...(input.candles
+      ? {
+          barCount: input.candles.length,
+          candles: input.candles.map((bar) => ({ ...bar })),
+          future_candles: [],
+        }
+      : {}),
+    proxyLatencyMs: input.elapsedMs ?? 0,
+    timestamp: new Date().toISOString(),
+  };
+  return payload;
 }
 
 const sleep = (ms: number): Promise<void> =>
@@ -649,21 +738,42 @@ const TICK_SIGNAL_TIMEOUT_MS = 4_000;
 
 /** Map internal numeric-ms candles to the AI Engine ISO-string contract. */
 function mapCandlesToAiFormat(bars: ForexCandle[]) {
-  return bars.map((b) => ({
-    timestamp: new Date(b.timestamp).toISOString(),
-    open: b.open,
-    high: b.high,
-    low: b.low,
-    close: b.close,
-    volume: b.volume,
-  }));
+  return bars.flatMap((bar) => {
+    const timestamp = new Date(bar.timestamp);
+    const open = Number(bar.open);
+    const high = Number(bar.high);
+    const low = Number(bar.low);
+    const close = Number(bar.close);
+    const volume = Number(bar.volume);
+    if (!Number.isFinite(timestamp.getTime())) return [];
+    if (
+      ![open, high, low, close].every(
+        (value) => Number.isFinite(value) && value > 0,
+      )
+    ) {
+      return [];
+    }
+    if (!Number.isFinite(volume) || volume < 0) return [];
+    if (high < Math.max(open, close, low)) return [];
+    if (low > Math.min(open, close, high)) return [];
+    return [
+      {
+        timestamp: timestamp.toISOString(),
+        open,
+        high,
+        low,
+        close,
+        volume,
+      },
+    ];
+  });
 }
 
 /**
  * HIGH-CONFIDENCE WEBSOCKET EVENT — fires when a dispatched signal's
- * confidence crosses the 98% DEFINITIVE thermal gate (HIGH_CONFIDENCE_THRESHOLD,
- * aligned with the AI Engine's organic 10-book verdict). The frontend renders a
- * priority toast with an alert sound on receipt of `high_confidence_signal`.
+ * confidence clears the shared HIGH_CONFIDENCE_ALERT_THRESHOLD, aligned with
+ * the AI Engine's organic 10-book verdict. The frontend renders a priority
+ * toast with an alert sound on receipt of `high_confidence_signal`.
  */
 function maybeBroadcastHighConfidence(prediction: {
   symbol?: string;
@@ -681,11 +791,11 @@ function maybeBroadcastHighConfidence(prediction: {
     const conf = Number(prediction.confidence);
     if (
       Number.isFinite(conf) &&
-      conf >= HIGH_CONFIDENCE_THRESHOLD &&
+      isHighConfidence(conf) &&
       prediction.signal &&
       prediction.market_waiting !== true &&
-      // PART 41 [403] — a 98% score on a GATED verdict is not an alert. Only an
-      // actually-executable high-precision signal may ring the bell.
+      // PART 41 [403] — a strong score on a GATED verdict is not an alert. Only
+      // an actually-executable high-precision signal may ring the bell.
       isAlertEligible(prediction)
     ) {
       websocketService.broadcastHighConfidenceSignal({
@@ -709,47 +819,7 @@ function maybeBroadcastHighConfidence(prediction: {
 }
 
 // ── Signal CRUD ──
-/**
- * Distinguish "the database is unreachable" from "the query failed". A DB
- * outage is a RECOVERABLE infrastructure condition (503 + retry), not a bug in
- * the request (500). Prisma surfaces it as a known error code, an
- * initialization error, or a connection-level message — all of which mean the
- * caller should retry, never that the API is broken.
- */
-function isDbUnavailable(error: unknown): boolean {
-  const code = (error as { code?: string } | null)?.code;
-  if (code && ["P1001", "P1008", "P1017", "P2024"].includes(code)) return true;
-  const name = (error as { name?: string } | null)?.name;
-  if (name === "PrismaClientInitializationError") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /can'?t reach database server|connection (pool|refused)|Timed out fetching a new connection|ECONNREFUSED (?:127\.0\.0\.1|localhost|::1):5433/i.test(
-    message,
-  );
-}
 
-/**
- * Redis/cache outages are a SEPARATE recoverable condition from a DB outage.
- * ioredis surfaces them as `MaxRetriesPerRequestError` / `ReplyError`, an
- * `NR_CLOSED` code, or a connection message naming Redis — all of which mean
- * "cache unavailable", never "database unavailable". Checked BEFORE the DB
- * classifier because a refused Redis connection carries a bare ECONNREFUSED.
- */
-function isCacheUnavailable(error: unknown): boolean {
-  const name = (error as { name?: string } | null)?.name ?? "";
-  if (
-    /redis/i.test(name) ||
-    name === "MaxRetriesPerRequestError" ||
-    name === "ReplyError"
-  ) {
-    return true;
-  }
-  const code = (error as { code?: string } | null)?.code;
-  if (code === "NR_CLOSED") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /redis|MaxRetriesPerRequest|Stream isn'?t writeable|ECONNREFUSED .*:6379/i.test(
-    message,
-  );
-}
 
 export const getSignals = async (req: Request, res: Response) => {
   const t0 = Date.now();
@@ -758,28 +828,23 @@ export const getSignals = async (req: Request, res: Response) => {
     const signals = await prisma.signal.findMany({
       where: symbol ? { symbol: String(symbol) } : {},
       orderBy: { createdAt: "desc" },
-      take: Math.min(Number(limit), 100),
+      take: normalizeSignalLimit(limit),
     });
     logger.info(`[signals] status=200 latency_ms=${Date.now() - t0}`);
     return res.json(signals);
   } catch (error) {
     const latencyMs = Date.now() - t0;
-    if (isCacheUnavailable(error)) {
-      logger.error(
-        `[signals] status=503 cache_unavailable latency_ms=${latencyMs}`,
-        { error: error instanceof Error ? error.message : String(error) },
-      );
-      return res.status(503).json({ error: "cache_unavailable" });
-    }
-    if (isDbUnavailable(error)) {
-      logger.error(
-        `[signals] status=503 db_unavailable latency_ms=${latencyMs}`,
-        { error: error instanceof Error ? error.message : String(error) },
-      );
-      return res.status(503).json({ error: "db_unavailable" });
-    }
-    logger.error(`[signals] status=500 latency_ms=${latencyMs}`, { error });
-    return res.status(500).json({ error: "Internal Server Error" });
+    const reason = isCacheUnavailable(error)
+      ? "cache_unavailable"
+      : isDbUnavailable(error)
+        ? "db_unavailable"
+        : "query_failed";
+    logger.error(
+      `[signals] status=200 degraded=${reason} latency_ms=${latencyMs}`,
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    res.setHeader("X-Signals-Degraded", reason);
+    return res.json([]);
   }
 };
 
@@ -792,21 +857,16 @@ export const getSignalById = async (req: Request, res: Response) => {
     return res.json(signal);
   } catch (error) {
     const latencyMs = Date.now() - t0;
-    if (isCacheUnavailable(error)) {
-      logger.error(
-        `[signals] status=503 cache_unavailable latency_ms=${latencyMs}`,
-        { error: error instanceof Error ? error.message : String(error) },
-      );
-      return res.status(503).json({ error: "cache_unavailable" });
-    }
-    if (isDbUnavailable(error)) {
-      logger.error(
-        `[signals] status=503 db_unavailable latency_ms=${latencyMs}`,
-        { error: error instanceof Error ? error.message : String(error) },
-      );
-      return res.status(503).json({ error: "db_unavailable" });
-    }
-    return res.status(500).json({ error: "Internal Server Error" });
+    const reason = isCacheUnavailable(error)
+      ? "cache_unavailable"
+      : isDbUnavailable(error)
+        ? "db_unavailable"
+        : "query_failed";
+    logger.error(
+      `[signals] status=503 ${reason} latency_ms=${latencyMs}`,
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+    return res.status(503).json({ error: reason, recoverable: true });
   }
 };
 
@@ -1044,20 +1104,28 @@ export const predictSignal = async (req: Request, res: Response) => {
     logger.info(
       `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=error`,
     );
-    return res.status(503).json({
-      error: "Awaiting real-time tick",
-      symbol: normalizedSymbol,
-      message: tickIsStale
-        ? "Holding the last known good price while every live source is exhausted — signal generation stays paused until a fresh real-time tick arrives."
-        : tickAgeMs != null
-          ? `No fresh live quote observed for ${staleMs}ms — signal generation is paused. Analysis resumes on the next real-time tick.`
-          : "Waiting for Real-time Tick — no live quote yet. Analysis resumes once the real-time bridge delivers a fresh quote.",
-      timeframe: normalizedTimeframe,
-      connecting: true,
-      live_tick_age_ms: staleMs,
-      live_price_source: livePriceSource,
-      timestamp: new Date().toISOString(),
-    });
+    return res.json(
+      buildPredictFallbackPayload({
+        symbol: normalizedSymbol,
+        timeframe: normalizedTimeframe,
+        requestedTimeframe: normalizedTimeframe,
+        livePrice: effectiveLivePrice,
+        reason: "AWAITING_REAL_TIME_TICK",
+        detail: tickIsStale
+          ? "Last known good price held while every live source is exhausted."
+          : tickAgeMs != null
+            ? `No fresh live quote observed for ${staleMs}ms.`
+            : "No live quote observed yet.",
+        message: tickIsStale
+          ? "Holding the last known good price while every live source is exhausted — signal generation stays paused until a fresh real-time tick arrives."
+          : tickAgeMs != null
+            ? `No fresh live quote observed for ${staleMs}ms — signal generation is paused. Analysis resumes on the next real-time tick.`
+            : "Waiting for Real-time Tick — no live quote yet. Analysis resumes once the real-time bridge delivers a fresh quote.",
+        connecting: true,
+        liveTickAgeMs: staleMs,
+        elapsedMs: Date.now() - t0,
+      }),
+    );
   }
 
   // ── Step 2: CONSERVE & ACCUMULATE REAL CANDLES (ZERO-FABRICATION) ──
@@ -1141,16 +1209,21 @@ export const predictSignal = async (req: Request, res: Response) => {
       logger.info(
         `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=error`,
       );
-      return res.status(503).json({
-        error: "Awaiting live market data",
-        symbol: normalizedSymbol,
-        message: `Not enough real historical bars yet (${buffered.length}/${MINIMUM_REQUIRED_BARS}). Live ticks are being recorded — a definitive signal will be available once sufficient real bars accumulate. The zero-fabrication policy refuses to invent candles.`,
-        timeframe: normalizedTimeframe,
-        bars_collected: buffered.length,
-        bars_required: MINIMUM_REQUIRED_BARS,
-        collecting: true,
-        timestamp: new Date().toISOString(),
-      });
+      return res.json(
+        buildPredictFallbackPayload({
+          symbol: normalizedSymbol,
+          timeframe: normalizedTimeframe,
+          requestedTimeframe: normalizedTimeframe,
+          livePrice: effectiveLivePrice,
+          reason: "AWAITING_LIVE_MARKET_DATA",
+          detail: `Not enough real historical bars yet (${buffered.length}/${MINIMUM_REQUIRED_BARS}).`,
+          message: `Not enough real historical bars yet (${buffered.length}/${MINIMUM_REQUIRED_BARS}). Live ticks are being recorded — a definitive signal will be available once sufficient real bars accumulate. The zero-fabrication policy refuses to invent candles.`,
+          collecting: true,
+          barsCollected: buffered.length,
+          barsRequired: MINIMUM_REQUIRED_BARS,
+          elapsedMs: Date.now() - t0,
+        }),
+      );
     }
   }
 
@@ -1251,6 +1324,42 @@ export const predictSignal = async (req: Request, res: Response) => {
       `[predict] symbol=${normalizedSymbol} tf=${tfNormalized} status=ok latency_ms=${elapsed}`,
     );
 
+    const upstreamSignal =
+      typeof prediction?.signal === "string"
+        ? prediction.signal.trim().toUpperCase()
+        : null;
+    if (upstreamSignal !== "BUY" && upstreamSignal !== "SELL") {
+      logger.warn(
+        "[signal.controller] AI Engine returned no directional verdict - serving honest waiting payload",
+        {
+          symbol: normalizedSymbol,
+          timeframe: normalizedTimeframe,
+          upstreamSignal: prediction?.signal ?? null,
+          marketWaiting: prediction?.market_waiting === true,
+        },
+      );
+      return res.json(
+        buildPredictFallbackPayload({
+          symbol: normalizedSymbol,
+          timeframe: tfNormalized,
+          requestedTimeframe: normalizedTimeframe,
+          livePrice: effectiveLivePrice,
+          reason:
+            typeof prediction?.waiting_reason === "string"
+              ? prediction.waiting_reason
+              : "NO_DIRECTIONAL_SIGNAL",
+          detail:
+            typeof prediction?.waiting_detail === "string"
+              ? prediction.waiting_detail
+              : "The AI Engine completed without a BUY/SELL verdict.",
+          message:
+            "The AI Engine completed without a directional verdict. No signal was fabricated; analysis continues on the next fresh tick.",
+          elapsedMs: elapsed,
+          candles: bars,
+        }),
+      );
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // CONFIDENCE SANITIZER — normalizes every upstream scale to 0-100.
     // ════════════════════════════════════════════════════════════════════
@@ -1265,7 +1374,7 @@ export const predictSignal = async (req: Request, res: Response) => {
     // STEP 5 — VOLATILITY-DRIVEN TARGET PRICING (AUTHORITATIVE)
     // Target = live price +/− ATR-scaled distance. ZERO hash injection.
     // ════════════════════════════════════════════════════════════════════
-    const direction = prediction.signal as "BUY" | "SELL";
+    const direction = upstreamSignal as "BUY" | "SELL";
 
     // ── AUTHORITATIVE VERDICT PASSTHROUGH ──
     // The Python engine's BUY/SELL is the SINGLE source of truth for direction
@@ -1391,7 +1500,7 @@ export const predictSignal = async (req: Request, res: Response) => {
     // var that re-enables it, in either service.
     // ════════════════════════════════════════════════════════════════════
 
-    // ── HIGH-CONFIDENCE (>=60%) WEBSOCKET NOTIFICATION EVENT ──
+    // ── HIGH-CONFIDENCE WEBSOCKET NOTIFICATION EVENT ──
     // Suppressed in batch (/multi-predict) mode so a grid horizon change never
     // spams 34 priority toasts — the terminal surfaces verdicts in-card.
     if (!silent) {
@@ -1496,14 +1605,22 @@ export const predictSignal = async (req: Request, res: Response) => {
           )
           .json(stale);
       }
-      return res.status(503).json({
-        error: "ai_timeout",
-        retryAfterMs: 1000,
-        symbol: normalizedSymbol,
-        timeframe: normalizedTimeframe,
-        proxyLatencyMs: elapsed,
-        timestamp: new Date().toISOString(),
-      });
+      return res.json(
+        buildPredictFallbackPayload({
+          symbol: normalizedSymbol,
+          timeframe: tfNormalized,
+          requestedTimeframe: normalizedTimeframe,
+          livePrice: effectiveLivePrice,
+          reason: "AI_ENGINE_TIMEOUT",
+          detail: aiFailure.detail,
+          message:
+            "The AI Engine exceeded its inference budget. No direction was dispatched; retrying shortly.",
+          error: "ai_timeout",
+          elapsedMs: elapsed,
+          retryAfterMs: 1000,
+          aiFailure,
+        }),
+      );
     }
 
     const stale = buildStaleFallbackPayload(
@@ -1530,24 +1647,23 @@ export const predictSignal = async (req: Request, res: Response) => {
         .json(stale);
     }
 
-    return res.status(503).json({
-      error: "ai_unavailable",
-      detail: aiFailure.detail,
-      message:
-        "The AI Engine is currently unavailable or rejected the payload. " +
-        "No direction was dispatched — retrying.",
-      symbol: normalizedSymbol,
-      timeframe: normalizedTimeframe,
-      proxyLatencyMs: elapsed,
-      recoverable: true,
-      aiEngineAvailable: false,
-      aiEngineFailure: {
-        kind: aiFailure.kind,
-        code: aiFailure.code,
+    return res.json(
+      buildPredictFallbackPayload({
+        symbol: normalizedSymbol,
+        timeframe: tfNormalized,
+        requestedTimeframe: normalizedTimeframe,
+        livePrice: effectiveLivePrice,
+        reason: "AI_ENGINE_UNAVAILABLE",
         detail: aiFailure.detail,
-      },
-      timestamp: new Date().toISOString(),
-    });
+        message:
+          "The AI Engine is currently unavailable or rejected the payload. " +
+          "No direction was dispatched — retrying shortly.",
+        error: "ai_unavailable",
+        elapsedMs: elapsed,
+        retryAfterMs: 1000,
+        aiFailure,
+      }),
+    );
   }
 };
 

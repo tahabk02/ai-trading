@@ -1,6 +1,11 @@
 import { Request, Response } from "express";
 import { logger } from "../utils/logger";
-import { riskStateService } from "../services/riskState.service";
+import {
+  DEFAULT_MAX_DAILY_DRAWDOWN_PCT,
+  riskStateService,
+  type RiskStateSnapshot,
+} from "../services/riskState.service";
+import { isDbUnavailable } from "../lib/storageAvailability";
 
 // ════════════════════════════════════════════════════════════════════
 // SHORT-TTL IN-MEMORY GET CACHE — /risk-state HTTP ERROR ELIMINATION
@@ -39,18 +44,75 @@ function bustRiskStateCache(userId: string): void {
   riskStateCache.delete(userId);
 }
 
+export type DegradedRiskStateSnapshot = Omit<
+  RiskStateSnapshot,
+  "startingEquity" | "equity" | "peakEquity" | "drawdownPct"
+> & {
+  startingEquity: null;
+  equity: null;
+  peakEquity: null;
+  drawdownPct: null;
+  degraded: true;
+  riskStateAvailable: false;
+};
+
+export function buildDegradedRiskState(
+  maxDailyDrawdownPct = DEFAULT_MAX_DAILY_DRAWDOWN_PCT,
+): DegradedRiskStateSnapshot {
+  const now = new Date();
+  return {
+    dayKey: now.toISOString().slice(0, 10),
+    // Never fabricate a funded account when storage is down: the UI must show
+    // "unavailable", not a plausible but false $10,000 balance.
+    startingEquity: null,
+    realizedPnl: 0,
+    equity: null,
+    peakEquity: null,
+    drawdownPct: null,
+    maxDailyDrawdownPct,
+    tradesToday: 0,
+    winsToday: 0,
+    lossesToday: 0,
+    killSwitchLocked: true,
+    lockedReason:
+      "RISK STATE UNAVAILABLE - trading is fail-closed until the risk store recovers.",
+    lockedAt: now.toISOString(),
+    degraded: true,
+    riskStateAvailable: false,
+  };
+}
+
+function sendRiskUnavailable(
+  res: Response,
+  operation: string,
+  error: unknown,
+): Response {
+  const reason = isDbUnavailable(error)
+    ? "db_unavailable"
+    : "risk_state_unavailable";
+  logger.error(`[riskState.controller] ${operation} failed`, {
+    error: error instanceof Error ? error.message : String(error),
+    reason,
+    recoverable: true,
+  });
+  return res.status(503).json({
+    error: reason,
+    message:
+      "Risk state storage is temporarily unavailable. The request was not applied; retry shortly.",
+    recoverable: true,
+  });
+}
+
 /**
  * GET /risk-state
  * Returns the caller's live daily-risk snapshot: equity curve, drawdown %,
  * trade counters, and kill-switch status. Served from a short-TTL cache.
  */
 export const getRiskState = async (req: Request, res: Response) => {
-  try {
-    // Auth middleware attaches the verified user; fall back to a stable
-    // single-operator identity for signal-only deployments.
-    const userId =
-      (req as Request & { user?: { id?: string } }).user?.id ?? "default";
+  const userId =
+    (req as Request & { user?: { id?: string } }).user?.id ?? "default";
 
+  try {
     const cached = getCachedRiskState(userId);
     if (cached !== null) {
       res.setHeader("Cache-Control", `private, max-age=${RISK_STATE_TTL_MS / 1000}`);
@@ -62,10 +124,16 @@ export const getRiskState = async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", `private, max-age=${RISK_STATE_TTL_MS / 1000}`);
     return res.json(snapshot);
   } catch (error) {
-    logger.error("[riskState.controller] Failed to load risk state", {
-      error,
+    const degraded = buildDegradedRiskState(
+      riskStateService.getEffectiveDrawdownLimit(userId),
+    );
+    logger.error("[riskState.controller] Failed to load risk state - serving fail-closed snapshot", {
+      error: error instanceof Error ? error.message : String(error),
+      recoverable: true,
     });
-    return res.status(500).json({ error: "Internal Server Error" });
+    res.setHeader("X-Risk-State-Degraded", "true");
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(degraded);
   }
 };
 
@@ -98,10 +166,7 @@ export const postTradeResult = async (req: Request, res: Response) => {
     bustRiskStateCache(userId);
     return res.json(snapshot);
   } catch (error) {
-    logger.error("[riskState.controller] Failed to record trade result", {
-      error,
-    });
-    return res.status(500).json({ error: "Internal Server Error" });
+    return sendRiskUnavailable(res, "Failed to record trade result", error);
   }
 };
 
@@ -120,10 +185,7 @@ export const postResetKillSwitch = async (req: Request, res: Response) => {
     bustRiskStateCache(userId);
     return res.json(snapshot);
   } catch (error) {
-    logger.error("[riskState.controller] Kill switch reset failed", {
-      error,
-    });
-    return res.status(500).json({ error: "Internal Server Error" });
+    return sendRiskUnavailable(res, "Kill switch reset failed", error);
   }
 };
 
@@ -146,10 +208,7 @@ export const postEngageKillSwitch = async (req: Request, res: Response) => {
     bustRiskStateCache(userId);
     return res.json(snapshot);
   } catch (error) {
-    logger.error("[riskState.controller] Kill switch engage failed", {
-      error,
-    });
-    return res.status(500).json({ error: "Internal Server Error" });
+    return sendRiskUnavailable(res, "Kill switch engage failed", error);
   }
 };
 
@@ -183,9 +242,6 @@ export const putMaxDrawdown = async (req: Request, res: Response) => {
     bustRiskStateCache(userId);
     return res.json(snapshot);
   } catch (error) {
-    logger.error("[riskState.controller] Max drawdown update failed", {
-      error,
-    });
-    return res.status(500).json({ error: "Internal Server Error" });
+    return sendRiskUnavailable(res, "Max drawdown update failed", error);
   }
 };

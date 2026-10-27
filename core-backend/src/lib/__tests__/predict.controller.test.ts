@@ -1,9 +1,9 @@
 /**
- * predict.controller.test.ts — /predict 503 CONTRACT (QUICK FIX mission [1]).
+ * predict.controller.test.ts — /predict graceful-fallback contract.
  *
  * Two hard rules under test:
- *   1. The AI timeout NEVER yields a bare 503 — it answers
- *      { error: "ai_timeout", ... } with a JSON body.
+ *   1. An AI timeout NEVER yields a bare error — it answers 200 with an
+ *      honest { error: "ai_timeout", market_waiting: true, signal: null } body.
  *   2. A successful AI pass-through answers 200 with the full prediction
  *      payload (signal, confidence, target, candles, latency metadata).
  */
@@ -178,7 +178,7 @@ const AI_PAYLOAD = {
   book_confluence: { book_confirm: 0.98 },
 };
 
-describe("POST /api/v1/predict — 503 body contract (QUICK FIX [1])", () => {
+describe("POST /api/v1/predict — graceful fallback contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetEngineCircuit(); // never let breaker state bleed between tests
@@ -203,7 +203,7 @@ describe("POST /api/v1/predict — 503 body contract (QUICK FIX [1])", () => {
     tickBuffer.getLatestSpread.mockReturnValue({ bid: 1.1524, ask: 1.1526 });
   });
 
-  it("test_predict_returns_503_with_body_on_timeout", async () => {
+  it("test_predict_returns_graceful_waiting_payload_on_timeout", async () => {
     // The AI Engine exceeds the 3s budget and axios surfaces ECONNABORTED.
     axiosPost.post.mockRejectedValue(
       new AxiosError(
@@ -221,10 +221,13 @@ describe("POST /api/v1/predict — 503 body contract (QUICK FIX [1])", () => {
 
     expect(calls.length).toBe(1);
     const [response] = calls;
-    expect(response.code).toBe(503);
-    // NEVER a bare 503 — ALWAYS a JSON body with a structured error.
+    expect(response.code).toBe(200);
     expect(response.body).toBeTruthy();
     expect(response.body.error).toBe("ai_timeout");
+    expect(response.body.signal).toBeNull();
+    expect(response.body.market_waiting).toBe(true);
+    expect(response.body.executable).toBe(false);
+    expect(response.body.recoverable).toBe(true);
     expect(response.body.retryAfterMs).toBe(1000);
     expect(response.body.symbol).toBe("EUR/USD");
     expect(typeof response.body.proxyLatencyMs).toBe("number");

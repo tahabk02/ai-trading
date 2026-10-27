@@ -96,11 +96,13 @@ def test_run_once_covers_every_whitelisted_symbol():
 def test_posts_via_httpx_to_core_ingest_route(monkeypatch):
     from app.core.config import settings
 
+    monkeypatch.setattr(settings, "AI_ENGINE_API_KEY", "test-service-key")
     observed = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         observed["method"] = request.method
         observed["path"] = request.url.path
+        observed["api_key"] = request.headers.get("X-API-Key")
         observed["payload"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -126,6 +128,7 @@ def test_posts_via_httpx_to_core_ingest_route(monkeypatch):
     assert n == 1
     assert observed["method"] == "POST"
     assert observed["path"] == "/api/v1/history/ingest"
+    assert observed["api_key"] == "test-service-key"
     payload = observed["payload"]
     assert payload["symbol"] == "EUR/CHF"
     assert payload["bars"][0]["close"] == 1.265
