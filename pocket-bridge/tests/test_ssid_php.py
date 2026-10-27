@@ -45,6 +45,26 @@ MISMATCHED = (
 MISMATCHED_FIXED = MISMATCHED.replace("a:4:{", "a:5:{", 1)
 TOO_HIGH = CANONICAL.replace("a:4:{", "a:6:{", 1)
 
+#: Production-shaped 264-character session: 48-char UA + device_id under a
+#: stale a:4 header.
+MISMATCHED_264 = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;'
+    's:9:"device_id";s:5:"abcde";}'
+) + HASH
+
+#: Unknown PHP value type: strict tokenization fails, regex fallback must still
+#: count the five top-level keys.
+FALLBACK_ONLY = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;'
+    's:9:"device_id";O:8:"stdClass":0:{};}'
+) + HASH
+
 
 def _frame(session: str, **overrides) -> str:
     auth = {
@@ -68,6 +88,19 @@ def test_extra_php_fields_are_preserved_while_count_is_corrected():
 
 def test_count_that_is_too_high_is_corrected():
     assert normalize_php_session(TOO_HIGH) == CANONICAL
+
+
+def test_264_char_production_session_count_is_recalculated():
+    assert len(MISMATCHED_264) == 264
+    normalized = normalize_php_session(MISMATCHED_264)
+    assert normalized == MISMATCHED_264.replace("a:4:{", "a:5:{", 1)
+    assert normalized.endswith(HASH)
+
+
+def test_regex_fallback_counts_keys_when_strict_parser_fails():
+    normalized = normalize_php_session(FALLBACK_ONLY)
+    assert normalized.startswith("a:5:{")
+    assert 's:9:"device_id";O:8:"stdClass":0:{};' in normalized
 
 
 def test_raw_php_session_is_wrapped_with_real_account_metadata(monkeypatch):

@@ -173,17 +173,53 @@ class _PhpSessionParser:
         return entries
 
 
+_PHP_SESSION_KEY_TOKEN = re.compile(rb's:\d+:"[a-z]+(?:_[a-z]+)+";')
+
+
+def _php_declared_count(text: str) -> Optional[int]:
+    match = re.match(r"a:(\d+):", text)
+    return int(match.group(1)) if match else None
+
+
+def _replace_php_count(data: bytes, actual: int) -> bytes:
+    colon = data.find(b":", 2)
+    if colon < 0 or not data[2:colon].isdigit():
+        raise ValueError("invalid PHP session array header")
+    return b"a:%d" % actual + data[colon:]
+
+
 def _fix_php_session_count(text: str) -> str:
+    """Strict length-aware pass: fix the header without altering fields."""
     data = text.encode("utf-8", "surrogatepass")
     parser = _PhpSessionParser(data)
     entries = parser._read_array()
     if b"session_id" not in entries:
         raise ValueError("missing PHP session_id")
-    actual = parser.top_level_count
-    colon = data.find(b":", 2)
-    if colon < 0 or not data[2:colon].isdigit():
-        raise ValueError("invalid PHP session array header")
-    return (b"a:%d" % actual + data[colon:]).decode("utf-8", "surrogatepass")
+    return _replace_php_count(data, parser.top_level_count).decode(
+        "utf-8", "surrogatepass"
+    )
+
+
+def _fix_php_session_count_fallback(text: str) -> str:
+    """Regex fallback for sessions the strict parser cannot tokenize.
+
+    Counts top-level snake_case keys (``session_id``, ``device_id``, ...)
+    rather than every ``s:`` token so ordinary string values do not inflate
+    the count. The strict parser remains the primary path; this only runs when
+    an unknown PHP value type blocks full tokenization.
+    """
+    data = text.encode("utf-8", "surrogatepass")
+    start = data.find(b"{")
+    end = data.rfind(b"}")
+    if start < 0 or end <= start:
+        raise ValueError("unterminated PHP session array")
+    body = data[start + 1:end]
+    if b'"session_id"' not in body:
+        raise ValueError("missing PHP session_id")
+    actual = len(_PHP_SESSION_KEY_TOKEN.findall(body))
+    if actual < 2:
+        raise ValueError("could not count PHP session entries")
+    return _replace_php_count(data, actual).decode("utf-8", "surrogatepass")
 
 
 def normalize_php_session(value: str) -> str:
@@ -215,12 +251,22 @@ def normalize_php_session(value: str) -> str:
         seen.add(candidate)
         try:
             normalized = _fix_php_session_count(candidate)
-        except (TypeError, ValueError):
-            continue
+        except (TypeError, ValueError) as exc:
+            # Only fall back for value types the strict tokenizer does not
+            # know. A malformed string length/sheared token is not something a
+            # header rewrite can fix, and rewriting it would corrupt input.
+            if "unsupported PHP session value" not in str(exc):
+                continue
+            try:
+                normalized = _fix_php_session_count_fallback(candidate)
+            except (TypeError, ValueError):
+                continue
         if normalized != text:
             logger.info(
-                "PHP_SESSION_NORMALIZED - corrected stale PHP array count "
-                "(all session fields preserved)"
+                "PHP_SESSION_NORMALIZED - corrected PHP array count "
+                "declared=%s corrected=%s (all session fields preserved)",
+                _php_declared_count(candidate),
+                _php_declared_count(normalized),
             )
         return normalized
     return text
