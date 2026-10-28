@@ -47,8 +47,9 @@ async def _probe_via_library(auth: dict) -> bool:
     try:
         client = PocketOptionAsync(auth_message(auth))
         await asyncio.wait_for(client.wait_for_assets(timeout=60), timeout=60)
-        print(f"AUTH_OK session_len={len(auth.get('session', ''))} "
-              f"uid={mask_uid(auth.get('uid'))} isDemo={auth.get('isDemo')}")
+        print(f"AUTH_OK session_len={len(auth.get('session') or auth.get('sessionToken', ''))} "
+              f"uid={mask_uid(auth.get('uid'))} isDemo={auth.get('isDemo')} "
+              f"auth_field={'sessionToken' if auth.get('sessionToken') else 'session'}")
     except Exception as exc:  # noqa: BLE001
         print(f"AUTH_FAILED reason={str(exc)[:200]}")
         return False
@@ -127,9 +128,12 @@ def main() -> int:
     stored = load_stored_session(PO_SESSION_PATH)
     if stored.exists and stored.has_ssid:
         auth = stored.as_auth()
-        auth["session"] = auth.get("session") or ""
+        auth["session"] = auth.get("session") or auth.get("sessionToken", "")
         origin = f"session:{PO_SESSION_PATH}"
         print(f"SSID_FOUND true origin={origin} session_len={len(auth['session'])}")
+        print(
+            f"AUTH_FIELD {'sessionToken' if auth.get('sessionToken') else 'session'}"
+        )
         print(f"SESSION_CAPTURED_AT {stored.captured_at or 'n/a'}")
         print(f"SESSION_AGE_DAYS {round(stored.age_days, 2)}")
         print(f"COOKIE_HEADER_SENT {mask_secret(stored.cookie_header(), 8)}")
@@ -150,9 +154,10 @@ def main() -> int:
             print(f"AUTH_FAILED invalid SSID: {exc}")
             return 1
         normalized = raw.strip().strip("'\"").strip()
-        print(f"ssid_present={bool(auth.get('session'))}")
+        print(f"ssid_present={bool(auth.get('session') or auth.get('sessionToken'))}")
         print(f"ssid_format={'full' if normalized.startswith('42[') else 'raw'}")
-        print(f"ssid_length={len(auth.get('session', ''))}")
+        print(f"ssid_length={len(auth.get('session') or auth.get('sessionToken', ''))}")
+        print(f"auth_field={'sessionToken' if auth.get('sessionToken') else 'session'}")
         print(f"uid={mask_uid(auth.get('uid'))}")
         print(f"is_demo={auth.get('isDemo')}")
         return 0 if asyncio.run(verify(auth)) else 1

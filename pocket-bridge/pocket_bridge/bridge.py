@@ -45,6 +45,7 @@ from .config import (
     parse_ssid,
     read_env_ssid,
     sanitize_php_session,
+    SESSION_TOKEN_FIELD,
     session_reload_needed,
 )
 from .m20_engine import M20Engine, M20Candle
@@ -59,6 +60,20 @@ DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket
 #: reconnect storm that could look like brute-forcing.
 TRANSIENT_CONNECT_ATTEMPTS = 3
 RECONNECT_BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60)
+
+#: Consecutive broker stream timeouts (with ZERO ticks received anywhere)
+#: before the bridge treats the session as dead instead of reconnecting
+#: forever. The SDK raises "Subscription stream timed out after 60s waiting
+#: for data" when the token authenticates but is not authorised to receive
+#: market data (expired / incomplete ssid). Retrying that every 60s per symbol
+#: is both useless and ban-risky, so after this many strikes we stop and ask
+#: for a fresh capture — exactly like a parse-terminal SSID failure.
+STREAM_TIMEOUT_STREAK_LIMIT = 3
+_STREAM_TIMEOUT_MARKERS = (
+    "subscription stream timed out",
+    "waiting for data from",
+    "timed out waiting for data",
+)
 
 #: Extra seconds the bridge waits beyond the SDK's own handshake budget before
 #: declaring a transport failure. Without this the Python-side
@@ -92,7 +107,7 @@ _TRANSPORT_ERROR_MARKERS = (
 
 
 _JSON_SESSION_FIELD_RE = re.compile(
-    r'("(?:session|ssid|token|cookie|password|secret)"\s*:\s*)'
+    r'("(?:session|sessionToken|session_token|ssid|token|cookie|password|secret)"\s*:\s*)'
     r'"((?:[^"\\]|\\.)*)"',
     re.IGNORECASE,
 )
@@ -164,6 +179,8 @@ def _sdk_payload_diagnostics(payload: object, auth: dict) -> str:
     embedded = _payload_auth(payload)
     effective = embedded or (auth if isinstance(auth, dict) else {})
     session = effective.get("session")
+    if not isinstance(session, str) or not session:
+        session = effective.get(SESSION_TOKEN_FIELD, "")
     if not isinstance(session, str):
         session = ""
     if isinstance(payload, str) and payload.startswith("a:"):
@@ -357,6 +374,10 @@ class PocketOptionBridge:
         #: rejected the session. The reader loop uses it to stop retrying a
         #: permanently unparseable SSID instead of spinning forever.
         self._ssid_parse_terminal = False
+        #: Consecutive SDK "stream timed out waiting for data" failures with no
+        #: ticks anywhere. Reset on the first real tick; trips terminal session
+        #: expiry at STREAM_TIMEOUT_STREAK_LIMIT.
+        self._stream_timeout_streak = 0
         self._session_last_mtime = self.session.mtime
         #: HTTP Cookie header built from the stored cookies (masked when logged).
         self.cookie_header: str = self.session.cookie_header()
@@ -533,6 +554,10 @@ class PocketOptionBridge:
         flat 4/5-element PHP array from recoverable scalar fields, dropping
         objects/nested structures the Rust parser cannot digest.
         """
+        if auth.get(SESSION_TOKEN_FIELD):
+            # Real-account tokens are valid strings; forcing a PHP header here
+            # would corrupt them into an unparseable ``a:5`` body.
+            return []
         session = auth.get("session")
         if not isinstance(session, str) or not session:
             return []
@@ -657,8 +682,10 @@ class PocketOptionBridge:
         kwargs: Dict[str, object] = {"config": sdk_config}
         auth_dict = self._auth_dict()
         payload = self._auth_payload()
-        via = "env" if self.settings.has_ssid else "session"
-        session_len = len(str(auth_dict.get("session", "")))
+        via = self.settings.ssid_source if self.settings.has_ssid else "session"
+        session_len = len(
+            str(auth_dict.get("session") or auth_dict.get(SESSION_TOKEN_FIELD, ""))
+        )
         logger.info(
             "connecting urls=%s init_timeout=%ss rotate=%s",
             urls or "(sdk default regional list)",
@@ -686,7 +713,9 @@ class PocketOptionBridge:
 
         diag_auth = _payload_auth(payload) or auth_dict
         diag_session = (
-            diag_auth.get("session") if isinstance(diag_auth, dict) else ""
+            (diag_auth.get("session") or diag_auth.get(SESSION_TOKEN_FIELD, ""))
+            if isinstance(diag_auth, dict)
+            else ""
         )
         if not isinstance(diag_session, str):
             diag_session = ""
@@ -779,7 +808,7 @@ class PocketOptionBridge:
         ``auth_message`` repairs while preserving every field.
         """
         auth = self._auth_dict()
-        if not auth.get("session"):
+        if not (auth.get("session") or auth.get(SESSION_TOKEN_FIELD)):
             return ""
         return auth_message(auth)
 
@@ -1006,6 +1035,10 @@ class PocketOptionBridge:
                     symbol, quote["price"], ts_ms,
                 )
             self._tick_seq += 1
+            # Any real tick proves the session is authorised for market data;
+            # clear the no-data strike counter so a later isolated stall does
+            # not inherit strikes from an earlier outage.
+            self._stream_timeout_streak = 0
             # Zero-drop closed-candle emit: every bucket finalized by this tick
             # is streamed in order (handle_tick_all), never only the last one.
             closed = self.engine.handle_tick_all(symbol, price, ts_ms, bid, ask, volume)
@@ -1581,10 +1614,10 @@ class PocketOptionBridge:
             # i.e. the refresh only ever worked when the env var was empty.
             if env_ssid and self.settings.adopt_ssid(env_ssid):
                 logger.info(
-                    "SSID_ADOPTED_FROM_ENV",
-                    uid=mask_uid(self.settings.uid),
-                    is_demo=self.settings.is_demo,
-                    format=self.settings.ssid_format,
+                    "SSID_ADOPTED_FROM_ENV uid=%s is_demo=%s format=%s",
+                    mask_uid(self.settings.uid),
+                    self.settings.is_demo,
+                    self.settings.ssid_format,
                 )
             logger.info(
                 "SESSION_REFRESHED captured_at=%s",
@@ -1621,6 +1654,17 @@ class PocketOptionBridge:
             logger.critical("SESSION_EXPIRED — re-run capture_session.py")
         elif reason:
             logger.critical("AUTH FAILED — SSID expired or invalid (%s)", reason)
+
+    @staticmethod
+    def _is_stream_timeout(exc: BaseException) -> bool:
+        """True when the SDK reports a subscription that never produced data.
+
+        These are NOT transport crashes: the socket is up but the broker never
+        pushes a tick, which means the session is not authorised for market
+        data (expired/incomplete ssid). Reconnecting cannot fix that.
+        """
+        text = str(exc).lower()
+        return any(marker in text for marker in _STREAM_TIMEOUT_MARKERS)
 
     def _stream_progressed(self, auth_epoch: int, tick_seq: int) -> bool:
         """True when a reader authenticated or received ticks since it started.
@@ -1696,6 +1740,32 @@ class PocketOptionBridge:
                     )
                     await self._enter_session_expired(str(exc))
                     return
+                # Broker accepted the socket but never pushed a tick. That is
+                # NOT a transport crash: the session authenticates yet is not
+                # authorised for market data (expired/incomplete SSID). The SDK
+                # waits 60s per attempt, so an endless per-symbol retry is both
+                # useless and ban-risky. Trip terminal only when NO tick has
+                # arrived anywhere, and only after N consecutive strikes.
+                if self._is_stream_timeout(exc) and self._tick_seq == tick_seq:
+                    self._stream_timeout_streak += 1
+                    logger.warning(
+                        "FEED_STALL_TIMEOUT reader=%s streak=%d/%d - broker "
+                        "socket is up but sent no ticks (session may be "
+                        "expired or missing ssid authorisation)",
+                        symbol,
+                        self._stream_timeout_streak,
+                        STREAM_TIMEOUT_STREAK_LIMIT,
+                    )
+                    if self._stream_timeout_streak >= STREAM_TIMEOUT_STREAK_LIMIT:
+                        logger.critical(
+                            "FEED_STALL_TERMINAL - no ticks after %d attempts; "
+                            "stopping retries to request a fresh session capture",
+                            self._stream_timeout_streak,
+                        )
+                        await self._enter_session_expired(str(exc))
+                        return
+                else:
+                    self._stream_timeout_streak = 0
                 # Genuine crash (network loss, malformed stream, dead SDK
                 # channel): back off geometrically, bounded by
                 # reconnect_max_delay — but NEVER permanently stall, so a plate

@@ -145,11 +145,12 @@ def _now() -> str:
 
 
 def extract_ssid_from_frame(frame: str) -> Optional[str]:
-    """Pull the ``session`` token out of a ``42["auth",{...}]`` Socket.IO frame.
+    """Pull the credential out of a ``42["auth",{...}]`` Socket.IO frame.
 
-    The payload is the JSON array after the Socket.IO ``42`` packet prefix, so
-    we locate the first ``[`` and parse from there (handles the odd extra
-    namespace byte without guessing).
+    Real accounts carry a direct ``sessionToken``; demo/legacy captures carry
+    the PHP ``session``. The payload is the JSON array after the Socket.IO
+    ``42`` packet prefix, so we locate the first ``[`` and parse from there
+    (handles the odd extra namespace byte without guessing).
     """
     if not frame or '"auth"' not in frame:
         return None
@@ -164,8 +165,12 @@ def extract_ssid_from_frame(frame: str) -> Optional[str]:
         return None
     if packet[0] != "auth" or not isinstance(packet[1], dict):
         return None
-    session = packet[1].get("session")
-    return str(session) if session else None
+    payload = packet[1]
+    session = payload.get("session")
+    if session:
+        return str(session)
+    token = payload.get("sessionToken") or payload.get("session_token")
+    return str(token) if token else None
 
 
 def should_attempt_credential_login(

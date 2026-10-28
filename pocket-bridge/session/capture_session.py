@@ -94,7 +94,10 @@ def _extract_auth_ssid(frame_text: str) -> str:
     if not isinstance(payload, dict):
         return ""
     session = payload.get("session")
-    return str(session) if session else ""
+    if session:
+        return str(session)
+    token = payload.get("sessionToken") or payload.get("session_token")
+    return str(token) if token else ""
 
 
 def capture(wait_minutes: float, output: Path) -> int:

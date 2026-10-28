@@ -814,14 +814,51 @@ def normalize_php_session(value: str) -> str:
     return text
 
 
+#: Canonical variable -> accepted legacy/alias spellings. The canonical name
+#: always wins; aliases exist so deployments that used the shorter ``PO_*``
+#: names do not silently boot without credentials or with demo metadata.
+ENV_ALIASES: Dict[str, tuple] = {
+    "POCKET_OPTION_SSID": ("PO_SSID",),
+    "POCKET_OPTION_IS_DEMO": ("PO_IS_DEMO",),
+    "POCKET_OPTION_UID": ("PO_USER_ID",),
+    "POCKET_OPTION_SESSION_TOKEN": ("PO_SESSION_TOKEN",),
+    "POCKET_OPTION_SSID_FILE": ("PO_SSID_FILE",),
+}
+
+
+def _env_value(name: str, default: str = "") -> str:
+    """Return the first non-empty value among ``name`` and its aliases."""
+    for candidate in (name, *ENV_ALIASES.get(name, ())):
+        raw = os.getenv(candidate, "")
+        if raw is not None and raw.strip():
+            return raw.strip()
+    return default
+
+
 def _env_int(name: str, default: int) -> int:
-    raw = (os.getenv(name, "") or "").strip()
+    raw = _env_value(name)
     if not raw:
         return default
     try:
         return int(raw)
     except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
+        raise ValueError(
+            f"{name} must be an integer (accepted aliases: "
+            f"{', '.join(ENV_ALIASES.get(name, ())) or 'none'}); got {raw!r}"
+        ) from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = _env_value(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be a number (accepted aliases: "
+            f"{', '.join(ENV_ALIASES.get(name, ())) or 'none'}); got {raw!r}"
+        ) from exc
 
 
 def _coerce_int(value: object, default: int, field: str) -> int:
@@ -833,23 +870,129 @@ def _coerce_int(value: object, default: int, field: str) -> int:
         raise ValueError(f"Pocket Option auth field {field} must be an integer") from exc
 
 
-def normalize_auth_fields(auth: dict) -> dict:
-    """Normalize session + account metadata into the SDK's expected shape."""
-    payload = dict(auth)
-    session = payload.get("session")
-    if isinstance(session, str):
-        payload["session"] = sanitize_php_session(session)
+#: Real-account Pocket Option frames use a clean ``sessionToken`` instead of the
+#: legacy PHP serialized ``session``. The token is a direct string and must
+#: NEVER reach ``normalize_php_session`` (the Rust parser then reports
+#: ``Expected '}' but got 's'``).
+SESSION_TOKEN_FIELD = "sessionToken"
+SESSION_TOKEN_ALIASES = (SESSION_TOKEN_FIELD, "session_token")
+SESSION_TOKEN_PREFIX = "sessionToken:"
+_SESSION_TOKEN_PREFIXES = (
+    "sessionToken:",
+    "session_token:",
+    "sessionToken=",
+    "session_token=",
+)
+_SESSION_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+#: Real browser captures can also carry an opaque >=20-char token (letters,
+#: digits, ``_``/``-``) instead of the 32-hex form. This is inferred ONLY for
+#: ``isDemo == 0``; demo SSIDs stay on the legacy ``session`` path. PHP
+#: serialization markers (``a:``, ``O:``, ``s:``) contain ``:`` and therefore
+#: can never match.
+_OPAQUE_SESSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
-    uid = payload.get("uid")
-    if uid is None or uid == "":
-        uid = _env_int("POCKET_OPTION_UID", 0)
-    payload["uid"] = _coerce_int(uid, 0, "uid")
+
+def is_clean_session_token(value: object) -> bool:
+    """True for a clean 32-hex real-account session token.
+
+    The strict shape is deliberate: legacy raw demo SSIDs are arbitrary short
+    strings and must keep flowing through the ``session`` field. Explicit
+    ``sessionToken`` fields / prefixes are handled separately and may contain
+    any non-empty token.
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_SESSION_TOKEN_RE.fullmatch(value.strip()))
+
+
+def is_inferred_session_token(value: object) -> bool:
+    """True for a credential that should be sent as ``sessionToken``.
+
+    Covers both the historical 32-hex token and the newer opaque >=20-char
+    token emitted by the browser capture (the production ``.env`` uses the
+    latter). Only called after ``isDemo == 0`` has been established, so demo
+    SSIDs can never be reclassified.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    return bool(
+        _SESSION_TOKEN_RE.fullmatch(text)
+        or _OPAQUE_SESSION_TOKEN_RE.fullmatch(text)
+    )
+
+
+def split_session_token_prefix(value: object) -> tuple[str, bool]:
+    """Strip an explicit ``sessionToken:``/``session_token=`` marker."""
+    if not isinstance(value, str):
+        return "", False
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    for prefix in _SESSION_TOKEN_PREFIXES:
+        if text.startswith(prefix):
+            return text[len(prefix):].strip(), True
+    return text, False
+
+
+def _session_token_marker(token: str) -> str:
+    return SESSION_TOKEN_PREFIX + (token or "").strip()
+
+
+def normalize_auth_fields(auth: dict) -> dict:
+    """Normalize session + account metadata into the SDK's expected shape.
+
+    Real accounts (``isDemo == 0``) may carry a clean ``sessionToken``; demo
+    accounts and legacy captures still carry the PHP-serialized ``session``.
+    The canonical internal dict always exposes ``session`` (for existing
+    callers) and adds ``sessionToken`` when the credential is token-based.
+    """
+    payload = dict(auth)
 
     demo_value = payload.get("isDemo", payload.get("is_demo"))
     if demo_value is None or demo_value == "":
         demo_value = _env_int("POCKET_OPTION_IS_DEMO", 0)
     payload["isDemo"] = _coerce_int(demo_value, 0, "isDemo")
     payload.pop("is_demo", None)
+
+    explicit_token: Optional[str] = None
+    for key in SESSION_TOKEN_ALIASES:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            explicit_token, _ = split_session_token_prefix(value)
+            break
+
+    session = payload.get("session")
+    session_text, session_prefixed = split_session_token_prefix(session)
+    if session_prefixed and session_text:
+        explicit_token = session_text
+
+    token = explicit_token
+    if (
+        token is None
+        and payload["isDemo"] == 0
+        and is_inferred_session_token(session_text)
+    ):
+        token = session_text.strip()
+
+    payload.pop("session_token", None)
+    if token:
+        payload[SESSION_TOKEN_FIELD] = token
+        # Internal compatibility: every bridge call-site still reads the
+        # canonical ``session`` value, but auth_message() emits ONLY the
+        # sessionToken field on the wire for real accounts.
+        payload["session"] = token
+    else:
+        payload.pop(SESSION_TOKEN_FIELD, None)
+        if isinstance(session, str):
+            payload["session"] = sanitize_php_session(session_text)
+
+    uid = payload.get("uid")
+    if uid is None or uid == "":
+        uid = _env_int("POCKET_OPTION_UID", 0)
+    payload["uid"] = _coerce_int(uid, 0, "uid")
 
     payload["platform"] = _coerce_int(payload.get("platform"), 2, "platform")
     payload.setdefault("isFastHistory", True)
@@ -859,10 +1002,12 @@ def normalize_auth_fields(auth: dict) -> dict:
 def parse_ssid(value: str) -> dict:
     """Return canonical auth fields from a raw session or any captured frame.
 
-    Accepted forms: a bare session token, ``42["auth",{...}]``, ``["auth",{...}]``
-    (the frame with the Socket.IO ``42`` prefix already stripped), and
-    ``["42","auth",{...}]`` (a JSON-dumped capture). Raw tokens take ``uid`` /
-    ``isDemo`` from the environment, which is why demo mode must be forwarded.
+    Accepted forms: a bare session token, an explicit ``sessionToken:...``
+    value, ``42["auth",{...}]``, ``["auth",{...}]`` (the frame with the
+    Socket.IO ``42`` prefix already stripped), and ``["42","auth",{...}]`` (a
+    JSON-dumped capture). Raw tokens take ``uid`` / ``isDemo`` from the
+    environment, which is why demo mode must be forwarded. Clean 32-hex raw
+    tokens are inferred as real-account ``sessionToken`` credentials.
     """
     raw = (value or "").strip()
     if raw.startswith("'") and raw.endswith("'"):
@@ -872,6 +1017,20 @@ def parse_ssid(value: str) -> dict:
     raw = raw.strip()
     if not raw:
         return {}
+    raw, token_prefixed = split_session_token_prefix(raw)
+    if token_prefixed:
+        if not raw:
+            return {}
+        return normalize_auth_fields(
+            {
+                "session": raw,
+                SESSION_TOKEN_FIELD: raw,
+                "isDemo": _env_int("POCKET_OPTION_IS_DEMO", 0),
+                "uid": _env_int("POCKET_OPTION_UID", 0),
+                "platform": 2,
+                "isFastHistory": True,
+            }
+        )
     if raw.startswith("42["):
         raw = raw[2:]
 
@@ -905,14 +1064,19 @@ def parse_ssid(value: str) -> dict:
         ):
             payload = dict(message[2])
 
-        if payload is None or not payload.get("session"):
+        has_credential = payload is not None and any(
+            isinstance(payload.get(key), str) and payload[key].strip()
+            for key in ("session", *SESSION_TOKEN_ALIASES)
+        )
+        if not has_credential:
             logger.critical(
                 "invalid POCKET_OPTION_SSID value=%s error=%s",
                 mask_secret(raw, 16),
                 "expected 42[\"auth\",{...}]",
             )
             raise ValueError(
-                "POCKET_OPTION_SSID must contain a 42[\"auth\",{...}] session"
+                "POCKET_OPTION_SSID must contain a 42[\"auth\",{...}] "
+                "session/sessionToken"
             )
 
         return normalize_auth_fields(payload)
@@ -933,15 +1097,71 @@ def parse_ssid(value: str) -> dict:
     )
 
 
+def _php_session_for_token(token: str) -> str:
+    """Wrap a real-account opaque token in the PHP session the SDK parses.
+
+    BinaryOptionsToolsV2 0.2.14 validates that the frame has a ``session``
+    field and then hands that value to its Rust PHP parser. A bare 20-char
+    token (the shape written by the browser capture) therefore fails with
+    ``Error parsing session data`` even though the token itself is valid. The
+    SDK's own real-account shape stores the token as ``session_id`` inside a
+    flat PHP array, so build that canonically and never mutate the token.
+    """
+    return build_php_session(
+        {
+            "session_id": token,
+            "ip_address": (
+                os.getenv("POCKET_OPTION_SESSION_IP", "0.0.0.0") or "0.0.0.0"
+            ).strip(),
+            "user_agent": resolve_user_agent(
+                os.getenv("POCKET_OPTION_USER_AGENT")
+            ),
+            "last_activity": int(time.time()),
+        }
+    )
+
+
 def auth_message(auth: dict) -> str:
     """Serialize the ONLY frame BinaryOptionsToolsV2 accepts for auth.
 
-    The session is normalized one final time HERE, synchronously at the
-    packaging boundary, so no caller can hand a stale PHP header to the SDK.
+    Real-account tokens are wrapped as ``session_id`` inside a flat PHP
+    ``session`` array because the pinned SDK (0.2.14) requires a ``session``
+    field and parses it as PHP. The token value itself is never passed through
+    the PHP *repair* path, so it stays byte-identical. Demo/legacy accounts
+    keep their PHP ``session``, normalized one final time here.
     """
-    raw_session = auth.get("session") if isinstance(auth, dict) else ""
-    before = _php_session_header(raw_session) if isinstance(raw_session, str) else "unknown"
-    normalized = normalize_auth_fields(auth)
+    raw_auth = auth if isinstance(auth, dict) else {}
+    raw_session = (
+        raw_auth.get("session") or raw_auth.get(SESSION_TOKEN_FIELD) or ""
+    )
+    before = (
+        _php_session_header(raw_session)
+        if isinstance(raw_session, str)
+        else "unknown"
+    )
+    normalized = normalize_auth_fields(raw_auth)
+
+    token = normalized.get(SESSION_TOKEN_FIELD)
+    if isinstance(token, str) and token:
+        frame_auth: Dict[str, Any] = {"session": _php_session_for_token(token)}
+        for key, value in normalized.items():
+            if key in (SESSION_TOKEN_FIELD, "session", "session_token"):
+                continue
+            frame_auth[key] = value
+        logger.info(
+            "AUTH_FRAME_PACKAGED auth_field=session(session_id) isDemo=%s "
+            "token_len=%d php_len=%d",
+            normalized.get("isDemo"),
+            len(token),
+            len(frame_auth["session"]),
+        )
+        return "42" + json.dumps(
+            ["auth", frame_auth],
+            separators=(",", ":"),
+        )
+
+    normalized.pop(SESSION_TOKEN_FIELD, None)
+    normalized.pop("session_token", None)
     session = normalized.get("session")
     if isinstance(session, str) and session:
         session = sanitize_php_session(session)
@@ -1146,7 +1366,16 @@ def encrypt_session_data(text: str) -> str:
 
 
 SSID_FILE_ENV = "POCKET_OPTION_SSID_FILE"
-_SSID_JSON_KEYS = ("POCKET_OPTION_SSID", "ssid", "value")
+SESSION_TOKEN_ENV = "POCKET_OPTION_SESSION_TOKEN"
+SESSION_TOKEN_FILE_ENV = "POCKET_OPTION_SESSION_TOKEN_FILE"
+_SSID_JSON_KEYS = (
+    "POCKET_OPTION_SSID",
+    SESSION_TOKEN_ENV,
+    "ssid",
+    "sessionToken",
+    "session_token",
+    "value",
+)
 
 
 def normalize_ssid_value(value: str) -> str:
@@ -1189,14 +1418,24 @@ def _decode_ssid_payload(raw: str, depth: int = 0) -> str:
             raise ValueError(
                 "POCKET_OPTION_SSID_FILE JSON must be an object wrapper"
             )
-        session = wrapped.get("session")
-        if isinstance(session, str) and session.strip():
+        credential_key = None
+        credential = None
+        for key in ("session", *SESSION_TOKEN_ALIASES):
+            value = wrapped.get(key)
+            if isinstance(value, str) and value.strip():
+                credential_key = key
+                credential = value.strip()
+                break
+        if credential is not None:
             auth_fields = {
                 key: wrapped[key]
                 for key in (
                     "session",
+                    "sessionToken",
+                    "session_token",
                     "uid",
                     "isDemo",
+                    "is_demo",
                     "platform",
                     "isFastHistory",
                     "isOptimized",
@@ -1204,15 +1443,25 @@ def _decode_ssid_payload(raw: str, depth: int = 0) -> str:
                 if key in wrapped
             }
             if len(auth_fields) > 1:
-                return auth_message(normalize_auth_fields(auth_fields))
-            return _decode_ssid_payload(session, depth + 1)
+                # Keep the account metadata AND the token identity. Returning
+                # a packaged wire frame here would lose ``sessionToken`` (the
+                # SDK-facing frame carries a PHP ``session``), and re-parsing
+                # would then classify the token as a legacy session.
+                return "42" + json.dumps(
+                    ["auth", auth_fields], separators=(",", ":")
+                )
+            if credential_key in SESSION_TOKEN_ALIASES:
+                # Preserve explicit token semantics even for 32-hex values so
+                # a stale isDemo env value cannot demote it to ``session``.
+                return _session_token_marker(credential)
+            return _decode_ssid_payload(credential, depth + 1)
         for key in _SSID_JSON_KEYS:
             value = wrapped.get(key)
             if isinstance(value, str) and value.strip():
                 return _decode_ssid_payload(value, depth + 1)
         raise ValueError(
             "POCKET_OPTION_SSID_FILE JSON must contain "
-            "POCKET_OPTION_SSID/ssid/session/value"
+            "POCKET_OPTION_SSID/ssid/session/sessionToken/value"
         )
     return text
 
@@ -1234,12 +1483,54 @@ def read_ssid_file(path: str | Path) -> str:
     return value
 
 
+def _load_explicit_session_token() -> str:
+    """Load an explicitly configured real-account ``sessionToken``.
+
+    ``POCKET_OPTION_SESSION_TOKEN`` (or its mounted-file variant) is marked with
+    the ``sessionToken:`` prefix so a non-hex/opaque token is still treated as a
+    direct token rather than routed through the PHP parser.
+    """
+    raw = _env_value(SESSION_TOKEN_ENV)
+    if raw:
+        token, _ = split_session_token_prefix(raw)
+        if not token:
+            return ""
+        if token.startswith(("42[", "[")):
+            return token
+        return _session_token_marker(token)
+
+    path = _env_value(SESSION_TOKEN_FILE_ENV)
+    if not path:
+        return ""
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = POCKET_BRIDGE_ROOT / resolved
+    try:
+        raw = resolved.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise ValueError(
+            f"POCKET_OPTION_SESSION_TOKEN_FILE cannot be read: {resolved}"
+        ) from exc
+    value = _decode_ssid_payload(raw)
+    if not value:
+        raise ValueError(
+            f"POCKET_OPTION_SESSION_TOKEN_FILE is empty: {resolved}"
+        )
+    if re.match(r"(?:a|O):", value) or value.startswith(("42[", "[")):
+        return value
+    token, _ = split_session_token_prefix(value)
+    return _session_token_marker(token) if token else ""
+
+
 def load_ssid() -> str:
-    """Resolve the SSID from a file FIRST, then the legacy environment value."""
-    file_path = (os.getenv(SSID_FILE_ENV, "") or "").strip()
+    """Resolve an explicit sessionToken first, then SSID file / env SSID."""
+    explicit_token = _load_explicit_session_token()
+    if explicit_token:
+        return explicit_token
+    file_path = _env_value(SSID_FILE_ENV)
     if file_path:
         return read_ssid_file(file_path)
-    return _decode_ssid_payload(os.getenv("POCKET_OPTION_SSID", "") or "")
+    return _decode_ssid_payload(_env_value("POCKET_OPTION_SSID"))
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
@@ -1430,6 +1721,10 @@ class StoredSession:
             auth = dict(self.auth_seed)
             if self.raw_ssid:
                 auth["session"] = self.raw_ssid
+                # A rotated token must replace the seeded sessionToken too;
+                # otherwise the stale seed would win at packaging time.
+                if auth.get(SESSION_TOKEN_FIELD):
+                    auth[SESSION_TOKEN_FIELD] = self.raw_ssid
             return auth
         if not self.raw_ssid:
             return {}
@@ -1442,7 +1737,9 @@ class StoredSession:
 
     def auth_payload(self) -> str:
         auth = self.as_auth()
-        return auth_message(auth) if auth.get("session") else ""
+        if not (auth.get("session") or auth.get(SESSION_TOKEN_FIELD)):
+            return ""
+        return auth_message(auth)
 
 
 def session_reload_needed(stored: StoredSession, last_mtime: float) -> bool:
@@ -1472,7 +1769,10 @@ def load_stored_session(
     session = StoredSession(path=resolved)
     if not resolved.is_file():
         if fallback_env:
-            env_ssid = (os.getenv("POCKET_OPTION_SSID") or "").strip()
+            try:
+                env_ssid = load_ssid()
+            except ValueError:
+                env_ssid = ""
             try:
                 parsed = parse_ssid(env_ssid)
             except ValueError:
@@ -1481,7 +1781,9 @@ def load_stored_session(
                 # Keep the FULL parsed payload (all keys, incl. isOptimized)
                 # so any later auth rebuild is byte-faithful, never a subset.
                 session.auth_seed = dict(parsed)
-                session.raw_ssid = parsed.get("session", "")
+                session.raw_ssid = parsed.get("session") or parsed.get(
+                    SESSION_TOKEN_FIELD, ""
+                )
         return session
     try:
         raw = resolved.read_text(encoding="utf-8")
@@ -1706,11 +2008,9 @@ class BridgeSettings:
     #: relayed to the Node backend as a liveness frame, so this value must stay
     #: comfortably below the backend's heartbeat-age threshold.
     heartbeat_interval: float = field(
-        default_factory=lambda: float(
-            os.getenv(
-                "POCKET_BRIDGE_HEARTBEAT_INTERVAL",
-                str(DEFAULT_HEARTBEAT_INTERVAL_SECS),
-            )
+        default_factory=lambda: _env_float(
+            "POCKET_BRIDGE_HEARTBEAT_INTERVAL",
+            DEFAULT_HEARTBEAT_INTERVAL_SECS,
         )
     )
 
@@ -1719,11 +2019,9 @@ class BridgeSettings:
     #: bridge reconnects on its own terms instead of waiting for the socket to
     #: die. Per-symbol state and the dynamic OTC subscription set are retained.
     stream_stale_after: float = field(
-        default_factory=lambda: float(
-            os.getenv(
-                "POCKET_BRIDGE_STREAM_STALE_SECS",
-                str(DEFAULT_STREAM_STALE_AFTER_SECS),
-            )
+        default_factory=lambda: _env_float(
+            "POCKET_BRIDGE_STREAM_STALE_SECS",
+            DEFAULT_STREAM_STALE_AFTER_SECS,
         )
     )
 
@@ -1738,7 +2036,9 @@ class BridgeSettings:
 
     #: Local WebSocket relay the Node backend connects to.
     relay_host: str = field(default_factory=lambda: os.getenv("POCKET_BRIDGE_HOST", "0.0.0.0"))
-    relay_port: int = field(default_factory=lambda: int(os.getenv("POCKET_BRIDGE_PORT", "8788")))
+    relay_port: int = field(
+        default_factory=lambda: _env_int("POCKET_BRIDGE_PORT", 8788)
+    )
 
     #: Maximum number of M20 candles retained per symbol in the relay.
     max_m20_history: int = 500
@@ -1763,18 +2063,18 @@ class BridgeSettings:
     #: is only 60s, which a blocked/geo-sharded handshake can exhaust. MUST stay
     #: above the bridge's own wait so Python never cancels a live handshake.
     po_init_timeout: float = field(
-        default_factory=lambda: float(os.getenv("POCKET_OPTION_INIT_TIMEOUT", "120"))
+        default_factory=lambda: _env_float("POCKET_OPTION_INIT_TIMEOUT", 120.0)
     )
 
     #: Per-socket request timeout handed to the SDK (seconds).
     po_request_timeout: float = field(
-        default_factory=lambda: float(os.getenv("POCKET_OPTION_TIMEOUT_SECS", "30"))
+        default_factory=lambda: _env_float("POCKET_OPTION_TIMEOUT_SECS", 30.0)
     )
 
     #: Seconds the SDK waits before rotating to the next endpoint after a failed
     #: handshake. Kept short so a blocked host is bypassed quickly.
     po_reconnect_time: float = field(
-        default_factory=lambda: float(os.getenv("POCKET_OPTION_RECONNECT_TIME", "3"))
+        default_factory=lambda: _env_float("POCKET_OPTION_RECONNECT_TIME", 3.0)
     )
 
     #: Candle aggregation interval. Accepts a timeframe token
@@ -1790,13 +2090,11 @@ class BridgeSettings:
     )
     #: How often refresh_ssid.py is re-run (seconds).
     session_refresh_interval: float = field(
-        default_factory=lambda: float(
-            os.getenv("PO_SESSION_REFRESH_INTERVAL", "1800")
-        )
+        default_factory=lambda: _env_float("PO_SESSION_REFRESH_INTERVAL", 1800.0)
     )
     #: Age (days) after which a captured session is treated as stale.
     session_max_age_days: int = field(
-        default_factory=lambda: int(os.getenv("PO_SESSION_MAX_AGE_DAYS", "7"))
+        default_factory=lambda: _env_int("PO_SESSION_MAX_AGE_DAYS", 7)
     )
     #: Run refresh_ssid.py once at startup (only when a session file exists).
     refresh_at_startup: bool = field(
@@ -1822,8 +2120,13 @@ class BridgeSettings:
 
     @property
     def ssid_source(self) -> str:
-        """Where boot credentials came from: file, env, or the session file."""
-        if (os.getenv(SSID_FILE_ENV, "") or "").strip():
+        """Where boot credentials came from: token, file, env, or session."""
+        if (
+            _env_value(SESSION_TOKEN_ENV)
+            or _env_value(SESSION_TOKEN_FILE_ENV)
+        ):
+            return "token"
+        if _env_value(SSID_FILE_ENV):
             return "file"
         if self.ssid.strip():
             return "env"
@@ -1866,7 +2169,7 @@ class BridgeSettings:
             parsed = parse_ssid(value)
         except ValueError:
             return False
-        if not parsed.get("session"):
+        if not (parsed.get("session") or parsed.get(SESSION_TOKEN_FIELD)):
             return False
         object.__setattr__(self, "ssid", value)
         object.__setattr__(self, "auth", parsed)
@@ -1890,6 +2193,11 @@ class BridgeSettings:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "auth", parse_ssid(self.ssid))
+        if not 1 <= self.relay_port <= 65_535:
+            raise ValueError(
+                "POCKET_BRIDGE_PORT must be between 1 and 65535; "
+                f"got {self.relay_port}"
+            )
         # A 60s native handshake budget is the known regression that produced
         # the recurring "Connection initialization timed out" loop. Clamp it
         # even when an old .env/compose file still exports 60.

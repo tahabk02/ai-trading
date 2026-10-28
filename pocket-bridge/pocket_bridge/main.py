@@ -273,7 +273,11 @@ async def amain(settings: BridgeSettings) -> None:
 
 
 def main() -> None:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except ValueError as exc:
+        logger.critical("CONFIG_INVALID — %s", exc)
+        raise SystemExit(2) from exc
     try:
         asyncio.run(amain(settings))
     except KeyboardInterrupt:
@@ -282,6 +286,9 @@ def main() -> None:
         if "relay port" in str(exc):
             logger.error("%s", exc)
             raise SystemExit(1) from exc
+        raise
+    except Exception:  # noqa: BLE001 - log loudly, then let the supervisor restart
+        logger.exception("BRIDGE_CRASH — unhandled exception, exiting for restart")
         raise
 
 
