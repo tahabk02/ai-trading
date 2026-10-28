@@ -2,9 +2,13 @@
 FROM python:3.11-slim
 
 # Install system dependencies for TA-Lib and Redis
+# 'file' is required by the TA-Lib ./configure script; ca-certificates lets
+# wget/pip validate TLS endpoints.
 RUN apt-get update && apt-get install --no-install-recommends -y \
     build-essential \
+    file \
     wget \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install TA-Lib (Optimized with parallel compilation)
