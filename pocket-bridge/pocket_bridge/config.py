@@ -105,6 +105,7 @@ class _PhpSessionParser:
         self.top_level_count = 0
         self.container_kind = ""
         self.repaired_strings = False
+        self.saw_objects = False
 
     def _expect(self, token: bytes) -> None:
         if not self.data.startswith(token, self.pos):
@@ -203,6 +204,7 @@ class _PhpSessionParser:
 
     def _read_object(self) -> Dict[bytes, object]:
         top_level = self.depth == 0
+        self.saw_objects = True
         self.depth += 1
         self._expect(b"O:")
         self._read_object_name()
@@ -366,6 +368,291 @@ def _serialize_php_array(entries: Dict[bytes, object]) -> bytes:
         for key, value in entries.items()
     )
     return b"a:%d:{%s}" % (len(entries), body)
+
+
+#: Fields the Rust SDK reliably accepts as a FLAT top-level PHP array. Anything
+#: else (nested arrays, PHP objects, custom ``C:`` values) is dropped by the
+#: sanitizer because the native parser cannot digest it.
+_RUST_SESSION_FIELD_ORDER = (
+    b"session_id",
+    b"ip_address",
+    b"user_agent",
+    b"last_activity",
+    b"device_id",
+)
+_RUST_SESSION_ALLOWED_FIELDS = frozenset(_RUST_SESSION_FIELD_ORDER)
+
+
+def _as_php_key(key: object) -> bytes:
+    if isinstance(key, bytes):
+        return key
+    return str(key).encode("utf-8", "surrogatepass")
+
+
+def _as_php_scalar(value: object) -> object:
+    """Return a flat PHP scalar, or ``None`` when the value is unsupported."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8", "surrogatepass")
+    if isinstance(value, (bool, int, float)):
+        return value
+    return None
+
+
+def build_php_session(fields: Dict[object, object]) -> str:
+    """Programmatically build a canonical FLAT PHP session array.
+
+    This is the safe fallback the sanitizer uses instead of regex-patching a
+    broken payload: only scalar fields are emitted, keys/values are re-encoded
+    byte-exactly, and the ``a:N`` count is always derived from the fields that
+    actually survive. Nested arrays/objects are discarded, so the result is
+    exactly the shape BinaryOptionsToolsV2's Rust parser accepts.
+    """
+    entries: Dict[bytes, object] = {}
+    for key, value in fields.items():
+        name = _as_php_key(key)
+        if not name:
+            continue
+        scalar = _as_php_scalar(value)
+        if scalar is None:
+            continue
+        entries[name] = scalar
+    return _serialize_php_array(entries).decode("utf-8", "surrogatepass")
+
+
+def _scan_php_scalar(data: bytes, index: int) -> tuple[object, int]:
+    """Best-effort scalar reader used when the full container cannot parse."""
+    while index < len(data) and data[index] in b" \t\r\n":
+        index += 1
+    if data.startswith(b"s:", index):
+        colon = data.find(b":", index + 2)
+        if colon < 0 or not data[index + 2:colon].isdigit():
+            raise ValueError("invalid PHP string length")
+        length = int(data[index + 2:colon])
+        quote = colon + 1
+        if quote >= len(data) or data[quote:quote + 1] != b'"':
+            raise ValueError("invalid PHP string opening quote")
+        content = quote + 1
+        expected = content + length
+        if expected + 2 <= len(data) and data[expected:expected + 2] == b'";':
+            return data[content:expected], expected + 2
+        closing = data.find(b'";', content)
+        if closing < 0:
+            raise ValueError("unterminated PHP string")
+        return data[content:closing], closing + 2
+    if data.startswith(b"i:", index):
+        end = data.find(b";", index)
+        if end < 0:
+            raise ValueError("unterminated PHP integer")
+        return int(data[index + 2:end]), end + 1
+    if data.startswith(b"d:", index):
+        end = data.find(b";", index)
+        if end < 0:
+            raise ValueError("unterminated PHP double")
+        return float(data[index + 2:end]), end + 1
+    if data.startswith(b"b:", index):
+        end = data.find(b";", index)
+        if end < 0:
+            raise ValueError("unterminated PHP boolean")
+        return data[index + 2:end] == b"1", end + 1
+    if data.startswith(b"N;", index):
+        return None, index + 2
+    raise ValueError("unsupported PHP scalar")
+
+
+def _scan_flat_session_fields(data: bytes) -> Dict[bytes, object]:
+    """Extract known scalar session fields from a container that won't parse.
+
+    A corrupt trailing token must not prevent the *valid* leading fields from
+    being recovered. Only whitelisted, byte-safe scalar values are returned.
+    """
+    fields: Dict[bytes, object] = {}
+    for field in _RUST_SESSION_ALLOWED_FIELDS:
+        for match in re.finditer(
+            rb's:\d+:"' + re.escape(field) + rb'";', data
+        ):
+            try:
+                value, _ = _scan_php_scalar(data, match.end())
+            except (TypeError, ValueError):
+                continue
+            if value is not None:
+                fields[field] = value
+                break
+    return fields
+
+
+def _parse_php_entries(
+    text: str,
+) -> Optional[tuple[Dict[bytes, object], bytes, _PhpSessionParser]]:
+    try:
+        parser = _PhpSessionParser(text.encode("utf-8", "surrogatepass"))
+        entries, trailing = parser.parse()
+    except (TypeError, ValueError):
+        return None
+    return entries, trailing, parser
+
+
+def _php_trailing_hash(trailing: bytes) -> bytes:
+    """Return the trailing 32-hex session hash, or empty when malformed."""
+    candidate = trailing.strip()
+    if re.fullmatch(rb"[0-9a-fA-F]{32}", candidate or b""):
+        return candidate
+    return b""
+
+
+def _php_session_is_rust_safe(
+    text: str, allowed_fields: Optional[frozenset] = None
+) -> bool:
+    """True when ``text`` is already a flat array the Rust SDK can parse."""
+    if not text or not re.match(r"a:", text):
+        return False
+    parsed = _parse_php_entries(text)
+    if parsed is None:
+        return False
+    entries, trailing, parser = parsed
+    if parser.container_kind != "array" or parser.saw_objects:
+        return False
+    if parser.repaired_strings:
+        return False
+    if _php_declared_count(text) != len(entries):
+        return False
+    if not _PHP_REQUIRED_SESSION_FIELDS.issubset(entries):
+        return False
+    if not set(entries).issubset(
+        allowed_fields or _RUST_SESSION_ALLOWED_FIELDS
+    ):
+        return False
+    if any(isinstance(value, dict) for value in entries.values()):
+        return False
+    if trailing.strip() and not _php_trailing_hash(trailing):
+        return False
+    return True
+
+
+def sanitize_php_session(
+    value: str,
+    *,
+    fallback_fields: Optional[Dict[object, object]] = None,
+    include_device_id: bool = True,
+) -> str:
+    """Safe wrapper around :func:`normalize_php_session`.
+
+    First runs the existing exact normalizer. If the result is still not a flat
+    PHP array the Rust parser can digest (objects, nested structures, unknown
+    ``C:``/``R:`` tokens, stale counts, malformed trailing data), it rebuilds a
+    clean 4/5-element array from the recoverable scalar fields using
+    :func:`build_php_session` — never by regex-mangling the broken string.
+
+    ``fallback_fields`` may supply a clean standard user-session dict; scalar
+    values there fill any field the broken session could not provide. A session
+    without a recoverable ``session_id`` is returned as-is (it cannot be
+    authenticated) so the caller still sees the original failure.
+    ``include_device_id=False`` emits ONLY the four Rust-required fields, for
+    the final retry when even a flat a:5 body is rejected.
+    """
+    text = _extract_php_session_text(value)
+    if not text or not re.match(r"(?:a|O):", text):
+        return text
+
+    allowed_fields = (
+        _RUST_SESSION_ALLOWED_FIELDS
+        if include_device_id
+        else _PHP_REQUIRED_SESSION_FIELDS
+    )
+    try:
+        normalized = normalize_php_session(value)
+    except Exception as exc:  # noqa: BLE001 - sanitizer must never crash auth
+        logger.warning(
+            "PHP_SESSION_NORMALIZE_CRASHED error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+        )
+        normalized = text
+
+    if _php_session_is_rust_safe(normalized, allowed_fields):
+        return normalized
+
+    parsed = _parse_php_entries(normalized) or _parse_php_entries(text)
+    if parsed is not None:
+        entries, trailing, parser = parsed
+        nested = parser.saw_objects or any(
+            isinstance(item, dict) for item in entries.values()
+        )
+        if (
+            normalized == text
+            and not nested
+            and not _PHP_REQUIRED_SESSION_FIELDS.issubset(entries)
+        ):
+            # An incomplete but structurally valid session: there is nothing
+            # safe to rebuild (and no session_id in production would be dead
+            # anyway), so preserve today's behaviour.
+            return normalized
+    else:
+        raw_text = text.encode("utf-8", "surrogatepass")
+        entries = _scan_flat_session_fields(raw_text)
+        hash_match = re.search(rb"([0-9a-fA-F]{32})\s*$", raw_text)
+        trailing = hash_match.group(1) if hash_match else b""
+
+    merged: Dict[bytes, object] = {}
+    if fallback_fields:
+        for key, item in fallback_fields.items():
+            name = _as_php_key(key)
+            if name not in allowed_fields:
+                continue
+            scalar = _as_php_scalar(item)
+            if scalar is not None:
+                merged[name] = scalar
+    for key, item in entries.items():
+        if key not in allowed_fields:
+            continue
+        scalar = _as_php_scalar(item)
+        if scalar is None:
+            continue
+        merged[key] = scalar
+
+    session_id = merged.get(b"session_id")
+    if not isinstance(session_id, (bytes, str)) or not session_id:
+        return normalized
+
+    if b"ip_address" not in merged:
+        merged[b"ip_address"] = b"0.0.0.0"
+    if b"user_agent" not in merged:
+        merged[b"user_agent"] = DEFAULT_UA.encode("utf-8")
+    if b"last_activity" not in merged:
+        merged[b"last_activity"] = int(time.time())
+
+    ordered = {
+        field: merged[field]
+        for field in _RUST_SESSION_FIELD_ORDER
+        if field in merged
+    }
+    try:
+        sanitized = build_php_session(ordered)
+    except (TypeError, ValueError):
+        return normalized
+    if trailing:
+        hash_value = _php_trailing_hash(trailing)
+        if hash_value:
+            sanitized += hash_value.decode("ascii")
+    logger.warning(
+        "PHP_SESSION_SANITIZED - header=%s corrected=%s fields=%s "
+        "dropped=%s",
+        _php_session_header(text),
+        _php_session_header(sanitized),
+        ",".join(field.decode("ascii") for field in ordered),
+        ",".join(
+            sorted(
+                field.decode("ascii", "replace")
+                if isinstance(field, bytes)
+                else str(field)
+                for field in entries
+                if field not in ordered
+            )
+        )
+        or "(none)",
+    )
+    return sanitized
 
 
 def _fix_php_session(text: str) -> tuple[str, _PhpSessionParser]:
@@ -551,7 +838,7 @@ def normalize_auth_fields(auth: dict) -> dict:
     payload = dict(auth)
     session = payload.get("session")
     if isinstance(session, str):
-        payload["session"] = normalize_php_session(session)
+        payload["session"] = sanitize_php_session(session)
 
     uid = payload.get("uid")
     if uid is None or uid == "":
@@ -657,7 +944,7 @@ def auth_message(auth: dict) -> str:
     normalized = normalize_auth_fields(auth)
     session = normalized.get("session")
     if isinstance(session, str) and session:
-        session = normalize_php_session(session)
+        session = sanitize_php_session(session)
         normalized["session"] = session
         after = _php_session_header(session)
         if before != after:

@@ -44,6 +44,7 @@ from .config import (
     normalize_auth_fields,
     parse_ssid,
     read_env_ssid,
+    sanitize_php_session,
     session_reload_needed,
 )
 from .m20_engine import M20Engine, M20Candle
@@ -352,6 +353,10 @@ class PocketOptionBridge:
         )
         self.session_expired = False
         self._retry_stopped = False
+        #: Set when every repair strategy was attempted and the SDK STILL
+        #: rejected the session. The reader loop uses it to stop retrying a
+        #: permanently unparseable SSID instead of spinning forever.
+        self._ssid_parse_terminal = False
         self._session_last_mtime = self.session.mtime
         #: HTTP Cookie header built from the stored cookies (masked when logged).
         self.cookie_header: str = self.session.cookie_header()
@@ -519,14 +524,56 @@ class PocketOptionBridge:
         if cb is not None:
             await cb()
 
+    @staticmethod
+    def _session_repair_candidates(auth: dict) -> list[tuple[str, str]]:
+        """Ordered, de-duplicated session rewrites to try after an SDK reject.
+
+        The legacy ``a:5`` header force is kept first for backwards
+        compatibility. The sanitizer is the robust fallback: it rebuilds a
+        flat 4/5-element PHP array from recoverable scalar fields, dropping
+        objects/nested structures the Rust parser cannot digest.
+        """
+        session = auth.get("session")
+        if not isinstance(session, str) or not session:
+            return []
+        candidates: list[tuple[str, str]] = []
+        seen = {session}
+
+        def add(reason: str, candidate: str) -> None:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append((reason, candidate))
+
+        add("forced_a5", force_php_array_header(session, 5))
+        add("sanitized_flat", sanitize_php_session(session))
+        # A clean whitelist rebuild also covers the case where the session is
+        # already a:5 but still carries unknown/nested tokens.
+        add(
+            "sanitized_flat",
+            sanitize_php_session(session, fallback_fields=auth),
+        )
+        # Final strict shape: ONLY the four Rust-required fields. This covers
+        # the reported case where even a corrected a:5 body is still rejected.
+        add(
+            "flat_required_only",
+            sanitize_php_session(
+                session,
+                fallback_fields=auth,
+                include_device_id=False,
+            ),
+        )
+        return candidates
+
     def _retry_with_forced_php_header(
         self, exc: Exception, auth: dict, kwargs: Dict[str, object]
     ):
-        """Last-resort a:5 retry after the Rust SDK rejects the session.
+        """Try bounded session repairs after the Rust SDK rejects the session.
 
         Normal normalization remains exact-count based. This only runs after
         ``Failed to parse ssid``, so a valid four-field session (which still
-        parses normally) is never rewritten to an invalid a:5 body.
+        parses normally) is never rewritten to an invalid a:5 body. Every
+        candidate is attempted at most once; the caller re-raises the ORIGINAL
+        SDK exception if none is accepted (and marks the SSID terminal).
         """
         error_text = str(exc).lower()
         if (
@@ -534,43 +581,46 @@ class PocketOptionBridge:
             and "error parsing session data" not in error_text
         ):
             return None
-        session = auth.get("session")
-        if not isinstance(session, str) or not session:
-            return None
-        forced = force_php_array_header(session, 5)
-        if forced == session:
-            return None
-        before = _php_header(session)
-        after = _php_header(forced)
-        logger.warning(
-            "AUTH_FRAME_SESSION_MUTATED before=%s after=%s reason=sdk_parse_retry",
-            before,
-            after,
-        )
-        forced_auth = normalize_auth_fields(dict(auth))
-        forced_auth["session"] = forced
-        forced_payload = "42" + json.dumps(
-            ["auth", forced_auth], separators=(",", ":")
-        )
-        _emit_sdk_payload_diagnostics(forced_payload, forced_auth)
         from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
 
-        try:
-            client = PocketOptionAsync(forced_payload, **kwargs)
-        except Exception as retry_exc:  # noqa: BLE001 - original error wins
-            logger.critical(
-                "AUTH_FRAME_RETRY_FAILED forced_header=%s error_type=%s error=%s",
+        for reason, candidate in self._session_repair_candidates(auth):
+            before = _php_header(str(auth.get("session", "")))
+            after = _php_header(candidate)
+            logger.warning(
+                "AUTH_FRAME_SESSION_MUTATED before=%s after=%s "
+                "reason=sdk_parse_retry:%s",
+                before,
                 after,
-                type(retry_exc).__name__,
-                _redact_diagnostic_text(str(retry_exc), forced),
+                reason,
             )
-            return None
-        logger.warning(
-            "AUTH_FRAME_RETRY_RECOVERED forced_header=%s session_len=%d",
-            after,
-            len(forced),
-        )
-        return client
+            repaired_auth = normalize_auth_fields(dict(auth))
+            repaired_auth["session"] = candidate
+            repaired_payload = "42" + json.dumps(
+                ["auth", repaired_auth], separators=(",", ":")
+            )
+            _emit_sdk_payload_diagnostics(repaired_payload, repaired_auth)
+            try:
+                client = PocketOptionAsync(repaired_payload, **kwargs)
+            except Exception as retry_exc:  # noqa: BLE001 - original error wins
+                logger.critical(
+                    "AUTH_FRAME_RETRY_FAILED reason=%s forced_header=%s "
+                    "error_type=%s error=%s",
+                    reason,
+                    after,
+                    type(retry_exc).__name__,
+                    _redact_diagnostic_text(str(retry_exc), candidate),
+                )
+                continue
+            self._ssid_parse_terminal = False
+            logger.warning(
+                "AUTH_FRAME_RETRY_RECOVERED forced_header=%s reason=%s "
+                "session_len=%d",
+                after,
+                reason,
+                len(candidate),
+            )
+            return client
+        return None
 
     async def _import_client(self):
         if self.client is not None:
@@ -649,14 +699,17 @@ class PocketOptionBridge:
         except ImportError:  # pragma: no cover - package checked above
             PocketOptionError = None  # type: ignore[assignment,misc]
 
+        self._ssid_parse_terminal = False
         try:
             self.client = PocketOptionAsync(payload, **kwargs)
+            self._ssid_parse_terminal = False
         except Exception as exc:
             recovered = self._retry_with_forced_php_header(
                 exc, auth_dict, kwargs
             )
             if recovered is not None:
                 self.client = recovered
+                self._ssid_parse_terminal = False
                 return self.client
             trace = _redact_diagnostic_text(
                 traceback.format_exc(), diag_session
@@ -680,7 +733,13 @@ class PocketOptionBridge:
             )
             logger.critical(detail)
             print(detail, file=sys.stderr, flush=True)
-            if "Failed to parse ssid" in str(exc):
+            error_text = str(exc).lower()
+            parse_failed = (
+                "failed to parse ssid" in error_text
+                or "error parsing session data" in error_text
+            )
+            if parse_failed:
+                self._ssid_parse_terminal = True
                 logger.critical(
                     "SSID_PARSE_FAILED source=%s format=%s session_len=%d "
                     "uid=%s isDemo=%s - the SDK rejected the auth payload",
@@ -689,6 +748,11 @@ class PocketOptionBridge:
                     session_len,
                     mask_uid(auth_dict.get("uid")),
                     auth_dict.get("isDemo"),
+                )
+                logger.critical(
+                    "SSID_PARSE_FAILED_TERMINAL - all sanitizer fallbacks were "
+                    "rejected; stopping the reconnect ladder instead of "
+                    "spinning forever"
                 )
             raise
         return self.client
@@ -1617,6 +1681,21 @@ class PocketOptionBridge:
                 await asyncio.sleep(self.settings.reconnect_max_delay)
                 continue
             except Exception as exc:  # noqa: BLE001 - reconnect forever
+                # Permanent SSID rejection: every sanitizer/forced-header
+                # fallback already failed, so retrying the SAME bytes can only
+                # produce an infinite crash loop (and look like brute force).
+                # Stop the ladder and request exactly one fresh capture.
+                if self._ssid_parse_terminal:
+                    if self._retry_stopped:
+                        return
+                    logger.critical(
+                        "SSID_PARSE_FAILED_TERMINAL reader=%s — all repair "
+                        "strategies were rejected; stopping retries and "
+                        "requesting a fresh session capture",
+                        symbol,
+                    )
+                    await self._enter_session_expired(str(exc))
+                    return
                 # Genuine crash (network loss, malformed stream, dead SDK
                 # channel): back off geometrically, bounded by
                 # reconnect_max_delay — but NEVER permanently stall, so a plate

@@ -257,6 +257,132 @@ def test_sdk_parse_failure_retries_with_forced_a5(
     assert "SDK_PAYLOAD_DIAG" in capsys.readouterr().err
 
 
+def test_sdk_parse_failure_falls_back_to_a_flat_sanitized_session(
+    monkeypatch, tmp_path, capsys
+):
+    """An a:5 payload that STILL carries nested objects must be rebuilt as a
+    flat array; forcing the header alone cannot repair it."""
+    from BinaryOptionsToolsV2 import PocketOptionError
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    nested_session = (
+        'a:5:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+        's:10:"ip_address";s:7:"0.0.0.0";'
+        's:10:"user_agent";s:3:"abc";'
+        's:13:"last_activity";i:1732926685;'
+        's:9:"device_id";O:8:"stdClass":0:{}}'
+    )
+    stale_auth = {
+        "session": nested_session,
+        "uid": 12345678,
+        "isDemo": 0,
+        "platform": 2,
+    }
+    stale_payload = "42" + json.dumps(["auth", stale_auth], separators=(",", ":"))
+
+    class _FlatRetryClient:
+        instances: list = []
+
+        def __init__(self, payload, **kwargs):
+            self.payload = payload
+            self.session = json.loads(payload[2:])[1]["session"]
+            self.__class__.instances.append(self)
+            if "O:" in self.session or self.session.startswith("a:5:"):
+                raise PocketOptionError(
+                    "Failed to parse ssid: Expected '}' but got 's'"
+                )
+
+    monkeypatch.setattr(po, "PocketOptionAsync", _FlatRetryClient)
+    bridge = _bridge(monkeypatch, tmp_path)
+    monkeypatch.setattr(bridge, "_auth_dict", lambda: stale_auth)
+    monkeypatch.setattr(bridge, "_auth_payload", lambda: stale_payload)
+
+    client = asyncio.run(bridge._import_client())
+
+    assert client.session.startswith("a:4:{")
+    assert "O:" not in client.session
+    assert "device_id" not in client.session
+    assert bridge._ssid_parse_terminal is False
+    assert "SDK_PAYLOAD_DIAG" in capsys.readouterr().err
+
+
+def test_sdk_parse_failure_finally_tries_flat_required_only(
+    monkeypatch, tmp_path, capsys
+):
+    """Even a corrected a:5 body can be rejected; the LAST retry must be a
+    strict 4-field array with no optional device_id."""
+    from BinaryOptionsToolsV2 import PocketOptionError
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    stale_auth = {
+        "session": PHP_SSID_WITH_STALE_COUNT,
+        "uid": 12345678,
+        "isDemo": 0,
+        "platform": 2,
+    }
+    stale_payload = "42" + json.dumps(
+        ["auth", stale_auth], separators=(",", ":")
+    )
+
+    class _Flat4Client:
+        instances: list = []
+
+        def __init__(self, payload, **kwargs):
+            self.payload = payload
+            self.session = json.loads(payload[2:])[1]["session"]
+            self.__class__.instances.append(self)
+            if self.session.startswith("a:5:") or "device_id" in self.session:
+                raise PocketOptionError(
+                    "Failed to parse ssid: Expected '}' but got 's'"
+                )
+
+    monkeypatch.setattr(po, "PocketOptionAsync", _Flat4Client)
+    bridge = _bridge(monkeypatch, tmp_path)
+    monkeypatch.setattr(bridge, "_auth_dict", lambda: stale_auth)
+    monkeypatch.setattr(bridge, "_auth_payload", lambda: stale_payload)
+
+    client = asyncio.run(bridge._import_client())
+
+    assert client.session.startswith("a:4:{")
+    assert "device_id" not in client.session
+    assert "session_id" in client.session
+    assert bridge._ssid_parse_terminal is False
+    assert "SDK_PAYLOAD_DIAG" in capsys.readouterr().err
+
+
+def test_unparseable_ssid_stops_the_reader_loop(monkeypatch, tmp_path):
+    """A permanently unparseable SSID must terminate (one refresh request), not
+    spin forever through the reconnect ladder."""
+    from BinaryOptionsToolsV2 import PocketOptionError
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    class _BoomClient:
+        def __init__(self, payload, **kwargs):
+            raise PocketOptionError(
+                "Failed to parse ssid: Error parsing session data"
+            )
+
+    monkeypatch.setattr(po, "PocketOptionAsync", _BoomClient)
+    bridge = _bridge(monkeypatch, tmp_path)
+
+    async def _no_refresh() -> bool:
+        return False
+
+    bridge._run_refresh_once = _no_refresh  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        await asyncio.wait_for(
+            bridge._reader_loop("EUR/USD", "EURUSD_otc"), timeout=2.0
+        )
+
+    asyncio.run(_run())
+
+    assert bridge._ssid_parse_terminal is True
+    assert bridge.session_expired is True
+    assert bridge._retry_stopped is True
+    assert bridge.status == "session_expired"
+
+
 def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client):
     """Unset POCKET_OPTION_WS_URLS keeps the SDK's own streaming defaults
     (pinning url= previously killed the tick stream) while still shipping the

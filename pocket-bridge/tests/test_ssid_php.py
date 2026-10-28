@@ -16,9 +16,11 @@ from urllib.parse import quote
 
 from pocket_bridge.config import (
     auth_message,
+    build_php_session,
     force_php_array_header,
     normalize_php_session,
     parse_ssid,
+    sanitize_php_session,
 )
 
 SESSION_ID = "0123456789abcdef0123456789abcdef"
@@ -255,3 +257,103 @@ def test_unparseable_php_is_left_for_the_sdk_error():
     broken = 'a:4:{s:10:"session_id";s:32:"0123456789abcdef";}'
     assert normalize_php_session(broken) == broken
     assert not broken.startswith("42[")
+
+
+#: a:5 whose header is ALREADY correct but whose device_id is a PHP object —
+#: the exact class of payload the Rust parser still rejects after a:4 -> a:5.
+A5_WITH_NESTED_OBJECT = (
+    'a:5:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;'
+    's:9:"device_id";O:8:"stdClass":2:{s:1:"a";s:1:"b";s:1:"c";s:1:"d";}}'
+) + HASH
+
+A5_WITH_NESTED_OBJECT_FLAT = (
+    'a:4:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;}'
+) + HASH
+
+A5_WITH_CUSTOM_TOKEN = (
+    'a:5:{s:10:"session_id";s:32:"0123456789abcdef0123456789abcdef";'
+    's:10:"ip_address";s:7:"0.0.0.0";'
+    's:10:"user_agent";s:48:"' + ("x" * 48) + '";'
+    's:13:"last_activity";i:1732926685;'
+    's:9:"device_id";C:5:"Extra":3:{abc}}'
+) + HASH
+
+
+def test_sanitizer_flattens_an_a5_with_nested_objects():
+    """A repaired header is not enough: nested objects must be dropped so the
+    Rust parser receives a strictly flat 4-element array."""
+    sanitized = sanitize_php_session(A5_WITH_NESTED_OBJECT)
+    assert sanitized == A5_WITH_NESTED_OBJECT_FLAT
+    assert "O:" not in sanitized
+    assert "device_id" not in sanitized
+    assert sanitized.endswith(HASH)
+
+
+def test_sanitizer_flattens_unsupported_custom_tokens_and_keeps_hash():
+    sanitized = sanitize_php_session(A5_WITH_CUSTOM_TOKEN)
+    assert sanitized.startswith("a:4:{")
+    assert "C:" not in sanitized
+    assert "device_id" not in sanitized
+    assert sanitized.endswith(HASH)
+
+
+def test_sanitizer_keeps_a_flat_five_field_session():
+    normalized = sanitize_php_session(MISMATCHED)
+    assert normalized == MISMATCHED_FIXED
+    assert normalized.startswith("a:5:{")
+
+
+def test_sanitizer_can_force_the_strict_four_field_shape():
+    normalized = sanitize_php_session(MISMATCHED, include_device_id=False)
+    assert normalized == CANONICAL
+    assert "device_id" not in normalized
+
+
+def test_sanitizer_accepts_a_clean_standard_session_dict_fallback():
+    sanitized = sanitize_php_session(
+        'a:5:{s:9:"device_id";O:8:"stdClass":0:{}}',
+        fallback_fields={
+            "session_id": SESSION_ID,
+            "ip_address": IP_ADDRESS,
+            "user_agent": USER_AGENT,
+            "last_activity": 1732926685,
+        },
+    )
+    assert sanitized == CANONICAL.removesuffix(HASH)
+    assert "O:" not in sanitized
+
+
+def test_php_session_builder_emits_only_flat_scalars():
+    built = build_php_session(
+        {
+            "session_id": SESSION_ID,
+            "ip_address": IP_ADDRESS,
+            "user_agent": USER_AGENT,
+            "last_activity": 1732926685,
+            "nested": {"drop": "me"},
+            "object": object(),
+        }
+    )
+    assert built == CANONICAL.removesuffix(HASH)
+    assert "nested" not in built
+    assert "object" not in built
+
+
+def test_auth_message_sanitizes_a5_nested_objects_end_to_end():
+    payload = auth_message(
+        {
+            "session": A5_WITH_NESTED_OBJECT,
+            "uid": 12345678,
+            "isDemo": 0,
+            "platform": 2,
+        }
+    )
+    session = json.loads(payload[2:])[1]["session"]
+    assert session == A5_WITH_NESTED_OBJECT_FLAT
+    assert "O:" not in session
