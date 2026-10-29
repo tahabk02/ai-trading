@@ -12,6 +12,7 @@ local `.env` file, matching the rest of the monorepo).
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 # ── Environment file isolation ───────────────────────────────────────────────
 # `<repo>/pocket-bridge`, resolved from THIS file so it is cwd-independent.
@@ -76,6 +78,19 @@ DEFAULT_STREAM_STALE_AFTER_SECS = 50.0
 MIN_PO_INIT_TIMEOUT_SECS = 90.0
 DEFAULT_PO_KEEPALIVE_MESSAGE = '42["ping"]'
 
+#: Reader reconnect ladder. The delay grows exponentially from BASE to MAX and
+#: every sleep is randomized by +/- JITTER so a fleet of bridges (and each
+#: per-symbol reader inside one bridge) does not reconnect in lockstep after a
+#: broker-side drop.
+DEFAULT_RECONNECT_BASE_SECS = 1.0
+DEFAULT_RECONNECT_MAX_SECS = 60.0
+DEFAULT_RECONNECT_JITTER = 0.25
+
+#: Proxy schemes accepted on PROXY_URL. No TLS/JA3 options are exposed here:
+#: the proxy only changes the egress path, the SDK keeps its own TLS stack.
+SUPPORTED_PROXY_SCHEMES = frozenset({"socks5", "socks5h", "http", "https"})
+_DEFAULT_PROXY_PORTS = {"socks5": 1080, "socks5h": 1080, "http": 8080, "https": 8443}
+
 
 def resolve_user_agent(value: str | None) -> str:
     """Resolve unset or SDK-placeholder User-Agents to the pinned browser UA."""
@@ -83,6 +98,78 @@ def resolve_user_agent(value: str | None) -> str:
     if not user_agent or "(sdk default)" in user_agent.lower():
         return DEFAULT_UA
     return user_agent
+
+
+def normalize_proxy_url(value: str | None) -> str:
+    """Validate and canonicalize ``PROXY_URL`` (socks5/socks5h/http/https).
+
+    Fails FAST at settings construction: a malformed proxy must stop the
+    process with a clear CONFIG_INVALID message instead of silently connecting
+    directly from the VPS (which is exactly the failure this setting exists to
+    avoid). Credentials are accepted as ``scheme://user:pass@host:port`` and
+    must be supplied as a pair. An empty value disables the proxy.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if any(char.isspace() for char in raw):
+        raise ValueError("PROXY_URL must not contain whitespace")
+    candidate = raw if "://" in raw else f"socks5://{raw}"
+    parsed = urlsplit(candidate)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in SUPPORTED_PROXY_SCHEMES:
+        raise ValueError(
+            "PROXY_URL scheme must be one of "
+            f"{', '.join(sorted(SUPPORTED_PROXY_SCHEMES))}; got {scheme or '(none)'!r}"
+        )
+    if not parsed.hostname:
+        raise ValueError("PROXY_URL must include a host")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("PROXY_URL has an invalid port") from exc
+    if port is None:
+        port = _DEFAULT_PROXY_PORTS[scheme]
+    if not 1 <= port <= 65_535:
+        raise ValueError("PROXY_URL port must be between 1 and 65535")
+
+    has_user = parsed.username is not None
+    has_password = parsed.password is not None
+    if has_user != has_password or (has_user and not parsed.username):
+        raise ValueError(
+            "PROXY_URL credentials must be provided as user:password@host:port"
+        )
+
+    if parsed.port is None:
+        # Insert the scheme's default port while preserving the raw netloc
+        # (credentials may be percent-encoded and must not be re-encoded).
+        netloc = parsed.netloc
+        if has_user:
+            credentials, _, host = netloc.rpartition("@")
+            netloc = f"{credentials}@{host}:{port}"
+        else:
+            netloc = f"{netloc}:{port}"
+    else:
+        netloc = parsed.netloc
+    return urlunsplit((scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def mask_proxy_url(value: str) -> str:
+    """Render a proxy URL for logs/health with credentials fully redacted."""
+    if not value:
+        return "(none)"
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "(invalid)"
+    host = parsed.hostname or "?"
+    if ":" in host:
+        host = f"[{host}]"
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    if parsed.username or parsed.password:
+        host = f"***:***@{host}"
+    return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
 
 
 class _PhpSessionParser:
@@ -2023,7 +2110,40 @@ class BridgeSettings:
     #: Reconnect / subscription tuning (seconds).
     connect_timeout: float = 60.0
     reconnect_delay: float = 5.0
-    reconnect_max_delay: float = 60.0
+    reconnect_max_delay: float = field(
+        default_factory=lambda: _env_float(
+            "POCKET_BRIDGE_RECONNECT_MAX_SECS", DEFAULT_RECONNECT_MAX_SECS
+        )
+    )
+    #: First rung of the per-reader exponential ladder (seconds).
+    reconnect_base_delay: float = field(
+        default_factory=lambda: _env_float(
+            "POCKET_BRIDGE_RECONNECT_BASE_SECS", DEFAULT_RECONNECT_BASE_SECS
+        )
+    )
+    #: Fractional randomized jitter added to every reconnect backoff (0..1).
+    reconnect_jitter: float = field(
+        default_factory=lambda: _env_float(
+            "POCKET_BRIDGE_RECONNECT_JITTER", DEFAULT_RECONNECT_JITTER
+        )
+    )
+
+    #: Optional egress proxy for the Pocket Option WebSocket transport
+    #: (``socks5://``, ``socks5h://``, ``http://`` or ``https://``). The proxy
+    #: changes ONLY the network path — no TLS/JA3 knobs are touched. Empty
+    #: disables it. Malformed values fail fast at startup.
+    proxy_url: str = field(
+        default_factory=lambda: normalize_proxy_url(
+            os.getenv("PROXY_URL") or os.getenv("POCKET_OPTION_PROXY")
+        )
+    )
+
+    #: Public IP of the host running the bridge (informational only). Reported
+    #: on /health and the boot log so an operator can correlate egress/proxy
+    #: routing with the VPS. It is NEVER injected into the auth payload.
+    server_public_ip: str = field(
+        default_factory=lambda: (os.getenv("SERVER_PUBLIC_IP") or "").strip()
+    )
 
     #: Active PO application heartbeat (seconds). The heartbeat is also
     #: relayed to the Node backend as a liveness frame, so this value must stay
@@ -2140,6 +2260,11 @@ class BridgeSettings:
         return bool(self.ssid and self.ssid.strip())
 
     @property
+    def has_proxy(self) -> bool:
+        """True when the WebSocket transport must egress through a proxy."""
+        return bool(self.proxy_url)
+
+    @property
     def ssid_source(self) -> str:
         """Where boot credentials came from: token, file, env, or session."""
         if (
@@ -2219,6 +2344,45 @@ class BridgeSettings:
                 "POCKET_BRIDGE_PORT must be between 1 and 65535; "
                 f"got {self.relay_port}"
             )
+        # ── FAIL-FAST ENVIRONMENT VALIDATION ──
+        # Every one of these would otherwise surface minutes later as a silent
+        # tick starvation loop, so they are rejected before a socket is opened.
+        if self.has_ssid and not (
+            self.auth.get("session") or self.auth.get(SESSION_TOKEN_FIELD)
+        ):
+            raise ValueError(
+                "POCKET_OPTION_SSID is set but does not contain a "
+                "session/sessionToken credential"
+            )
+        if self.uid < 0:
+            raise ValueError(
+                f"POCKET_OPTION_UID must be non-negative; got {self.uid}"
+            )
+        if self.is_demo not in (0, 1):
+            raise ValueError(
+                "POCKET_OPTION_IS_DEMO must be 0 or 1; "
+                f"got {self.is_demo}"
+            )
+        # Re-validate an explicitly supplied proxy_url (a dataclass override
+        # bypasses the env factory) so operator typos fail at boot too.
+        if self.proxy_url:
+            object.__setattr__(
+                self, "proxy_url", normalize_proxy_url(self.proxy_url)
+            )
+        if self.server_public_ip:
+            try:
+                ipaddress.ip_address(self.server_public_ip)
+            except ValueError as exc:
+                raise ValueError(
+                    "SERVER_PUBLIC_IP must be a literal IPv4/IPv6 address; "
+                    f"got {self.server_public_ip!r}"
+                ) from exc
+        base = max(0.05, float(self.reconnect_base_delay))
+        cap = max(base, float(self.reconnect_max_delay))
+        jitter = min(1.0, max(0.0, float(self.reconnect_jitter)))
+        object.__setattr__(self, "reconnect_base_delay", base)
+        object.__setattr__(self, "reconnect_max_delay", cap)
+        object.__setattr__(self, "reconnect_jitter", jitter)
         # A 60s native handshake budget is the known regression that produced
         # the recurring "Connection initialization timed out" loop. Clamp it
         # even when an old .env/compose file still exports 60.

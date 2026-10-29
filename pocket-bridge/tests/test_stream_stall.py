@@ -72,6 +72,41 @@ def test_repeated_no_tick_timeouts_trip_terminal_expiry(monkeypatch):
     assert refreshes["count"] == 1
 
 
+def test_clean_stream_end_without_ticks_trips_terminal_expiry(monkeypatch):
+    """A stream that subscribes then ends with zero ticks must not reconnect
+    forever at the base cadence — it counts as a no-tick strike."""
+    bridge = _bridge()
+    refreshes = {"count": 0}
+
+    async def fake_reader(symbol: str, asset: str) -> None:
+        # Simulate a successful subscribe, then a clean end with no tick.
+        bridge._subscribed_at[symbol] = (
+            bridge._subscribed_at.get(symbol, 0.0) + 1.0
+        )
+
+    async def fake_refresh() -> bool:
+        refreshes["count"] += 1
+        return False
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    async def no_release() -> None:
+        return None
+
+    monkeypatch.setattr(bridge, "run_reader", fake_reader)
+    monkeypatch.setattr(bridge, "_run_refresh_once", fake_refresh)
+    monkeypatch.setattr(bridge, "_release_client", no_release)
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    asyncio.run(bridge._reader_loop("EUR/USD", "EURUSD"))
+
+    assert bridge._stream_timeout_streak == STREAM_TIMEOUT_STREAK_LIMIT
+    assert bridge.session_expired is True
+    assert bridge._retry_stopped is True
+    assert refreshes["count"] == 1
+
+
 def test_any_tick_resets_the_strike_counter(monkeypatch):
     bridge = _bridge()
     calls = {"n": 0}

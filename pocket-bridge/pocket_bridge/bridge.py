@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import re
 import sys
 import time
@@ -41,6 +42,7 @@ from .config import (
     credential_login_status,
     force_php_array_header,
     load_stored_session,
+    mask_proxy_url,
     mask_secret,
     mask_uid,
     normalize_auth_fields,
@@ -61,7 +63,57 @@ DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket
 #: momentary network blip self-heals without ever spinning into an endless
 #: reconnect storm that could look like brute-forcing.
 TRANSIENT_CONNECT_ATTEMPTS = 3
+#: Retained for callers/tests that reference the historical fixed ladder. The
+#: live ladder is now exponential + jittered via ``_backoff_delay``.
 RECONNECT_BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60)
+
+#: WebSocket close codes surfaced explicitly in the reconnect logs. The SDK
+#: does not always expose a structured code, so ``_close_code_for_exception``
+#: also infers these from the exception text.
+WS_CLOSE_NORMAL = 1000
+WS_CLOSE_GOING_AWAY = 1001
+WS_CLOSE_PROTOCOL_ERROR = 1002
+WS_CLOSE_ABNORMAL = 1006
+WS_CLOSE_POLICY_VIOLATION = 1008
+WS_CLOSE_TRY_AGAIN_LATER = 1013
+WS_CLOSE_MEANINGS: Dict[int, str] = {
+    1000: "normal_closure",
+    1001: "going_away",
+    1002: "protocol_error",
+    1003: "unsupported_data",
+    1006: "abnormal_closure",
+    1007: "invalid_frame_payload",
+    1008: "policy_violation",
+    1009: "message_too_big",
+    1011: "internal_error",
+    1012: "service_restart",
+    1013: "try_again_later",
+    1015: "tls_handshake_failed",
+}
+#: Close codes after which a reconnect is pointless/forbidden (logged louder).
+_TERMINAL_CLOSE_CODES = frozenset({1002, 1003, 1007, 1008, 1009})
+_POLICY_ERROR_MARKERS = (
+    "policy",
+    "forbidden",
+    "unauthorized",
+    "invalid session",
+    "banned",
+    "blocked",
+    "not authorized",
+    "not authorised",
+)
+_ABNORMAL_CLOSE_MARKERS = (
+    "connection closed",
+    "connectionclosed",
+    "connection reset",
+    "connectionreset",
+    "broken pipe",
+    "eof occurred",
+    "abnormal closure",
+    "channelreceiver",
+    "channel closed",
+    "1006",
+)
 
 #: Consecutive broker stream timeouts (with ZERO ticks received anywhere)
 #: before the bridge treats the session as dead instead of reconnecting
@@ -513,6 +565,14 @@ class PocketOptionBridge:
         #: two readers for the same symbol).
         self._reader_symbols: set = set()
         self._reader_tasks: Dict[str, asyncio.Task] = {}
+        #: wall-clock time each symbol's CURRENT subscription was armed. The
+        #: stall watchdog measures "no ticks since" from this anchor, so a fresh
+        #: subscription gets one full stale window before it can be recycled.
+        self._subscribed_at: Dict[str, float] = {}
+        #: serialises stall recoveries so a slow re-auth cannot be started twice
+        #: by two concurrent heartbeat probes / reader crashes.
+        self._recovery_lock = asyncio.Lock()
+        self._recovery_task: Optional[asyncio.Task] = None
 
     @property
     def is_connected(self) -> bool:
@@ -529,17 +589,38 @@ class PocketOptionBridge:
             status = "live"
         else:
             status = "degraded"
+        now = time.time()
+        tick_receipt = max(self._last_tick_ts.values(), default=None)
+        stale_window = float(self.settings.stream_stale_after)
+        stalled = [
+            symbol
+            for symbol in self._subs
+            if tick_receipt is not None
+            and (now - max(
+                self._last_tick_ts.get(symbol, 0.0),
+                self._subscribed_at.get(symbol, 0.0),
+            )) >= stale_window
+        ]
         return {
             "status": status,
             "ssid_present": self.has_credential,
             "ssid_format": self.settings.ssid_format,
             "ssid_source": self.settings.ssid_source,
             "last_tick_ts": last_tick_ts,
+            "last_tick_age_s": (
+                round(max(0.0, now - tick_receipt), 1)
+                if tick_receipt is not None
+                else None
+            ),
             "ticks_received": ticks,
             "candles_emitted": self._candle_count,
             "session_file_present": bool(self.session.exists),
             "is_optimized": bool(self.settings.auth.get("isOptimized")),
             "symbols": sorted(self._subs),
+            "stalled_symbols": sorted(stalled),
+            "proxy_enabled": bool(self.settings.proxy_url),
+            "proxy": mask_proxy_url(self.settings.proxy_url),
+            "server_public_ip": self.settings.server_public_ip or None,
             # Last-resort credential-login availability (opt-in, masked) so the
             # operator can see whether an expired session can self-heal without
             # a manual re-capture.
@@ -688,6 +769,12 @@ class PocketOptionBridge:
                 reason,
             )
             repaired_auth = normalize_auth_fields(dict(auth))
+            # The Rust core treats ``sessionToken`` as an alias of ``session``;
+            # emitting both raises ``duplicate field 'session'``. This retry
+            # path always sends the repaired PHP ``session``, so the token
+            # aliases must never travel alongside it.
+            repaired_auth.pop(SESSION_TOKEN_FIELD, None)
+            repaired_auth.pop("session_token", None)
             repaired_auth["session"] = candidate
             repaired_payload = "42" + json.dumps(
                 ["auth", repaired_auth], separators=(",", ":")
@@ -742,6 +829,11 @@ class PocketOptionBridge:
             # instead of costing the full handshake budget on every attempt.
             "reconnect_time": int(self.settings.po_reconnect_time),
         }
+        # Route the SDK transport through the configured proxy. This is a pure
+        # network-path change: NO TLS cipher/ALPN/JA3 fields are set here, the
+        # SDK keeps its own handshake semantics.
+        if self.settings.proxy_url:
+            sdk_config["proxy"] = self.settings.proxy_url
         urls = list(self.settings.urls)
         if urls:
             if len(urls) > 1 and self._endpoint_rotation:
@@ -762,8 +854,9 @@ class PocketOptionBridge:
             self._endpoint_rotation,
         )
         logger.info(
-            "handshake_fingerprint user_agent=%s",
+            "handshake_fingerprint user_agent=%s proxy=%s",
             sdk_config["user_agent"],
+            mask_proxy_url(self.settings.proxy_url),
         )
         logger.info(
             "auth_payload_sent via=%s session_len=%d uid=%s isDemo=%s isOptimized=%s",
@@ -1238,6 +1331,116 @@ class PocketOptionBridge:
         text = f"{type(exc).__name__}: {exc}".lower()
         return any(marker in text for marker in _TRANSPORT_ERROR_MARKERS)
 
+    @staticmethod
+    def _extract_close_code(exc: Optional[BaseException]) -> Optional[int]:
+        """Best-effort WebSocket close code from an SDK/websockets exception.
+
+        ``websockets.ConnectionClosed`` exposes ``.code`` (and ``.rcvd.code``)
+        directly; the native PO SDK mostly carries the code in its message, so
+        a numeric scan is the fallback. Returns ``None`` when no code is
+        available rather than inventing one.
+        """
+        if exc is None:
+            return None
+        for attr in ("code", "close_code"):
+            value = getattr(exc, attr, None)
+            if isinstance(value, int) and 1000 <= value <= 4999:
+                return value
+        for attr in ("rcvd", "sent"):
+            frame = getattr(exc, attr, None)
+            value = getattr(frame, "code", None) if frame is not None else None
+            if isinstance(value, int) and 1000 <= value <= 4999:
+                return value
+        match = re.search(r"\b(1\d{3}|[2-4]\d{3})\b", str(exc))
+        if match:
+            code = int(match.group(1))
+            if 1000 <= code <= 4999:
+                return code
+        return None
+
+    def _classify_close(
+        self, exc: Optional[BaseException], *, clean: bool = False
+    ) -> int:
+        """Map an exception/clean end onto an explicit WebSocket close code."""
+        if clean:
+            return WS_CLOSE_NORMAL
+        if exc is not None and self._is_stream_timeout(exc):
+            # Socket up, broker never streams: the session is not authorised.
+            return WS_CLOSE_POLICY_VIOLATION
+        code = self._extract_close_code(exc)
+        if code is not None:
+            return code
+        text = f"{type(exc).__name__}: {exc}".lower() if exc is not None else ""
+        if any(marker in text for marker in _POLICY_ERROR_MARKERS):
+            return WS_CLOSE_POLICY_VIOLATION
+        if any(marker in text for marker in _ABNORMAL_CLOSE_MARKERS):
+            return WS_CLOSE_ABNORMAL
+        return WS_CLOSE_ABNORMAL
+
+    def _log_stream_close(
+        self,
+        symbol: str,
+        code: int,
+        exc: Optional[BaseException] = None,
+        *,
+        clean: bool = False,
+    ) -> None:
+        """Emit the explicit close-code line required by the runbook."""
+        meaning = WS_CLOSE_MEANINGS.get(code, "unknown")
+        detail = "" if exc is None else f" error={type(exc).__name__}: {exc}"
+        if clean:
+            logger.info(
+                "FEED_STREAM_CLOSED symbol=%s code=%d meaning=%s (clean end)",
+                symbol, code, meaning,
+            )
+        elif code in _TERMINAL_CLOSE_CODES:
+            logger.error(
+                "FEED_STREAM_CLOSED symbol=%s code=%d meaning=%s "
+                "terminal_code=true%s",
+                symbol, code, meaning, detail,
+            )
+        else:
+            logger.warning(
+                "FEED_STREAM_CLOSED symbol=%s code=%d meaning=%s%s",
+                symbol, code, meaning, detail,
+            )
+
+    def _jitter(self, delay: float) -> float:
+        """Apply +/- fractional jitter to a reconnect delay."""
+        if delay <= 0:
+            return 0.0
+        spread = max(0.0, min(1.0, float(self.settings.reconnect_jitter)))
+        if spread <= 0:
+            return delay
+        return delay + random.uniform(0.0, delay * spread)
+
+    def _backoff_delay(self, attempt_index: int) -> float:
+        """Exponential (base -> max) reconnect delay with randomized jitter."""
+        base = max(0.05, float(self.settings.reconnect_base_delay))
+        cap = max(base, float(self.settings.reconnect_max_delay))
+        exponent = min(max(0, int(attempt_index)), 10)
+        raw = min(cap, base * (2 ** exponent))
+        return self._jitter(raw)
+
+    async def _guarded_stream(self, symbol: str, stream):
+        """Iterate a SDK tick stream, logging its explicit close code/meaning.
+
+        A clean ``for`` exhaustion is a 1000 normal closure; any raised error is
+        mapped (1006 abnormal, 1008 policy/session rejection, ...) BEFORE the
+        reader loop applies its backoff, so the operator can tell a plain
+        network drop from a broker-side authorization refusal.
+        """
+        try:
+            async for tick in stream:
+                yield tick
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - classified and re-raised
+            self._log_stream_close(symbol, self._classify_close(exc), exc)
+            raise
+        else:
+            self._log_stream_close(symbol, WS_CLOSE_NORMAL, clean=True)
+
     async def run_reader(self, symbol: str, asset: str) -> None:
         """Subscribe to raw ticks for one asset and feed the M20 engine.
 
@@ -1300,8 +1503,11 @@ class PocketOptionBridge:
             await self._set_status("connection_error", str(exc))
             return
         self._subs[symbol] = stream
+        # Anchor the stall watchdog to the moment THIS subscription went live:
+        # a fresh subscribe must get a full stale window before it is recycled.
+        self._subscribed_at[symbol] = time.time()
         logger.info("SUBSCRIBED symbols=%s", sorted(self._subs))
-        async for tick in stream:
+        async for tick in self._guarded_stream(symbol, stream):
             # NOTE: PO's raw `timestamp` is the broker's own clock, which runs
             # ahead of real UTC by ~PLATFORM_TIME_OFFSET (7200s) — so an
             # absolute-age window against `time.time()` would reject EVERY live
@@ -1618,7 +1824,9 @@ class PocketOptionBridge:
                 self.client = None
                 self._transient_connect_retries = attempt
                 if attempt < TRANSIENT_CONNECT_ATTEMPTS:
-                    await asyncio.sleep(self.settings.reconnect_delay * attempt)
+                    connect_delay = self.settings.reconnect_delay * attempt
+                    if connect_delay > 0:
+                        await asyncio.sleep(self._jitter(connect_delay))
         if not self.is_connected:
             logger.error(
                 "auth_failed reason=%s class=%s", last_error, last_error_class,
@@ -1771,6 +1979,7 @@ class PocketOptionBridge:
             return
         self._dynamic_symbols.discard(canonical)
         self._subs.pop(canonical, None)
+        self._subscribed_at.pop(canonical, None)
         task = self._reader_tasks.get(canonical)
         if task is not None:
             task.cancel()
@@ -1844,6 +2053,7 @@ class PocketOptionBridge:
                 pass
         self.client = None
         self._subs.clear()
+        self._subscribed_at.clear()
         self._assets_ready = False
         self._available_assets = None
         self._available_asset_records = []
@@ -1867,6 +2077,7 @@ class PocketOptionBridge:
                 pass
         self._tasks.clear()
         self._subs.clear()
+        self._subscribed_at.clear()
         self._reader_symbols.clear()
         self._assets_ready = False
         self._available_assets = None
@@ -2048,6 +2259,7 @@ class PocketOptionBridge:
                 return
             auth_epoch = self.connect_epoch
             tick_seq = self._tick_seq
+            subscribed_at = self._subscribed_at.get(symbol, 0.0)
             try:
                 await self.run_reader(symbol, asset)
             except asyncio.CancelledError:
@@ -2080,14 +2292,8 @@ class PocketOptionBridge:
                 await self._set_status(
                     "connecting", "broker asset registry not initialised — retrying"
                 )
-                await asyncio.sleep(
-                    RECONNECT_BACKOFF_SECONDS[
-                        min(delay_index, len(RECONNECT_BACKOFF_SECONDS) - 1)
-                    ]
-                )
-                delay_index = min(
-                    delay_index + 1, len(RECONNECT_BACKOFF_SECONDS) - 1
-                )
+                await asyncio.sleep(self._backoff_delay(delay_index))
+                delay_index = min(delay_index + 1, 10)
                 continue
             except ModuleUnavailableError as exc:
                 # Permanent dependency failure — PAUSE, never hot-loop. Emit ONE
@@ -2099,7 +2305,9 @@ class PocketOptionBridge:
                     "connection_error",
                     f"BinaryOptionsToolsV2 unavailable — {exc.install_hint}",
                 )
-                await asyncio.sleep(self.settings.reconnect_max_delay)
+                await asyncio.sleep(
+                    self._jitter(self.settings.reconnect_max_delay)
+                )
                 continue
             except Exception as exc:  # noqa: BLE001 - reconnect forever
                 # Permanent SSID rejection: every sanitizer/forced-header
@@ -2149,7 +2357,12 @@ class PocketOptionBridge:
                 # that recovers is still picked up. Release the broken client
                 # so the next loop-gate rebuilds a fresh auth instead of
                 # re-using a half-open socket.
-                logger.warning("reader(%s) crashed: %s", symbol, exc)
+                close_code = self._classify_close(exc)
+                logger.warning(
+                    "reader(%s) crashed: %s (close_code=%d meaning=%s)",
+                    symbol, exc, close_code,
+                    WS_CLOSE_MEANINGS.get(close_code, "unknown"),
+                )
                 if self._stream_progressed(auth_epoch, tick_seq):
                     if delay_index:
                         logger.info(
@@ -2162,10 +2375,15 @@ class PocketOptionBridge:
                 except Exception:  # noqa: BLE001 - teardown must not mask
                     pass
                 await self._set_status("connection_error", str(exc))
-                delay = RECONNECT_BACKOFF_SECONDS[min(delay_index, len(RECONNECT_BACKOFF_SECONDS) - 1)]
-                logger.info("FEED_RECONNECTING attempt=%d", delay_index + 1)
+                delay = self._backoff_delay(delay_index)
+                logger.info(
+                    "FEED_RECONNECTING attempt=%d close_code=%d backoff_s=%.2f "
+                    "jitter=%.2f",
+                    delay_index + 1, close_code, delay,
+                    self.settings.reconnect_jitter,
+                )
                 await asyncio.sleep(delay)
-                delay_index = min(delay_index + 1, len(RECONNECT_BACKOFF_SECONDS) - 1)
+                delay_index = min(delay_index + 1, 10)
                 continue
             # run_reader returned CLEANLY — that is a NORMAL disconnect / stop
             # (no exception, e.g. broker stream ended or session dropped).
@@ -2179,10 +2397,48 @@ class PocketOptionBridge:
                         "progress, restarting ladder at 1s", symbol,
                     )
                 delay_index = 0
-            logger.info("FEED_DISCONNECTED reason=stream_ended")
-            logger.info("FEED_RECONNECTING attempt=%d", delay_index + 1)
-            await asyncio.sleep(RECONNECT_BACKOFF_SECONDS[min(delay_index, len(RECONNECT_BACKOFF_SECONDS) - 1)])
-            delay_index = min(delay_index + 1, len(RECONNECT_BACKOFF_SECONDS) - 1)
+            else:
+                resubscribed = (
+                    self._subscribed_at.get(symbol, 0.0) > subscribed_at
+                )
+                if (
+                    resubscribed
+                    and self._tick_seq == tick_seq
+                    and not self._first_tick.is_set()
+                ):
+                    # A stream that subscribed, ended without a single tick and
+                    # was never authorised for market data is the same signature
+                    # as a stream timeout. Count it, so an unusable credential
+                    # stops after the strike limit instead of re-subscribing
+                    # every ~60s forever.
+                    self._stream_timeout_streak += 1
+                    logger.warning(
+                        "FEED_STALL_STREAM_END reader=%s streak=%d/%d — stream "
+                        "ended without a tick (session may be unauthorised)",
+                        symbol,
+                        self._stream_timeout_streak,
+                        STREAM_TIMEOUT_STREAK_LIMIT,
+                    )
+                    if self._stream_timeout_streak >= STREAM_TIMEOUT_STREAK_LIMIT:
+                        logger.critical(
+                            "FEED_STALL_TERMINAL - no ticks after %d stream "
+                            "attempts; stopping retries to request a fresh "
+                            "session capture",
+                            self._stream_timeout_streak,
+                        )
+                        await self._enter_session_expired(
+                            "stream ended without ticks"
+                        )
+                        return
+            logger.info("FEED_DISCONNECTED reason=stream_ended close_code=%d",
+                        WS_CLOSE_NORMAL)
+            delay = self._backoff_delay(delay_index)
+            logger.info(
+                "FEED_RECONNECTING attempt=%d backoff_s=%.2f jitter=%.2f",
+                delay_index + 1, delay, self.settings.reconnect_jitter,
+            )
+            await asyncio.sleep(delay)
+            delay_index = min(delay_index + 1, 10)
 
     async def stop(self) -> None:
         for task in (
@@ -2190,6 +2446,7 @@ class PocketOptionBridge:
             self._tick_watch_task,
             self._session_watch_task,
             self._refresh_task,
+            self._recovery_task,
         ):
             if task is not None:
                 task.cancel()
@@ -2201,6 +2458,7 @@ class PocketOptionBridge:
         self._tick_watch_task = None
         self._session_watch_task = None
         self._refresh_task = None
+        self._recovery_task = None
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
@@ -2210,6 +2468,7 @@ class PocketOptionBridge:
                 pass
         self._tasks.clear()
         self._reader_symbols.clear()
+        self._subscribed_at.clear()
         self._assets_ready = False
         self._available_assets = None
         self._available_asset_records = []
@@ -2326,26 +2585,49 @@ class PocketOptionBridge:
             newest = max(self._last_tick_ts.values())
             last_tick_age_s = max(0.0, wall_now - newest)
 
-        # A connected socket with live subscriptions but no ticks for a full
-        # stale window is dead even if is_connected() still lies. The 5s
-        # watchdog cadence guarantees this fires before the PO 60s cutoff.
-        if (
-            connected
-            and self._subs
-            and last_tick_age_s is not None
-            and last_tick_age_s >= self.settings.stream_stale_after
-        ):
+        # Per-symbol stream watchdog. A connected socket with live subscriptions
+        # but no ticks for a full stale window is dead even if is_connected()
+        # still lies. Measured from max(last tick, subscription armed at) so a
+        # freshly armed symbol gets one full window before being recycled.
+        stale_window = float(self.settings.stream_stale_after)
+        global_newest = max(self._last_tick_ts.values(), default=None)
+        stalled_ages: Dict[str, float] = {}
+        if connected and self._subs:
+            for symbol in list(self._subs):
+                tick_at = self._last_tick_ts.get(symbol)
+                subscribed_at = self._subscribed_at.get(symbol)
+                if tick_at is not None and subscribed_at is not None:
+                    anchor = max(tick_at, subscribed_at)
+                elif subscribed_at is not None:
+                    anchor = subscribed_at
+                elif tick_at is not None:
+                    anchor = tick_at
+                else:
+                    # Canonicalisation mismatch (or a legacy caller that did not
+                    # arm _subscribed_at): fall back to the global newest tick so
+                    # a silent tape is still detected.
+                    anchor = global_newest
+                if anchor is None:
+                    continue
+                age = max(0.0, wall_now - anchor)
+                if age >= stale_window:
+                    stalled_ages[symbol] = age
+
+        if stalled_ages:
+            stall_age = max(stalled_ages.values())
             logger.warning(
-                "HEARTBEAT_STALE no_ticks_for=%.1fs threshold=%.1fs — "
-                "releasing client while preserving engine/dynamic OTC state",
-                last_tick_age_s, self.settings.stream_stale_after,
+                "WATCHDOG_STALLED symbols=%s no_ticks_for=%.1fs threshold=%.1fs — "
+                "clean disconnect -> re-auth -> resubscribe "
+                "(engine/dynamic OTC state preserved)",
+                ",".join(sorted(stalled_ages)), stall_age, stale_window,
             )
             await self._release_client()
             await self._set_status(
                 "stalled",
-                f"no ticks for {last_tick_age_s:.0f}s — reconnecting",
+                f"no ticks for {stall_age:.0f}s — reconnecting",
             )
             connected = False
+            self._schedule_stall_recovery(list(stalled_ages))
 
         if not emit:
             return
@@ -2375,3 +2657,64 @@ class PocketOptionBridge:
             except Exception:  # noqa: BLE001 - a broken heartbeat relay must
                 # never kill the liveness probe loop.
                 logger.exception("heartbeat relay failed")
+
+    def _schedule_stall_recovery(self, symbols: list[str]) -> None:
+        """Schedule a clean re-auth/resubscribe cycle after a stall.
+
+        The heartbeat probe stays fast (it must not block on a 90s handshake),
+        so the actual teardown/reconnect runs in a dedicated task. It is only
+        scheduled when reader tasks exist — without readers there is nothing to
+        resubscribe and the next connect will arm them normally.
+        """
+        if not self._reader_tasks:
+            return
+        if self._recovery_task is not None and not self._recovery_task.done():
+            logger.info(
+                "STALL_RECOVERY_ALREADY_RUNNING symbols=%s",
+                ",".join(sorted(symbols)),
+            )
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - no loop => nothing to schedule
+            return
+        self._recovery_task = loop.create_task(
+            self._recover_after_stall(symbols)
+        )
+
+    async def _recover_after_stall(self, symbols: list[str]) -> None:
+        """Clean disconnect -> re-authenticate -> resubscribe every symbol."""
+        async with self._recovery_lock:
+            logger.warning(
+                "STALL_RECOVERY_BEGIN symbols=%s — disconnecting, "
+                "re-authenticating, resubscribing",
+                ",".join(sorted(symbols)),
+            )
+            try:
+                await self._teardown_client()
+                await self._ensure_connected()
+                # Re-arm BOTH sets: teardown cancelled every reader, including
+                # dynamic OTC pairs armed by a browser subscription push.
+                self._start_static_readers()
+                for symbol in list(self._dynamic_symbols):
+                    self._assets.setdefault(symbol, asset_for_symbol(symbol))
+                self._rearm_dynamic_readers()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - readers retry themselves
+                logger.error(
+                    "STALL_RECOVERY_FAILED error_type=%s error=%s — "
+                    "readers will continue their own bounded backoff",
+                    type(exc).__name__, exc,
+                )
+                return
+            if self.is_connected:
+                logger.info(
+                    "STALL_RECOVERY_COMPLETE symbols=%s",
+                    ",".join(sorted(self._subs)) or "(pending readers)",
+                )
+            else:
+                logger.warning(
+                    "STALL_RECOVERY_DEFERRED — re-auth did not complete; "
+                    "readers will retry on the exponential ladder"
+                )

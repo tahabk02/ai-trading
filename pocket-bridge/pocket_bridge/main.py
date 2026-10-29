@@ -31,6 +31,7 @@ from .config import (
     credential_login_status,
     load_settings,
     load_stored_session,
+    mask_proxy_url,
     mask_secret,
     mask_uid,
     resolve_user_agent,
@@ -58,6 +59,16 @@ async def amain(settings: BridgeSettings) -> None:
         settings.is_demo,
         settings.auth.get("isOptimized", False),
     )
+    logger.info(
+        "egress proxy=%s server_public_ip=%s",
+        mask_proxy_url(settings.proxy_url) or "DIRECT (no PROXY_URL)",
+        settings.server_public_ip or "unset",
+    )
+    if not settings.proxy_url:
+        logger.warning(
+            "NO_PROXY_CONFIGURED — market-data sockets will originate from the "
+            "host IP and may be filtered by Pocket Option"
+        )
     engine = M20Engine(
         settings.symbols,
         max_history=settings.max_m20_history,
@@ -242,6 +253,9 @@ async def amain(settings: BridgeSettings) -> None:
                     "connect_epoch": bridge.connect_epoch,
                     "tick_seq": bridge._tick_seq,
                     "subscribed_symbols": len(bridge._subs),
+                    "proxy_enabled": bool(settings.proxy_url),
+                    "proxy": mask_proxy_url(settings.proxy_url),
+                    "server_public_ip": settings.server_public_ip or None,
                     "connected_at": bridge.connected_at,
                     "uptime_s": uptime_s,
                     # Last-resort credential-login availability (opt-in, masked).
