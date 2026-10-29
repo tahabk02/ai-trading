@@ -112,7 +112,16 @@ async def amain(settings: BridgeSettings) -> None:
         # pushes (staged in poArmedByClient) until this frame so it never races
         # Python's asset initialisation.
         await relay.broadcast(
-            {"type": "ready", "payload": {"assets_initialized": True}}
+            {
+                "type": "ready",
+                "payload": {
+                    "assets_initialized": True,
+                    # Ship the authoritative registry with `ready`: the Node
+                    # backend replaces its symbol universe from this frame, so
+                    # dynamic broker pairs become subscribable immediately.
+                    "assets": bridge.available_assets_payload(),
+                },
+            }
         )
 
     async def on_heartbeat(payload: Dict) -> None:

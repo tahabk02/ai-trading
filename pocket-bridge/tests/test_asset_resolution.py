@@ -21,12 +21,14 @@ import pytest  # noqa: E402
 
 from pocket_bridge.bridge import (  # noqa: E402
     AssetSkippedError,
+    AssetsNotReadyError,
     PocketOptionBridge,
 )
 from pocket_bridge.config import (  # noqa: E402
     BridgeSettings,
     asset_candidates,
     asset_for_symbol,
+    broker_symbol_is_otc,
 )
 from pocket_bridge.m20_engine import M20Engine  # noqa: E402
 
@@ -66,6 +68,15 @@ def test_candidates_prefer_otc_then_bare():
 def test_candidates_reject_retired_crypto():
     assert asset_candidates("BTC/USD") == []
     assert asset_candidates("ETH/USDT") == []
+
+
+def test_dynamic_pair_gets_both_spellings_as_fallbacks():
+    """A pair outside the hard-coded OTC set must still be able to resolve the
+    broker's ``_otc`` listing instead of being dropped."""
+    assert asset_candidates("USD/IDR") == ["USDIDR", "USDIDR_otc"]
+    assert asset_candidates("EUR/SEK") == ["EURSEK"]  # REAL_FOREX stays bare
+    assert broker_symbol_is_otc("USDIDR_otc") is True
+    assert broker_symbol_is_otc("USDIDR") is False
 
 
 def test_asset_for_symbol_backward_compat():
@@ -109,6 +120,44 @@ def test_resolve_unavailable_list_falls_back_to_first_candidate():
     bridge = _bridge(["AUD/CHF"])
     client = FakeActiveAssetsClient([])
     client.active_assets = _explode  # list fetch fails at runtime
+    resolved = asyncio.run(bridge._resolve_asset(client, "AUD/CHF"))
+    assert resolved == "AUDCHF_otc"
+
+
+def test_resolve_uses_broker_spelling_for_dynamic_otc_pair():
+    """The exact broker symbol (case/suffix) is returned, not a reconstruction."""
+    bridge = _bridge(["USD/IDR"])
+    client = FakeActiveAssetsClient([
+        {"symbol": "usdidr_otc", "is_active": True},
+    ])
+    resolved = asyncio.run(bridge._resolve_asset(client, "USD/IDR"))
+    assert resolved == "usdidr_otc"
+    assert bridge._asset_type("USD/IDR", resolved) == "otc"
+
+
+def test_resolve_prefers_otc_when_both_variants_are_listed():
+    bridge = _bridge(["EUR/USD"])
+    client = FakeActiveAssetsClient([
+        {"symbol": "EURUSD", "is_active": True},
+        {"symbol": "EURUSD_otc", "is_active": True},
+    ])
+    assert asyncio.run(bridge._resolve_asset(client, "EUR/USD")) == "EURUSD_otc"
+
+
+def test_real_forex_never_resolves_to_an_otc_listing():
+    """The 5 ECB-sourced pairs must never be priced from the OTC venue."""
+    bridge = _bridge(["EUR/HUF"])
+    client = FakeActiveAssetsClient([
+        {"symbol": "EURHUF_otc", "is_active": True},
+    ])
+    assert asyncio.run(bridge._resolve_asset(client, "EUR/HUF")) is None
+
+
+def test_resolve_falls_back_to_inactive_listing():
+    bridge = _bridge(["AUD/CHF"])
+    client = FakeActiveAssetsClient([
+        {"symbol": "AUDCHF_otc", "is_active": False},
+    ])
     resolved = asyncio.run(bridge._resolve_asset(client, "AUD/CHF"))
     assert resolved == "AUDCHF_otc"
 
@@ -160,6 +209,78 @@ def test_subscribe_generic_failure_still_reports_connection_error():
     asyncio.run(bridge.run_reader("EUR/USD", "EURUSD_otc"))
     assert bridge.status == "connection_error"
     assert "EUR/USD" not in bridge._skipped
+
+
+class FakeWarmingAssetsClient(FakeActiveAssetsClient):
+    """Socket is up but the SDK's asset registry is still empty."""
+
+    def __init__(self):
+        super().__init__([])
+        self.subscribe_calls = 0
+
+    async def active_assets(self):
+        raise RuntimeError("Uninitialized, Assets not initialized yet.")
+
+    async def subscribe_symbol(self, asset: str):
+        self.subscribe_calls += 1
+        raise RuntimeError(
+            f'PocketOptionError, General error: BinaryOptionsError: '
+            f'General("Assets not found")'
+        )
+
+
+def test_assets_not_found_on_warming_registry_is_transient_not_skipped():
+    """The exact production error must NEVER permanently skip the pair nor
+    flip the bridge into a global connection_error."""
+    bridge = _bridge(["EUR/USD"])
+    bridge.status = "connected"
+    bridge._assets_ready = True  # legacy/racy state: ready flag, no registry
+    client = FakeWarmingAssetsClient()
+    bridge.client = client
+
+    with pytest.raises(AssetsNotReadyError):
+        asyncio.run(bridge.run_reader("EUR/USD", "EURUSD_otc"))
+
+    assert bridge.status == "connected"
+    assert bridge._skipped == {}
+    # The error is classified transient — the symbol is NOT retired/skipped.
+    assert client.subscribe_calls == 1
+
+
+def test_unready_bridge_defers_before_any_subscribe_attempt():
+    bridge = _bridge(["EUR/USD"])
+    client = FakeWarmingAssetsClient()
+    bridge.client = client
+    bridge._assets_ready = False
+
+    async def _already_connected() -> None:
+        return None
+
+    bridge._ensure_connected = _already_connected  # type: ignore[method-assign]
+
+    with pytest.raises(AssetsNotReadyError):
+        asyncio.run(bridge.run_reader("EUR/USD", "EURUSD_otc"))
+
+    assert client.subscribe_calls == 0
+    assert bridge._skipped == {}
+
+
+def test_ready_is_deferred_until_the_registry_is_populated():
+    bridge = _bridge(["EUR/USD"])
+    calls = []
+
+    async def on_ready():
+        calls.append(True)
+
+    bridge.on_ready = on_ready
+    asyncio.run(bridge._mark_ready())
+    assert bridge._assets_ready is False
+    assert calls == []
+
+    bridge._available_assets = {"EURUSD_otc"}
+    asyncio.run(bridge._mark_ready())
+    assert bridge._assets_ready is True
+    assert calls == [True]
 
 
 # --- helpers ----------------------------------------------------------------

@@ -1877,19 +1877,30 @@ REAL_FOREX_SYMBOLS: frozenset = frozenset({
 })
 
 
+#: Broker OTC suffix in every spelling actually returned by Pocket Option:
+#: ``EURUSD_otc``, ``EURUSD-OTC``, ``EUR/USD OTC``, ``EURUSD.OTC`` and the
+#: separator-less ``EURUSDOTC``. Stripping the WHOLE suffix (separator
+#: included) is what keeps ``AUDCHF_otc`` from becoming ``AUDCHF/``.
+_OTC_SUFFIX_RE = re.compile(r"(?:[_\-\s.]?OTC)$", re.IGNORECASE)
+
+
+def broker_symbol_is_otc(raw: str) -> bool:
+    """True when a broker asset name carries an OTC suffix in any spelling."""
+    return bool(_OTC_SUFFIX_RE.search((raw or "").strip()))
+
+
 def canonical_symbol(raw: str) -> str:
-    """Map any backend/UI symbol variant onto the canonical ``BASE/QUOTE`` form.
+    """Map any backend/UI/broker symbol variant onto ``BASE/QUOTE`` form.
 
     Mirrors the core backend's symbol normalizer so a subscription pushed down
     from the browser ("EUR/USD OTC", "EURUSD", "EUR-USD", "EUR/USD=X") lands on
     the EXACT tick/room key the bridge streams ("EUR/USD"):
-      * trailing ``OTC`` display suffix is stripped first,
+      * quotes/backticks and trailing ``OTC`` display suffix are stripped first,
       * Yahoo/exchange qualifiers (=X, .FX, .FOREX) are removed,
       * every separator style is unified onto ``/``.
     """
-    s = (raw or "").strip().upper()
-    s = re.sub(r"[_\-\s]OTC$", "", s)
-    s = re.sub(r"\s*OTC\s*$", "", s)
+    s = (raw or "").strip().strip("\"'`").upper()
+    s = _OTC_SUFFIX_RE.sub("", s)
     s = s.replace("=X", "")
     s = s.replace(".FX", "").replace(".FOREX", "").replace(".CS", "").replace(".TO", "")
     s = re.sub(r"[-_.\s]+", "/", s)
@@ -1902,9 +1913,7 @@ def canonical_symbol(raw: str) -> str:
 
 def canonical_active_asset(raw: str) -> str:
     """Convert a broker asset name into a frontend/backend symbol key."""
-    value = (raw or "").strip().upper()
-    value = re.sub(r"[_\-\s]OTC$", "", value)
-    return canonical_symbol(value)
+    return canonical_symbol((raw or "").strip())
 
 
 def is_removed_symbol(symbol: str) -> bool:
@@ -1937,23 +1946,35 @@ def asset_type_for_symbol(symbol: str) -> str:
 def asset_candidates(symbol: str) -> List[str]:
     """Priority-ordered Pocket Option asset candidates for a backend symbol.
 
-    Classification is strict and explicit:
-      • OTC forex pairs resolve to the ``_otc`` suffix first (e.g.
-        ``EURUSD_otc``) — the OTC instrument is a distinct pricing model that
-        must never be mixed into the standard forex book. The bare fallback is
-        retained ONLY for sessions where the broker does not list the OTC
-        form (rotating availability), not as a pricing-mix path.
-      • Standard forex pairs resolve to the bare symbol.
+    Classification decides the ORDER, but every forex-style pair carries both
+    spellings as a fallback:
+      • OTC pairs try ``EURUSD_otc`` first (the distinct OTC pricing venue).
+      • Standard forex pairs try the bare ``EURUSD`` first.
+      • The 5 ECB-sourced REAL_FOREX pairs never fall back to OTC, because
+        their broker OTC listing is a different instrument class.
 
-    Returns at least one candidate so the mapping never silently drops a
-    configured symbol.
+    The fallback is what lets a DYNAMIC pair (not present in the hard-coded
+    OTC set) resolve when the broker only lists one of the two forms. It is
+    still resolved against the authoritative ``active_assets()`` registry, so
+    it never silently mixes venues.
     """
     if is_removed_symbol(symbol):
         return []
-    normalized = symbol.replace("/", "").upper()
-    if asset_type_for_symbol(symbol) == "otc":
-        return [f"{normalized}_otc", normalized]
-    return [normalized]
+    canonical = canonical_symbol(symbol)
+    if "/" not in canonical:
+        return []
+    base, quote = canonical.split("/", 1)
+    base = re.sub(r"[^A-Z0-9]", "", base)
+    quote = re.sub(r"[^A-Z0-9]", "", quote)
+    if not base or not quote:
+        return []
+    compact = f"{base}{quote}"
+    if canonical in REAL_FOREX_SYMBOLS:
+        return [compact]
+    otc = f"{compact}_otc"
+    if asset_type_for_symbol(canonical) == "otc":
+        return [otc, compact]
+    return [compact, otc]
 
 
 def asset_for_symbol(symbol: str) -> str:

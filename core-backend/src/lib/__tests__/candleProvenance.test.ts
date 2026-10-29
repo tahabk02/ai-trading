@@ -11,7 +11,11 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { canonicalizeSymbol } from "../../utils/symbolFormat";
+import {
+  canonicalizeSymbol,
+  isOtcSymbol,
+  toBrokerAssetSymbol,
+} from "../../utils/symbolFormat";
 import { realtimeCandleAggregatorService } from "../../services/realtimeCandleAggregator.service";
 
 const SERVICE = realtimeCandleAggregatorService;
@@ -36,8 +40,19 @@ describe("canonicalizeSymbol", () => {
 
   it("strips broker asset decorations (real and OTC land on one key)", () => {
     expect(canonicalizeSymbol("EUR/USD OTC")).toBe("EUR/USD");
+    expect(canonicalizeSymbol("EURUSD_otc")).toBe("EUR/USD");
+    expect(canonicalizeSymbol("EURUSD-OTC")).toBe("EUR/USD");
+    expect(canonicalizeSymbol("AUDCHF_otc")).toBe("AUD/CHF");
     expect(canonicalizeSymbol("EURUSD=X")).toBe("EUR/USD");
     expect(canonicalizeSymbol("EURUSD.FX")).toBe("EUR/USD");
+  });
+
+  it("classifies and rebuilds the broker OTC asset name", () => {
+    expect(isOtcSymbol("EURUSD_otc")).toBe(true);
+    expect(isOtcSymbol("EUR/USD OTC")).toBe(true);
+    expect(isOtcSymbol("EURUSD")).toBe(false);
+    expect(toBrokerAssetSymbol("AUDCHF_otc", true)).toBe("AUDCHF_otc");
+    expect(toBrokerAssetSymbol("AUD/CHF", false)).toBe("AUDCHF");
   });
 
   it("keeps a crypto pair addressable", () => {

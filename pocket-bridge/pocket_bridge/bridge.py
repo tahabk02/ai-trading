@@ -32,6 +32,8 @@ from .config import (
     asset_candidates,
     asset_for_symbol,
     asset_type_for_symbol,
+    broker_symbol_is_otc,
+    REAL_FOREX_SYMBOLS,
     canonical_active_asset,
     is_removed_symbol,
     auth_message,
@@ -74,6 +76,32 @@ _STREAM_TIMEOUT_MARKERS = (
     "waiting for data from",
     "timed out waiting for data",
 )
+
+#: The SDK raises ``General("Assets not found")`` when the broker asset
+#: registry has not been populated yet. That is a TRANSIENT initialisation
+#: condition, NOT a bad symbol — subscribing in that state makes every reader
+#: fail with the same error and used to flip the whole bridge to
+#: ``connection_error``.
+_ASSETS_UNINITIALIZED_MARKERS = (
+    "assets not initialized",
+    "assets not loaded",
+    "assets are not initialized",
+    "assets not yet initialized",
+    "uninitialized, assets",
+)
+
+#: A specific candidate the broker's loaded registry does not contain.
+_ASSET_REJECTION_MARKERS = (
+    "invalid asset",
+    "asset not found",
+    "assets not found",
+    "unknown asset",
+    "asset does not exist",
+    "no asset available",
+)
+
+#: Bounded retry cadence for ``active_assets()`` while the registry warms up.
+_ASSET_LIST_RETRY_DELAYS = (0.0, 0.5, 1.0)
 
 #: Extra seconds the bridge waits beyond the SDK's own handshake budget before
 #: declaring a transport failure. Without this the Python-side
@@ -273,6 +301,24 @@ class AssetSkippedError(Exception):
         self.candidates = candidates
 
 
+class AssetsNotReadyError(Exception):
+    """Raised when the broker asset registry is not initialised yet.
+
+    This is TRANSIENT: the socket may be authenticated while the SDK's asset
+    map is still empty, in which case EVERY ``subscribe_symbol`` call raises
+    ``General("Assets not found")``. The reader must back off and retry — it
+    must never mark the symbol permanently skipped or degrade the whole feed.
+    """
+
+    def __init__(self, symbol: str, detail: str = "") -> None:
+        suffix = f": {detail}" if detail else ""
+        super().__init__(
+            f"broker asset registry not ready for {symbol}{suffix}"
+        )
+        self.symbol = symbol
+        self.detail = detail
+
+
 def parse_quote(
     payload: Dict,
     now_ms: Optional[int] = None,
@@ -392,6 +438,23 @@ class PocketOptionBridge:
         #: None if the list could not be loaded (subscribe-error fallback then).
         self._available_assets: Optional[set[str]] = None
         self._available_asset_records: list[Dict[str, object]] = []
+        #: canonical pair -> {"otc"|"plain": raw broker symbol}. Resolution
+        #: uses the broker's OWN spelling instead of a reconstructed guess.
+        self._asset_index: Dict[str, Dict[str, str]] = {}
+        #: listed-but-inactive variants, tried only when no active variant
+        #: matched (broker flips is_active during maintenance windows).
+        self._asset_index_inactive: Dict[str, Dict[str, str]] = {}
+        #: last failure while loading active_assets() (diagnostics + the
+        #: transient/permanent decision in run_reader).
+        self._assets_error: Optional[str] = None
+        self._assets_loaded_at: float = 0.0
+        #: Cooldown so N readers waking together do not each pay the full
+        #: active_assets() retry budget while the registry is still warming.
+        self._assets_last_attempt_at: float = 0.0
+        #: serialises connect + asset initialisation. Without it every reader
+        #: raced a fresh PocketOptionAsync construction, which is what produced
+        #: the "Assets not initialized yet" / "Assets not found" cascade.
+        self._connect_lock = asyncio.Lock()
         #: True once the PO client is authenticated AND the authoritative asset
         #: list has been loaded. The relay broadcasts a ``ready`` frame based on
         #: this so the Node backend can safely release its staged subscribes.
@@ -538,6 +601,12 @@ class PocketOptionBridge:
         release the subscribes it has staged instead of racing startup.
         """
         if self._assets_ready:
+            return
+        if not self._available_assets:
+            logger.warning(
+                "READY_DEFERRED — broker asset registry is not populated; "
+                "`ready` is not advertised and subscribes stay staged"
+            )
             return
         self._assets_ready = True
         logger.info("bridge ready — PO client authenticated & assets initialised")
@@ -873,68 +942,282 @@ class PocketOptionBridge:
                 symbol, count, price, ts_ms,
             )
 
+    @staticmethod
+    def _is_assets_uninitialized_error(exc: BaseException) -> bool:
+        """True when the SDK says its asset map is not populated YET."""
+        text = str(exc).lower()
+        return any(marker in text for marker in _ASSETS_UNINITIALIZED_MARKERS)
+
+    def _is_assets_not_ready_error(self, exc: BaseException) -> bool:
+        """True when a subscribe failure means "registry not loaded", not "bad
+        symbol".
+
+        ``Assets not found`` is ambiguous: it is raised both when the registry
+        is empty (transient — the SDK never received the asset dump) and when
+        a specific symbol is absent from a loaded registry (per-symbol). The
+        presence of an authoritative registry disambiguates them.
+        """
+        if self._is_assets_uninitialized_error(exc):
+            return True
+        return (
+            self._available_assets is None
+            and "assets not found" in str(exc).lower()
+        )
+
+    @staticmethod
+    async def _is_invalid_asset_error(exc: BaseException) -> bool:
+        """True when the client rejects a specific asset name."""
+        text = str(exc).lower()
+        return any(marker in text for marker in _ASSET_REJECTION_MARKERS)
+
+    @staticmethod
+    def _asset_type(symbol: str, asset: Optional[str]) -> str:
+        """Classify a resolved stream from the broker's OWN asset spelling.
+
+        A dynamic pair outside the hard-coded OTC set may resolve to an
+        ``_otc`` instrument; stamping it "forex" would mix the two pricing
+        venues downstream. The resolved asset wins over the static guess.
+        """
+        if asset and broker_symbol_is_otc(asset):
+            return "otc"
+        return asset_type_for_symbol(symbol)
+
+    async def _wait_for_assets_quiet(self, client, timeout: float = 5.0) -> bool:
+        """Best-effort ``wait_for_assets`` nudge used while the registry warms."""
+        try:
+            await asyncio.wait_for(
+                client.wait_for_assets(timeout=timeout),
+                timeout=timeout + 1.0,
+            )
+            return True
+        except Exception:  # noqa: BLE001 - the caller retries the list itself
+            return False
+
     async def _load_available_assets(self, client) -> Optional[set[str]]:
         """Fetch the session's server-authoritative asset symbols (cached).
 
         Uses ``PocketOptionAsync.active_assets()`` — the exact list the broker
-        validates subscriptions against — so we can skip unsupported pairs
-        BEFORE attempting ``subscribe_symbol``. Returns ``None`` when the list
-        cannot be loaded (subscription itself then decides and falls back).
+        validates subscriptions against — so we can resolve symbols against the
+        broker's OWN spelling instead of reconstructing guesses. Retries a
+        warming registry (``Assets not initialized yet``) a few times with a
+        bounded ``wait_for_assets`` nudge.
+
+        Returns ``None`` only when the list cannot be loaded at all. An empty
+        set means "loaded, but no active assets" (a distinct, non-transient
+        state the caller reports cleanly).
         """
+        now = time.time()
         if self._available_assets is not None:
-            return self._available_assets
-        try:
-            active = await asyncio.wait_for(
-                client.active_assets(),
-                timeout=self.settings.connect_timeout,
-            )
-        except Exception as exc:  # noqa: BLE001 - asset list is best-effort
-            logger.warning(
-                "active_assets() unavailable (%s) — resolving assets via "
-                "subscribe_symbol error handling instead", exc,
-            )
+            # An empty registry is re-probed after a short cooldown so a
+            # maintenance-window dump is picked up without a process restart.
+            if self._available_assets or (now - self._assets_loaded_at) < 30:
+                return self._available_assets
+        elif now - self._assets_last_attempt_at < 2.0:
+            # A recent load already failed; let the reader's backoff drive the
+            # next attempt instead of re-running the retry budget per reader.
             return None
-        symbols = {
-            a.get("symbol")
-            for a in active
-            if isinstance(a, dict) and a.get("symbol") and a.get("is_active", True)
-        }
-        self._available_asset_records = []
-        for raw in sorted(symbols):
-            canonical = canonical_active_asset(str(raw))
-            if not canonical or is_removed_symbol(canonical):
+        self._assets_last_attempt_at = now
+
+        last_exc: Optional[BaseException] = None
+        for delay in _ASSET_LIST_RETRY_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                active = await asyncio.wait_for(
+                    client.active_assets(),
+                    timeout=min(float(self.settings.connect_timeout), 20.0),
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort registry
+                last_exc = exc
+                self._assets_error = str(exc)
+                if self._is_assets_uninitialized_error(exc):
+                    await self._wait_for_assets_quiet(client)
+                    continue
+                logger.warning(
+                    "active_assets() unavailable (%s) — resolving assets via "
+                    "subscribe_symbol error handling instead", exc,
+                )
+                return None
+
+            records = [
+                a for a in (active or [])
+                if isinstance(a, dict) and a.get("symbol")
+            ]
+            if not records:
+                last_exc = RuntimeError("active_assets() returned no assets")
+                self._assets_error = str(last_exc)
+                await self._wait_for_assets_quiet(client)
                 continue
-            asset_type = asset_type_for_symbol(canonical)
-            self._available_asset_records.append({
-                "symbol": canonical,
-                "name": canonical,
-                "label": f"{canonical}{' OTC' if asset_type == 'otc' else ''}",
-                "assetSubType": asset_type,
-                "type": "otc" if asset_type == "otc" else "forex",
-            })
-        self._available_assets = symbols or None
-        return self._available_assets
+
+            active_symbols: set[str] = set()
+            index: Dict[str, Dict[str, str]] = {}
+            inactive_index: Dict[str, Dict[str, str]] = {}
+            record_map: Dict[str, Dict[str, object]] = {}
+            for item in records:
+                raw = str(item.get("symbol") or "").strip()
+                canonical = canonical_active_asset(raw)
+                if not raw or not canonical or "/" not in canonical:
+                    continue
+                if is_removed_symbol(canonical):
+                    continue
+                is_active = item.get("is_active", True)
+                if isinstance(is_active, str):
+                    is_active = is_active.strip().lower() not in {
+                        "false", "0", "no", "off",
+                    }
+                else:
+                    is_active = bool(is_active)
+
+                is_otc = item.get("is_otc")
+                if isinstance(is_otc, str):
+                    is_otc = is_otc.strip().lower() in {"true", "1", "yes"}
+                variant = (
+                    "otc"
+                    if bool(is_otc) or broker_symbol_is_otc(raw)
+                    else "plain"
+                )
+                target = index if is_active else inactive_index
+                target.setdefault(canonical, {}).setdefault(variant, raw)
+                if is_active:
+                    active_symbols.add(raw)
+
+                if not is_active:
+                    # Inactive variants remain resolvable as a last resort but
+                    # must NOT be advertised to the backend: it would expose a
+                    # symbol the bridge cannot stream.
+                    continue
+                asset_type = (
+                    "otc" if variant == "otc"
+                    else asset_type_for_symbol(canonical)
+                )
+                record = {
+                    "symbol": canonical,
+                    "name": canonical,
+                    "label": f"{canonical}{' OTC' if asset_type == 'otc' else ''}",
+                    "assetSubType": asset_type,
+                    "type": "otc" if asset_type == "otc" else "forex",
+                }
+                # One registry entry per canonical pair, OTC preferred: the
+                # backend keeps the first record and must never label an OTC
+                # instrument as plain forex just because "EURUSD" sorted first.
+                previous = record_map.get(canonical)
+                if previous is None or (
+                    asset_type == "otc"
+                    and previous.get("assetSubType") != "otc"
+                ):
+                    record_map[canonical] = record
+
+            self._asset_index = index
+            self._asset_index_inactive = inactive_index
+            self._available_asset_records = [
+                record_map[key] for key in sorted(record_map)
+            ]
+            self._available_assets = active_symbols
+            self._assets_loaded_at = time.time()
+            self._assets_error = None
+            logger.info(
+                "asset registry loaded active=%d inactive=%d canonical=%d",
+                len(active_symbols),
+                sum(len(v) for v in inactive_index.values()),
+                len(index),
+            )
+            return self._available_assets
+
+        self._assets_error = str(last_exc) if last_exc else "asset registry unavailable"
+        logger.warning(
+            "active_assets() unavailable after %d attempts (%s) — deferring "
+            "subscriptions until the broker registry is initialised",
+            len(_ASSET_LIST_RETRY_DELAYS),
+            last_exc,
+        )
+        return None
 
     async def _resolve_asset(self, client, symbol: str) -> Optional[str]:
-        """Return the first PO asset for ``symbol`` the broker actually lists.
+        """Return the broker's OWN asset name for ``symbol``, or ``None``.
 
-        Walks :func:`asset_candidates` (OTC form first, then the bare pair)
-        against the session's available assets. Without an authoritative list
-        the primary candidate is returned so the subscribe error handler can
-        distinguish an invalid asset and skip it cleanly.
+        Resolution prefers the venue implied by the symbol classification
+        (OTC first for OTC pairs, bare first for standard forex) and falls back
+        to the other spelling, then to inactive listings. Without an
+        authoritative registry the primary candidate is returned so the
+        subscribe error handler can distinguish a bad symbol from a warming
+        registry.
         """
+        canonical = canonical_symbol(symbol)
         candidates = list(asset_candidates(symbol))
         available = await self._load_available_assets(client)
-        if available:
-            for cand in candidates:
-                if cand in available:
-                    return cand
-            return None
-        return candidates[0]
+        if available is None:
+            return candidates[0] if candidates else None
 
-    async def _is_invalid_asset_error(self, exc: Exception) -> bool:
-        """True when the client reports an unknown/unsupported asset name."""
-        return "invalid asset" in str(exc).lower()
+        preferred = (
+            ("otc", "plain")
+            if asset_type_for_symbol(canonical) == "otc"
+            else ("plain", "otc")
+        )
+        if canonical in REAL_FOREX_SYMBOLS:
+            # These 5 pairs are ECB-sourced wholesale forex; their broker OTC
+            # listing is a different instrument class and must never be used.
+            preferred = ("plain",)
+        for source in (self._asset_index, self._asset_index_inactive):
+            slot = source.get(canonical) or {}
+            for variant in preferred:
+                raw = slot.get(variant)
+                if raw:
+                    return raw
+            for raw in slot.values():
+                if not raw:
+                    continue
+                if canonical in REAL_FOREX_SYMBOLS and broker_symbol_is_otc(raw):
+                    continue
+                return raw
+
+        # Last resort: exact (case-insensitive) candidate match against the
+        # active list, covering broker spellings that canonicalize differently.
+        lowered = {str(item).lower(): str(item) for item in available}
+        for candidate in candidates:
+            raw = lowered.get(candidate.lower())
+            if raw:
+                return raw
+        return None
+
+    async def _subscribe_first_available(
+        self, client, symbol: str, asset: str
+    ):
+        """Subscribe using the resolved asset, with bounded candidate fallback.
+
+        A broker registry can rotate between resolution and subscribe (or list
+        a different suffix for a dynamic pair). Each candidate is attempted
+        once; a symbol that is genuinely absent is skipped per-symbol while an
+        uninitialised registry is surfaced as transient so the reader retries.
+        """
+        attempts = [asset]
+        for candidate in asset_candidates(symbol):
+            if candidate not in attempts:
+                attempts.append(candidate)
+
+        last_exc: Optional[BaseException] = None
+        for candidate in attempts:
+            try:
+                stream = await client.subscribe_symbol(candidate)
+            except Exception as exc:  # noqa: BLE001 - classified below
+                last_exc = exc
+                if self._is_assets_not_ready_error(exc):
+                    raise AssetsNotReadyError(symbol, str(exc)) from exc
+                if not await self._is_invalid_asset_error(exc):
+                    raise
+                logger.warning(
+                    "asset candidate '%s' rejected by broker for [%s] (%s) — "
+                    "trying next candidate", candidate, symbol, exc,
+                )
+                continue
+            if candidate != asset:
+                logger.info(
+                    "asset[%s] fallback %s -> %s (broker registry)",
+                    symbol, asset, candidate,
+                )
+            return candidate, stream
+
+        self._skipped[symbol] = asset
+        raise AssetSkippedError(symbol, attempts) from last_exc
 
     @staticmethod
     def _is_transport_error(exc: Optional[BaseException]) -> bool:
@@ -976,9 +1259,20 @@ class PocketOptionBridge:
             )
             return
         await self._ensure_connected()
-        client = await self._import_client()
-        if not self.is_connected:
+        client = self.client
+        if client is None or not self.is_connected:
             return
+        if not self._assets_ready:
+            # NEVER call subscribe_symbol() against an uninitialised registry:
+            # the SDK raises General("Assets not found") for EVERY symbol,
+            # which used to be misread as a global connection failure. Defer
+            # instead; the reader loop backs off and retries after `ready`.
+            detail = self._assets_error or "broker asset registry not initialised"
+            logger.warning(
+                "ASSETS_NOT_READY reader=%s detail=%s — deferring subscribe",
+                symbol, detail,
+            )
+            raise AssetsNotReadyError(symbol, detail)
         resolved = await self._resolve_asset(client, symbol)
         if resolved is None:
             candidates = list(asset_candidates(symbol))
@@ -996,15 +1290,12 @@ class PocketOptionBridge:
             )
             asset = resolved
         try:
-            stream = await client.subscribe_symbol(asset)
-        except Exception as exc:  # noqa: BLE001
-            if await self._is_invalid_asset_error(exc):
-                logger.warning(
-                    "SKIP [%s] asset '%s' rejected by broker (%s) — not "
-                    "retrying, keeping other pairs running", symbol, asset, exc,
-                )
-                self._skipped[symbol] = asset
-                raise AssetSkippedError(symbol, [asset]) from exc
+            asset, stream = await self._subscribe_first_available(
+                client, symbol, asset
+            )
+        except (AssetSkippedError, AssetsNotReadyError):
+            raise
+        except Exception as exc:  # noqa: BLE001 - transport/subscribe failure
             logger.error("subscribe_symbol(%s) failed: %s", asset, exc)
             await self._set_status("connection_error", str(exc))
             return
@@ -1054,7 +1345,7 @@ class PocketOptionBridge:
                     {
                         "symbol": symbol,
                         "asset": asset,
-                        "asset_type": asset_type_for_symbol(symbol),
+                        "asset_type": self._asset_type(symbol, asset),
                         # NUMBER primary fields — the Node client's registered
                         # contract (`typeof price === "number"`) must never
                         # silently drop a live frame (zero-drop L1).
@@ -1076,7 +1367,7 @@ class PocketOptionBridge:
                         "received_utc_ms": received_utc_ms,
                         "seq": self._tick_seq,
                         "source": "pocket_option",
-                        "is_otc": asset_type_for_symbol(symbol) == "otc",
+                        "is_otc": self._asset_type(symbol, asset) == "otc",
                         "is_synthetic": True,
                         "synthetic_quote": quote["synthetic_quote"],
                         "timestamp_fallback": quote["timestamp_fallback"],
@@ -1154,10 +1445,35 @@ class PocketOptionBridge:
                 "status": "subscribe_error",
                 "error": "Pocket Option bridge not connected — cannot arm subscription",
             }
+        if not self._assets_ready:
+            return {
+                **base,
+                "status": "subscribe_error",
+                "error": (
+                    "broker asset registry not initialised yet — "
+                    "the backend re-sends staged subscribes on `ready`"
+                ),
+            }
+
+        # Resolve against the broker's OWN registry BEFORE spawning a reader,
+        # so a dynamic OTC pair is armed with the exact listed symbol instead
+        # of a reconstructed guess that fails with General("Assets not found").
+        resolved = await self._resolve_asset(self.client, canonical)
+        if resolved is None:
+            return {
+                **base,
+                "status": "subscribe_error",
+                "error": f"broker does not list an asset for {canonical}",
+            }
+        asset_type = self._asset_type(canonical, resolved)
+        base["asset_type"] = asset_type
 
         # Dynamically register the feed + spawn a dedicated reader for it.
-        self.engine.ensure_feed(canonical, asset_type_for_symbol(canonical))
-        asset = self._assets.setdefault(canonical, asset_for_symbol(canonical))
+        self.engine.ensure_feed(canonical, asset_type)
+        asset = self._assets.get(canonical)
+        if not asset or asset != resolved:
+            asset = resolved
+            self._assets[canonical] = asset
         base["asset"] = asset
         self._dynamic_symbols.add(canonical)
         self._spawn_reader(canonical, asset)
@@ -1170,6 +1486,18 @@ class PocketOptionBridge:
         return base
 
     async def _ensure_connected(self) -> None:
+        """Serialised connect/asset-initialisation gate.
+
+        Every reader calls this concurrently at startup. Without the lock each
+        call built its own ``PocketOptionAsync``, tore down the others'
+        half-initialised clients, and then raced into ``subscribe_symbol`` with
+        an empty asset map — the exact ``Assets not initialized yet`` ->
+        ``Assets not found`` cascade seen in production.
+        """
+        async with self._connect_lock:
+            await self._ensure_connected_locked()
+
+    async def _ensure_connected_locked(self) -> None:
         """Connect (or reconnect) the PO client with transient-error awareness.
 
         On a clean break or network drop the old half-open socket is
@@ -1200,20 +1528,24 @@ class PocketOptionBridge:
             # The whole point of `ready` is that assets are initialised — the
             # Node backend gates its staged subscribes on it. A concurrent
             # reader that finds the socket connected but assets not yet loaded
-            # must WAIT for `_mark_ready` below instead of racing forward into
-            # an "Uninitialized, Assets not initialized yet" active_assets().
+            # must NEVER race forward into subscribe_symbol with an empty map.
             if self._assets_ready:
                 return
-            timeout = time.monotonic() + connect_deadline
-            while not self._assets_ready:
-                if time.monotonic() > timeout:
-                    logger.warning(
-                        "bridge assets not ready after %.0fs — proceeding with "
-                        "subscribe-error asset resolution fallback",
-                        connect_deadline,
-                    )
-                    break
-                await asyncio.sleep(0.25)
+            await self._load_available_assets(self.client)
+            if self._available_assets:
+                await self._set_status("connected")
+                await self._mark_ready()
+                self._rearm_dynamic_readers()
+                return
+            # No sleep/wait here: this branch holds ``_connect_lock``, so no
+            # other task can flip ``_assets_ready`` while we wait. Return
+            # immediately and let the reader's bounded backoff retry the load;
+            # serialising 20 readers behind a 5s wait each caused a long stall.
+            logger.warning(
+                "ASSETS_NOT_READY detail=%s — deferring subscribes and "
+                "retrying on the reader backoff",
+                self._assets_error or "empty asset list",
+            )
             return
         if not self.has_credential:
             await self._set_status(
@@ -1323,6 +1655,20 @@ class PocketOptionBridge:
         # the "Uninitialized, Assets not initialized yet" transient — every
         # reader consumes the warm cache instead of re-querying mid-flight.
         await self._load_available_assets(client)
+        if not self._available_assets:
+            # NEVER advertise `ready` (or subscribe) before the registry is
+            # populated: doing so made the backend release staged subscribes
+            # into General("Assets not found") for every symbol.
+            logger.warning(
+                "AUTH_OK_ASSETS_PENDING — broker asset registry not initialised "
+                "(%s); readers will retry instead of subscribing",
+                self._assets_error or "empty asset list",
+            )
+            await self._set_status(
+                "connecting",
+                "broker asset registry not initialised — retrying",
+            )
+            return
         await self._set_status("connected")
         await self._mark_ready()
         # Re-arm streams for symbols a browser client previously pushed while
@@ -1452,7 +1798,7 @@ class PocketOptionBridge:
             if symbol in self._reader_symbols:
                 continue
             asset = self._assets.setdefault(symbol, asset_for_symbol(symbol))
-            self.engine.ensure_feed(symbol, asset_type_for_symbol(symbol))
+            self.engine.ensure_feed(symbol, self._asset_type(symbol, asset))
             logger.info(
                 "subscription re-arm [%s] -> asset %s (dynamic reader restored)",
                 symbol, asset,
@@ -1501,6 +1847,11 @@ class PocketOptionBridge:
         self._assets_ready = False
         self._available_assets = None
         self._available_asset_records = []
+        self._asset_index = {}
+        self._asset_index_inactive = {}
+        self._assets_error = None
+        self._assets_loaded_at = 0.0
+        self._assets_last_attempt_at = 0.0
         self._first_tick.clear()
 
     async def _teardown_client(self) -> None:
@@ -1520,6 +1871,11 @@ class PocketOptionBridge:
         self._assets_ready = False
         self._available_assets = None
         self._available_asset_records = []
+        self._asset_index = {}
+        self._asset_index_inactive = {}
+        self._assets_error = None
+        self._assets_loaded_at = 0.0
+        self._assets_last_attempt_at = 0.0
         if self.client is not None:
             try:
                 await self.client.disconnect()
@@ -1712,6 +2068,27 @@ class PocketOptionBridge:
                         f"symbol: {', '.join(sorted(self._skipped)) or 'n/a'}",
                     )
                 return
+            except AssetsNotReadyError as exc:
+                # TRANSIENT: the socket/registry is still warming up. Keep the
+                # client (do NOT release it — a concurrent connect may be in
+                # flight) and retry on the bounded ladder. This is what prevents
+                # General("Assets not found") from becoming a global outage.
+                logger.warning(
+                    "reader(%s) deferred: %s — retrying after registry warm-up",
+                    symbol, exc,
+                )
+                await self._set_status(
+                    "connecting", "broker asset registry not initialised — retrying"
+                )
+                await asyncio.sleep(
+                    RECONNECT_BACKOFF_SECONDS[
+                        min(delay_index, len(RECONNECT_BACKOFF_SECONDS) - 1)
+                    ]
+                )
+                delay_index = min(
+                    delay_index + 1, len(RECONNECT_BACKOFF_SECONDS) - 1
+                )
+                continue
             except ModuleUnavailableError as exc:
                 # Permanent dependency failure — PAUSE, never hot-loop. Emit ONE
                 # consolidated status the relay/backend surfaces to the UI, then
@@ -1835,6 +2212,12 @@ class PocketOptionBridge:
         self._reader_symbols.clear()
         self._assets_ready = False
         self._available_assets = None
+        self._available_asset_records = []
+        self._asset_index = {}
+        self._asset_index_inactive = {}
+        self._assets_error = None
+        self._assets_loaded_at = 0.0
+        self._assets_last_attempt_at = 0.0
         if self.client is not None:
             try:
                 await self.client.disconnect()
