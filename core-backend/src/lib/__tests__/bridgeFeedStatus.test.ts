@@ -92,4 +92,60 @@ describe("deriveBridgeFeedStatus", () => {
       }),
     ).toBe("degraded");
   });
+
+  it("reports stalled when authenticated but no fresh PO tick past the grace", () => {
+    expect(
+      deriveBridgeFeedStatus({
+        ...base,
+        lastRelayStatus: "connected",
+        lastStatus: "ONLINE",
+        poFreshAgeMs: null,
+        connectedAtMs: base.nowMs - 60_000,
+        poGraceMs: 20_000,
+        poStaleAfterMs: 15_000,
+      }),
+    ).toBe("stalled");
+  });
+
+  it("keeps the startup grace while the first PO tick is still pending", () => {
+    expect(
+      deriveBridgeFeedStatus({
+        ...base,
+        lastRelayStatus: "connected",
+        lastStatus: "ONLINE",
+        poFreshAgeMs: null,
+        connectedAtMs: base.nowMs - 5_000,
+        poGraceMs: 20_000,
+        poStaleAfterMs: 15_000,
+      }),
+    ).toBe("live");
+  });
+
+  it("reports live on a fresh PO tick even if a proxy also owns other symbols", () => {
+    expect(
+      deriveBridgeFeedStatus({
+        ...base,
+        lastRelayStatus: "connected",
+        lastStatus: "ONLINE",
+        poFreshAgeMs: 2_000,
+        connectedAtMs: base.nowMs - 120_000,
+        poGraceMs: 20_000,
+        poStaleAfterMs: 15_000,
+      }),
+    ).toBe("live");
+  });
+
+  it("reports stalled when the newest PO tick is older than the stale window", () => {
+    expect(
+      deriveBridgeFeedStatus({
+        ...base,
+        lastRelayStatus: "connected",
+        lastStatus: "ONLINE",
+        poFreshAgeMs: 45_000,
+        connectedAtMs: base.nowMs - 120_000,
+        poGraceMs: 20_000,
+        poStaleAfterMs: 15_000,
+      }),
+    ).toBe("stalled");
+  });
 });

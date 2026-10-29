@@ -373,6 +373,22 @@ class RealtimeTickBufferService {
   }
 
   /**
+   * Age of the freshest PO-sourced non-stale print across ALL symbols, or null
+   * when no PO tick has been observed this session. Feed health uses this so an
+   * authenticated-but-unauthorised bridge (socket up, zero ticks) cannot be
+   * reported as `live` while every quote is served by a REST proxy.
+   */
+  public getGlobalPoFreshAgeMs(): number | null {
+    let best: number | null = null;
+    for (const symbol of this.ticks.keys()) {
+      const age = this.getLatestFreshAgeMs(symbol, { poOnly: true });
+      if (age == null) continue;
+      if (best == null || age < best) best = age;
+    }
+    return best;
+  }
+
+  /**
    * The freshest REAL observed tick as { price, tsMs, stale? }, or undefined when
    * no genuine tick exists yet. `tsMs` is the tick's own (server-side or PO)
    * timestamp so freshness checks never measure against anything but the real

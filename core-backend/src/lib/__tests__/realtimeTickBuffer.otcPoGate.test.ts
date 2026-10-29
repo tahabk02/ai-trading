@@ -71,6 +71,15 @@ describe("[473] OTC live-freshness gate is PO-sourced only", () => {
     expect(q.poStaleLive).toBe(false);
   });
 
+  it("getGlobalPoFreshAgeMs ignores proxy-only tapes", () => {
+    realtimeTickBuffer.append(SYM, 1.0851, { source: "frankfurter" });
+    expect(realtimeTickBuffer.getGlobalPoFreshAgeMs()).toBeNull();
+    realtimeTickBuffer.append(SYM, 1.0852, { source: "pocket_option_ssot" });
+    const age = realtimeTickBuffer.getGlobalPoFreshAgeMs();
+    expect(age).not.toBeNull();
+    expect(age!).toBeLessThan(5_000);
+  });
+
   it("getTapeDebug dumps the last-N entries newest-last with source/price/ts", () => {
     for (let i = 0; i < 5; i++) {
       realtimeTickBuffer.append(SYM, 1.2 + i * 1e-4, {

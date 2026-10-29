@@ -282,6 +282,10 @@ export function buildFeedHealthSnapshot(): {
   last_tick_ts: string | null;
   ticks_received: number;
   candles_emitted: number;
+  /** Age of the newest PO-sourced tick (null = none this session). */
+  po_tick_age_ms: number | null;
+  /** True when no fresh PO tick is reaching the tape (proxy owns the feed). */
+  po_offline: boolean;
   detail: string;
   timestamp: string;
 } {
@@ -295,12 +299,15 @@ export function buildFeedHealthSnapshot(): {
   const tracked = realtimeTickBuffer.getTrackedSymbols();
   let ticks = 0;
   for (const symbol of tracked) ticks += realtimeTickBuffer.getTickCount(symbol);
+  const poTickAgeMs = realtimeTickBuffer.getGlobalPoFreshAgeMs();
 
   return {
     status,
     last_tick_ts: realtimeTickBuffer.getGlobalLastTickAt() ?? null,
     ticks_received: ticks,
     candles_emitted: forexDataService.getCandleEmissionCount(),
+    po_tick_age_ms: poTickAgeMs,
+    po_offline: poTickAgeMs == null || poTickAgeMs > 15_000,
     detail: feed,
     timestamp: new Date().toISOString(),
   };

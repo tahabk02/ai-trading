@@ -79,6 +79,10 @@ type FeedStatus = BridgeFeedStatus;
 
 const HEARTBEAT_STALE_MS = 70_000;
 const FEED_STATUS_WATCHDOG_MS = 5_000;
+/** A PO-sourced tick older than this is not live. Mirrors the quote gate. */
+const PO_TICK_STALE_MS = 15_000;
+/** Startup grace after auth before missing PO ticks are reported `stalled`. */
+const PO_TICK_GRACE_MS = 20_000;
 
 interface BridgeTickFrame {
   symbol: string;
@@ -143,6 +147,9 @@ export class PocketOptionBridgeService {
   private lastRelayStatus = "idle";
   /** Epoch ms of the last relay `heartbeat` frame (0 = never). */
   private lastHeartbeatAt = 0;
+  /** Epoch ms the relay last reported an authenticated PO connection (0 = never).
+   *  Anchors the PO-tick startup grace so a slow first tick is not `stalled`. */
+  private lastReadyAt = 0;
   /** Last feed_status actually broadcast — the watchdog only emits on change. */
   private lastBroadcastFeedStatus: FeedStatus | null = null;
   private feedStatusTimer: NodeJS.Timeout | null = null;
@@ -971,6 +978,7 @@ export class PocketOptionBridgeService {
       symbolRegistry.replaceFromBridgeAssets(payload.assets);
     }
     this.lastRelayStatus = "connected";
+    this.lastReadyAt = Date.now();
     if (this.lastStatus !== "ONLINE") {
       this.lastStatus = "ONLINE";
       this.broadcastFeedStatusIfChanged();
@@ -990,6 +998,7 @@ export class PocketOptionBridgeService {
 
   private handleStatus(payload: { status?: string; error?: string }): void {
     const status = payload?.status || "idle";
+    const wasConnected = this.lastRelayStatus === "connected";
     this.lastRelayStatus = status;
     logger.info("[PO Bridge] Status from relay", {
       status,
@@ -1011,6 +1020,7 @@ export class PocketOptionBridgeService {
       return;
     }
     if (status === "connected") {
+      if (!wasConnected) this.lastReadyAt = Date.now();
       this.lastStatus = "ONLINE";
       this.broadcastFeedStatusIfChanged();
       return;
@@ -1081,6 +1091,10 @@ export class PocketOptionBridgeService {
       heartbeatStaleMs: HEARTBEAT_STALE_MS,
       lastRelayStatus: this.lastRelayStatus,
       lastStatus: this.lastStatus,
+      poFreshAgeMs: realtimeTickBuffer.getGlobalPoFreshAgeMs(),
+      poStaleAfterMs: PO_TICK_STALE_MS,
+      connectedAtMs: this.lastReadyAt,
+      poGraceMs: PO_TICK_GRACE_MS,
     });
   }
 
