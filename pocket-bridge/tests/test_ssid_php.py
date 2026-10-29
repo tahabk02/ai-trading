@@ -180,6 +180,7 @@ def test_embedded_session_is_extracted_and_repaired():
 def test_raw_php_session_is_wrapped_with_real_account_metadata(monkeypatch):
     monkeypatch.setenv("POCKET_OPTION_UID", "12345678")
     monkeypatch.setenv("POCKET_OPTION_IS_DEMO", "0")
+    monkeypatch.setenv("POCKET_OPTION_PLATFORM", "2")
 
     auth = parse_ssid(MISMATCHED)
 

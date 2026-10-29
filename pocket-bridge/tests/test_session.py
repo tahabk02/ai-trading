@@ -271,10 +271,11 @@ def test_ssid_from_cookies(tmp_path):
 # ── FINAL MISSION 1.7 named tests ─────────────────────────────────
 
 
-def test_ssid_parses_raw_and_full():
+def test_ssid_parses_raw_and_full(monkeypatch):
     """test_ssid_parses_raw_and_full — parse_ssid() accepts BOTH forms:
     the raw session string (with or without quotes) and the full
     `42["auth",{...}]` WebSocket message, returning the canonical payload."""
+    monkeypatch.setenv("POCKET_OPTION_PLATFORM", "2")
     raw = parse_ssid(SSID_VALUE)
     assert raw["session"] == SSID_VALUE
     assert raw["platform"] == 2

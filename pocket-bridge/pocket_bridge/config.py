@@ -1081,7 +1081,11 @@ def normalize_auth_fields(auth: dict) -> dict:
         uid = _env_int("POCKET_OPTION_UID", 0)
     payload["uid"] = _coerce_int(uid, 0, "uid")
 
-    payload["platform"] = _coerce_int(payload.get("platform"), 2, "platform")
+    payload["platform"] = _coerce_int(
+        payload.get("platform"),
+        _env_int("POCKET_OPTION_PLATFORM", 2),
+        "platform",
+    )
     payload.setdefault("isFastHistory", True)
     return payload
 
@@ -1114,7 +1118,7 @@ def parse_ssid(value: str) -> dict:
                 SESSION_TOKEN_FIELD: raw,
                 "isDemo": _env_int("POCKET_OPTION_IS_DEMO", 0),
                 "uid": _env_int("POCKET_OPTION_UID", 0),
-                "platform": 2,
+                "platform": _env_int("POCKET_OPTION_PLATFORM", 2),
                 "isFastHistory": True,
             }
         )
@@ -1178,7 +1182,7 @@ def parse_ssid(value: str) -> dict:
             "session": raw,
             "isDemo": _env_int("POCKET_OPTION_IS_DEMO", 0),
             "uid": _env_int("POCKET_OPTION_UID", 0),
-            "platform": 2,
+            "platform": _env_int("POCKET_OPTION_PLATFORM", 2),
             "isFastHistory": True,
         }
     )
@@ -1818,7 +1822,7 @@ class StoredSession:
         base: Dict[str, Any] = {"session": self.raw_ssid}
         base.setdefault("isDemo", int(os.getenv("POCKET_OPTION_IS_DEMO", "0")))
         base.setdefault("uid", int(os.getenv("POCKET_OPTION_UID", "0")))
-        base.setdefault("platform", 2)
+        base.setdefault("platform", _env_int("POCKET_OPTION_PLATFORM", 2))
         base.setdefault("isFastHistory", True)
         return base
 

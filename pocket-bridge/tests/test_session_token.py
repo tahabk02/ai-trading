@@ -85,7 +85,9 @@ def test_auth_message_wraps_the_token_as_a_php_session_id():
     assert payload["isDemo"] == 0
 
 
-def test_clean_32_hex_raw_token_is_inferred_for_real_accounts():
+def test_clean_32_hex_raw_token_is_inferred_for_real_accounts(monkeypatch):
+    monkeypatch.delenv("POCKET_OPTION_IS_DEMO", raising=False)
+    monkeypatch.delenv("PO_IS_DEMO", raising=False)
     parsed = parse_ssid(TOKEN)
 
     assert parsed["sessionToken"] == TOKEN
@@ -128,6 +130,7 @@ def test_po_ssid_alias_is_used_when_canonical_is_absent(monkeypatch):
     monkeypatch.delenv("POCKET_OPTION_SSID", raising=False)
     monkeypatch.delenv("POCKET_OPTION_SSID_FILE", raising=False)
     monkeypatch.delenv("POCKET_OPTION_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("POCKET_OPTION_IS_DEMO", raising=False)
     monkeypatch.setenv("PO_SSID", OPAQUE_TOKEN)
     monkeypatch.setenv("PO_IS_DEMO", "0")
     monkeypatch.setenv("PO_USER_ID", "138336943")

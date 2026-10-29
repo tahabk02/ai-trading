@@ -14,6 +14,7 @@ These cover the reliability-only hardening for a cloud VPS deployment:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -26,8 +27,10 @@ from pocket_bridge.bridge import (
 )
 from pocket_bridge.config import (
     BridgeSettings,
+    auth_message,
     mask_proxy_url,
     normalize_proxy_url,
+    parse_ssid,
 )
 from pocket_bridge.m20_engine import M20Engine
 
@@ -105,6 +108,39 @@ def test_invalid_uid_fails_fast(monkeypatch):
     # A raw token takes uid from the environment (an explicit frame would pin it).
     with pytest.raises(ValueError, match="POCKET_OPTION_UID"):
         BridgeSettings(ssid="abc123def456session", symbols=[])
+
+
+DEMO_FRAME = (
+    '42["auth",{"session":"demo_token_for_tests_0001","isDemo":1,'
+    '"uid":138336943,"platform":9,"isFastHistory":true,"isOptimized":true}]'
+)
+
+
+def test_demo_auth_frame_round_trips_without_stripping_keys():
+    auth = parse_ssid(DEMO_FRAME)
+    assert auth["session"] == "demo_token_for_tests_0001"
+    assert auth["isDemo"] == 1
+    assert auth["uid"] == 138336943
+    assert auth["platform"] == 9
+    assert auth["isFastHistory"] is True
+    assert auth["isOptimized"] is True
+
+    settings = BridgeSettings(ssid=DEMO_FRAME, symbols=[])
+    assert settings.uid == 138336943
+    assert settings.is_demo == 1
+    assert settings.platform == 9
+    assert settings.is_fast_history is True
+
+    wire = json.loads(auth_message(auth)[2:])
+    assert wire[0] == "auth"
+    assert wire[1] == {
+        "session": "demo_token_for_tests_0001",
+        "isDemo": 1,
+        "uid": 138336943,
+        "platform": 9,
+        "isFastHistory": True,
+        "isOptimized": True,
+    }
 
 
 def test_proxy_is_forwarded_to_the_sdk_transport(monkeypatch, tmp_path):
