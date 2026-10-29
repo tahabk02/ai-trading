@@ -65,9 +65,10 @@ async def amain(settings: BridgeSettings) -> None:
         settings.server_public_ip or "unset",
     )
     if not settings.proxy_url:
-        logger.warning(
-            "NO_PROXY_CONFIGURED — market-data sockets will originate from the "
-            "host IP and may be filtered by Pocket Option"
+        logger.info(
+            "egress_mode=direct — PROXY_URL unset; sockets bind the host "
+            "interface (server_public_ip=%s)",
+            settings.server_public_ip or "unset",
         )
     engine = M20Engine(
         settings.symbols,

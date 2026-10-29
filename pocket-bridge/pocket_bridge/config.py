@@ -103,11 +103,11 @@ def resolve_user_agent(value: str | None) -> str:
 def normalize_proxy_url(value: str | None) -> str:
     """Validate and canonicalize ``PROXY_URL`` (socks5/socks5h/http/https).
 
-    Fails FAST at settings construction: a malformed proxy must stop the
-    process with a clear CONFIG_INVALID message instead of silently connecting
-    directly from the VPS (which is exactly the failure this setting exists to
-    avoid). Credentials are accepted as ``scheme://user:pass@host:port`` and
-    must be supplied as a pair. An empty value disables the proxy.
+    An empty value is valid and means DIRECT egress from the host's own
+    interface (no proxy). A non-empty but malformed value fails fast at
+    settings construction with a clear CONFIG_INVALID message, so an operator
+    typo never silently degrades into a different network path. Credentials are
+    accepted as ``scheme://user:pass@host:port`` and must be a pair.
     """
     raw = (value or "").strip()
     if not raw:
@@ -2261,7 +2261,7 @@ class BridgeSettings:
 
     @property
     def has_proxy(self) -> bool:
-        """True when the WebSocket transport must egress through a proxy."""
+        """True when a proxy is configured; False means direct egress."""
         return bool(self.proxy_url)
 
     @property

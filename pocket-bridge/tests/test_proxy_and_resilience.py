@@ -130,6 +130,31 @@ def test_proxy_is_forwarded_to_the_sdk_transport(monkeypatch, tmp_path):
     assert "tls_alpn" not in config
 
 
+def test_empty_proxy_allows_direct_egress(monkeypatch, tmp_path):
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    class _FakeClient:
+        instances: list = []
+
+        def __init__(self, payload, config=None, **kwargs):
+            self.config = config
+            type(self).instances.append(self)
+
+    monkeypatch.setattr(po, "PocketOptionAsync", _FakeClient)
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    monkeypatch.delenv("POCKET_OPTION_PROXY", raising=False)
+    bridge = _bridge(session_path=str(tmp_path / "missing.json"))
+
+    assert bridge.settings.proxy_url == ""
+    assert bridge.settings.has_proxy is False
+
+    asyncio.run(bridge._import_client())
+
+    config = _FakeClient.instances[-1].config
+    assert "proxy" not in config
+    assert bridge.health_payload()["proxy_enabled"] is False
+
+
 # ── Backoff / close codes ────────────────────────────────────────────────────
 
 
