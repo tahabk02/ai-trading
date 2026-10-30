@@ -84,7 +84,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-password}@postgres:5432/trading_radar?schema=public
       REDIS_HOST: redis
-      REDIS_URL: redis://radar_bus:6379
+      # Service name (not the container name) so Docker DNS keeps resolving
+      # even if the container_name changes.
+      REDIS_URL: redis://redis:6379
       PORT: 4000
       # Container-to-container path on the radar_network. A host-loopback
       # default (127.0.0.1:8000) silently 503s every /predict inside Docker —
@@ -95,10 +97,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-ultra-secure-secret-key}
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: 8788
-      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
-      POCKET_OPTION_SSID_FILE: ${POCKET_OPTION_SSID_FILE:-}
-      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
-      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # The Python bridge runs as its own container. Auto-spawn would look for
+      # `python` + `pocket_bridge` inside THIS Node image and fail.
+      POCKET_BRIDGE_AUTO_SPAWN: "false"
       TZ: UTC
     ports:
       - "4000:4000"
@@ -164,13 +165,10 @@ services:
     environment:
       POCKET_BRIDGE_HOST: 0.0.0.0
       POCKET_BRIDGE_PORT: 8788
-      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
-      # Preferred: path to the full `42["auth",{...}]` frame mounted below.
-      # A file value wins over the env value, so Compose/shell quote parsing
-      # can never corrupt a PHP-serialized session.
-      POCKET_OPTION_SSID_FILE: ${POCKET_OPTION_SSID_FILE:-}
-      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
-      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # AUTH IS OWNED BY ./pocket-bridge/.env. Do NOT add POCKET_OPTION_SSID /
+      # UID / IS_DEMO / PLATFORM here: `environment` overrides `env_file`, so a
+      # stale root .env session silently replaced the demo session and the
+      # bridge booted with isDemo=0/platform=2 (session_expired).
       POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
       # Never inherit the SDK's 60s handshake default again; 120s lets the
       # regional endpoint rotation reach a healthy host.

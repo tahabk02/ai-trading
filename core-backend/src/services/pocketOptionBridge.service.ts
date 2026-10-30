@@ -306,30 +306,36 @@ export class PocketOptionBridgeService {
 
   /** Start the bridge process (if auto-spawn enabled) and connect the WS client. */
   public start(): void {
-    // ── STARTUP SSID VALIDITY CHECK (mission [1]) ──
-    // Surface the SSID state explicitly at boot: an empty/whitespace SSID is a
-    // VALID "awaiting_ssid" configuration (the bridge will never fabricate),
-    // but operators must see it clearly instead of hunting for why live PO
-    // ticks never arrive. An SSID is never forged or validated beyond
-    // presence — the bridge/server probes the live session itself.
-    const ssid = secrets.POCKET_OPTION_SSID || "";
-    const ssidFile = (secrets.POCKET_OPTION_SSID_FILE || "").trim();
-    const ssidPresent = typeof ssid === "string" && ssid.trim().length > 0;
-    if (!ssidPresent && !ssidFile) {
-      logger.warn(
-        "[PO Bridge] POCKET_OPTION_SSID is not set — running in awaiting_ssid state (real PO live ticks disabled; no fabricated prices). Set POCKET_OPTION_SSID or POCKET_OPTION_SSID_FILE to enable the PO SSOT tier.",
-      );
-    } else {
-      logger.info(
-        "[PO Bridge] Pocket Option credentials are configured — PO SSOT tier enabled",
-        ssidFile
-          ? { source: "file", file: ssidFile }
-          : { source: "env", ssidLength: ssid.length },
-      );
-    }
-
     if (this.bridgeAutoSpawn) {
+      // ── STARTUP SSID VALIDITY CHECK (mission [1]) ──
+      // Surface the SSID state explicitly at boot: an empty/whitespace SSID is
+      // a VALID "awaiting_ssid" configuration (the bridge will never
+      // fabricate), but operators must see it clearly instead of hunting for
+      // why live PO ticks never arrive. An SSID is never forged or validated
+      // beyond presence — the bridge/server probes the live session itself.
+      const ssid = secrets.POCKET_OPTION_SSID || "";
+      const ssidFile = (secrets.POCKET_OPTION_SSID_FILE || "").trim();
+      const ssidPresent = typeof ssid === "string" && ssid.trim().length > 0;
+      if (!ssidPresent && !ssidFile) {
+        logger.warn(
+          "[PO Bridge] POCKET_OPTION_SSID is not set — running in awaiting_ssid state (real PO live ticks disabled; no fabricated prices). Set POCKET_OPTION_SSID or POCKET_OPTION_SSID_FILE to enable the PO SSOT tier.",
+        );
+      } else {
+        logger.info(
+          "[PO Bridge] Pocket Option credentials are configured — PO SSOT tier enabled",
+          ssidFile
+            ? { source: "file", file: ssidFile }
+            : { source: "env", ssidLength: ssid.length },
+        );
+      }
       this.spawnBridgeProcess();
+    } else {
+      // External container mode: the Python bridge owns its own SSID. The
+      // backend must not inspect (or log) a copy of the session.
+      logger.info(
+        "[PO Bridge] Using external pocket-bridge container — auto-spawn disabled",
+        { host: secrets.POCKET_BRIDGE_HOST, port: secrets.POCKET_BRIDGE_PORT },
+      );
     }
     if (this.ws) return;
     this.startFeedStatusWatchdog();

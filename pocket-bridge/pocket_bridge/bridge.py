@@ -50,12 +50,25 @@ from .config import (
     read_env_ssid,
     sanitize_php_session,
     SESSION_TOKEN_FIELD,
+    MAX_LIVE_STREAMS,
     session_reload_needed,
 )
 from .m20_engine import M20Engine, M20Candle
 
 logger = logging.getLogger("pocket_bridge.bridge")
 DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket"
+
+#: BinaryOptionsToolsV2 0.2.14 can only stream ONE asset per client: a second
+#: concurrent ``subscribe_symbol`` starves every stream on that client (both
+#: go silent). The bridge therefore gives every symbol its own client and caps
+#: how many handshakes may overlap, so opening 17 symbols does not look like a
+#: connection burst to Pocket Option (which then times out the handshakes).
+READER_CONNECT_CONCURRENCY = 3
+#: Minimum spacing between new reader-client handshakes (seconds).
+READER_CONNECT_STAGGER_SECONDS = 0.75
+
+
+
 
 #: Fresh PocketOptionAsync attempts before a repeat auth failure is treated as
 #: a TERMINAL expired/invalid SSID (instead of a transient transport drop).
@@ -353,6 +366,21 @@ class AssetSkippedError(Exception):
         self.candidates = candidates
 
 
+class ReaderCapReached(Exception):
+    """Raised when opening another per-symbol client would exceed the venue's
+    proven concurrent-stream budget. Not retried: the reader stops cleanly and
+    the symbol stays on the REST fallback tier instead of tripping a ban.
+    """
+
+    def __init__(self, symbol: str, limit: int) -> None:
+        super().__init__(
+            f"live stream capacity {limit} reached; {symbol} stays on the "
+            f"REST fallback tier"
+        )
+        self.symbol = symbol
+        self.limit = limit
+
+
 class AssetsNotReadyError(Exception):
     """Raised when the broker asset registry is not initialised yet.
 
@@ -507,6 +535,17 @@ class PocketOptionBridge:
         #: raced a fresh PocketOptionAsync construction, which is what produced
         #: the "Assets not initialized yet" / "Assets not found" cascade.
         self._connect_lock = asyncio.Lock()
+        #: Per-symbol streaming clients. ``self.client`` stays the PRIMARY
+        #: (control) client: it owns the asset registry and streams the first
+        #: configured symbol. Every other symbol gets its own client because
+        #: SDK 0.2.14 cannot multiplex subscriptions on one connection.
+        self._reader_clients: Dict[str, object] = {}
+        self._reader_client_locks: Dict[str, asyncio.Lock] = {}
+        self._reader_connect_sem = asyncio.Semaphore(READER_CONNECT_CONCURRENCY)
+        self._reader_connect_lock = asyncio.Lock()
+        self._last_reader_connect_at: float = 0.0
+        #: First configured symbol; its stream reuses ``self.client``.
+        self._primary_symbol: Optional[str] = None
         #: True once the PO client is authenticated AND the authoritative asset
         #: list has been loaded. The relay broadcasts a ``ready`` frame based on
         #: this so the Node backend can safely release its staged subscribes.
@@ -803,24 +842,23 @@ class PocketOptionBridge:
             return client
         return None
 
-    async def _import_client(self):
-        if self.client is not None:
-            return self.client
-        self._check_dependency()
-        from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
-        # The SDK's own compiled regional endpoint list is used whenever
-        # POCKET_OPTION_WS_URLS is unset — it authenticates AND streams live
-        # ticks, whereas pinning url= to DEFAULT_PO_WS_URL broke subscriptions
-        # entirely (Core(ChannelReceiver(Closed)); auth reported OK but the tick
-        # stream died instantly). The constant above stays the raw-socket
-        # probe / health target, never a stream override here.
-        #
-        # The config dict is ALWAYS passed so the native handshake budget is
-        # ours, not the SDK default of 60s: the Rust core aborts the whole
-        # connection with "General error: Connection initialization timed out"
-        # when the endpoint rotation has not authenticated inside
-        # connection_initialization_timeout_secs, and 60s is not enough to walk
-        # a blocked regional host through to a healthy one.
+    def _sdk_config(self) -> tuple[Dict[str, object], list[str]]:
+        """Build the SDK config shared by the control and per-symbol clients.
+
+        The SDK's own compiled regional endpoint list is used whenever
+        POCKET_OPTION_WS_URLS is unset — it authenticates AND streams live
+        ticks, whereas pinning url= to DEFAULT_PO_WS_URL broke subscriptions
+        entirely (Core(ChannelReceiver(Closed)); auth reported OK but the tick
+        stream died instantly). The constant above stays the raw-socket
+        probe / health target, never a stream override here.
+
+        The config dict is ALWAYS passed so the native handshake budget is
+        ours, not the SDK default of 60s: the Rust core aborts the whole
+        connection with "General error: Connection initialization timed out"
+        when the endpoint rotation has not authenticated inside
+        connection_initialization_timeout_secs, and 60s is not enough to walk
+        a blocked regional host through to a healthy one.
+        """
         sdk_config: Dict[str, object] = {
             "connection_initialization_timeout_secs": int(self.settings.po_init_timeout),
             "timeout_secs": int(self.settings.po_request_timeout),
@@ -840,6 +878,14 @@ class PocketOptionBridge:
                 cut = self._endpoint_rotation % len(urls)
                 urls = urls[cut:] + urls[:cut]
             sdk_config["urls"] = urls
+        return sdk_config, urls
+
+    async def _import_client(self):
+        if self.client is not None:
+            return self.client
+        self._check_dependency()
+        from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
+        sdk_config, urls = self._sdk_config()
         kwargs: Dict[str, object] = {"config": sdk_config}
         auth_dict = self._auth_dict()
         payload = self._auth_payload()
@@ -892,7 +938,11 @@ class PocketOptionBridge:
 
         self._ssid_parse_terminal = False
         try:
-            self.client = PocketOptionAsync(payload, **kwargs)
+            # The native constructor performs the handshake synchronously and
+            # can block for the full 60-120 s budget. Running it on the event
+            # loop thread froze health/relay/heartbeat and serialised every
+            # per-symbol reader; offload it to the pre-warmed pool instead.
+            self.client = self._build_client(payload, kwargs)
             self._ssid_parse_terminal = False
         except Exception as exc:
             recovered = self._retry_with_forced_php_header(
@@ -947,6 +997,118 @@ class PocketOptionBridge:
                 )
             raise
         return self.client
+
+    @staticmethod
+    def _client_connected(client) -> bool:
+        try:
+            return client is not None and bool(client.is_connected())
+        except Exception:  # noqa: BLE001 - a dead SDK channel is not usable
+            return False
+
+    def _is_primary_symbol(self, symbol: str) -> bool:
+        return self._primary_symbol is not None and symbol == self._primary_symbol
+
+    def _live_stream_slots_available(self, symbol: str) -> bool:
+        """True when this symbol may stream without exceeding the proven cap."""
+        if (
+            self._is_primary_symbol(symbol)
+            or symbol in self._reader_clients
+            or symbol in self._reader_tasks
+        ):
+            return True
+        max_secondaries = max(0, MAX_LIVE_STREAMS - 1)
+        return len(self._reader_clients) < max_secondaries
+
+    @staticmethod
+    def _build_client(payload: str, kwargs: Dict):
+        """Construct the native client.
+
+        MUST run on the event-loop thread: the PyO3 constructor deadlocks when
+        called from a worker thread (the handshake never completes and hits the
+        60-120 s timeout). Its blocking window is short on a healthy endpoint,
+        and the reader semaphore caps how many can overlap.
+        """
+        from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
+
+        return PocketOptionAsync(payload, **kwargs)
+
+    async def _ensure_reader_client(self, symbol: str):
+        """Return THIS symbol's streaming client (one subscription per client).
+
+        SDK 0.2.14 cannot multiplex ``subscribe_symbol`` on a single
+        connection: with two active subscriptions BOTH streams go silent. The
+        primary symbol reuses the shared control client (which already owns
+        the asset registry); every other symbol gets a dedicated client.
+        """
+        if self._is_primary_symbol(symbol):
+            return self.client
+        lock = self._reader_client_locks.setdefault(symbol, asyncio.Lock())
+        async with lock:
+            existing = self._reader_clients.get(symbol)
+            if self._client_connected(existing):
+                return existing
+            if existing is not None:
+                try:
+                    await existing.disconnect()
+                except Exception:  # noqa: BLE001 - best-effort teardown
+                    pass
+                self._reader_clients.pop(symbol, None)
+            if not self._live_stream_slots_available(symbol):
+                raise ReaderCapReached(symbol, MAX_LIVE_STREAMS)
+            async with self._reader_connect_sem:
+                # Space handshakes out: a burst of 17 simultaneous auths made
+                # Pocket Option time out every one of them.
+                async with self._reader_connect_lock:
+                    elapsed = time.monotonic() - self._last_reader_connect_at
+                    wait = READER_CONNECT_STAGGER_SECONDS - elapsed
+                    if self._last_reader_connect_at and wait > 0:
+                        await asyncio.sleep(wait)
+                    self._last_reader_connect_at = time.monotonic()
+                self._check_dependency()
+                sdk_config, _urls = self._sdk_config()
+                client = self._build_client(
+                    self._auth_payload(), {"config": sdk_config}
+                )
+                deadline = (
+                    max(
+                        self.settings.connect_timeout,
+                        self.settings.po_init_timeout,
+                    )
+                    + CONNECT_DEADLINE_GRACE
+                )
+                try:
+                    await asyncio.wait_for(
+                        client.wait_for_assets(timeout=deadline),
+                        timeout=deadline,
+                    )
+                except Exception:
+                    try:
+                        await client.disconnect()
+                    except Exception:  # noqa: BLE001 - best-effort teardown
+                        pass
+                    raise
+                self._reader_clients[symbol] = client
+                logger.info(
+                    "READER_CLIENT_READY symbol=%s readers_open=%d",
+                    symbol, len(self._reader_clients),
+                )
+                return client
+
+    async def _release_reader_client(self, symbol: str) -> None:
+        """Drop ONLY this symbol's client; other pairs keep streaming."""
+        self._subs.pop(symbol, None)
+        self._subscribed_at.pop(symbol, None)
+        if self._is_primary_symbol(symbol):
+            client = self.client
+            self.client = None
+            self._assets_ready = False
+        else:
+            client = self._reader_clients.pop(symbol, None)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
 
     def _auth_dict(self) -> dict:
         """Extract the auth object before it is handed to the SDK.
@@ -1461,9 +1623,15 @@ class PocketOptionBridge:
                 "refusing to fabricate prices",
             )
             return
+        if self._primary_symbol is None:
+            self._primary_symbol = symbol
         await self._ensure_connected()
-        client = self.client
-        if client is None or not self.is_connected:
+        if not self.is_connected:
+            return
+        # One active subscription per client (SDK 0.2.14 limitation); the
+        # primary pair shares the control client, every other pair gets its own.
+        client = await self._ensure_reader_client(symbol)
+        if not self._client_connected(client):
             return
         if not self._assets_ready:
             # NEVER call subscribe_symbol() against an uninitialised registry:
@@ -1637,6 +1805,16 @@ class PocketOptionBridge:
                 "last_valid_at": snap.get("last_valid_at"),
                 "closed_candles": snap.get("closed_candles", []),
                 "forming": snap.get("forming"),
+            }
+
+        if not self._live_stream_slots_available(canonical):
+            return {
+                **base,
+                "status": "subscribe_error",
+                "error": (
+                    f"live stream capacity {MAX_LIVE_STREAMS} reached — "
+                    f"{canonical} stays on the REST fallback tier"
+                ),
             }
 
         # WAIT until the PO client is authenticated AND the asset list is loaded
@@ -1899,6 +2077,10 @@ class PocketOptionBridge:
           3. Run refresh_ssid.py once at startup (when a session file exists).
         """
         self._assets = self.settings.assets()
+        # The primary pair reuses the control client (asset registry); every
+        # other pair gets a dedicated client because of the SDK's one-stream
+        # limit. Pin it BEFORE readers start so selection is deterministic.
+        self._primary_symbol = next(iter(self._assets), None)
 
         # ── FAIL-LOUD SESSION CHECK ──
         if not self.has_credential:
@@ -1987,6 +2169,7 @@ class PocketOptionBridge:
                 await task
             except asyncio.CancelledError:
                 pass
+        await self._release_reader_client(canonical)
         logger.info("dynamic subscription removed [%s]", canonical)
 
     def _start_static_readers(self) -> None:
@@ -2037,18 +2220,22 @@ class PocketOptionBridge:
         return self.session
 
     async def _release_client(self) -> None:
-        """Tear down a stale / broken PO client WITHOUT touching reader tasks.
+        """Tear down EVERY PO client WITHOUT touching reader tasks.
 
         A dead SDK channel (e.g. ``Core(ChannelReceiver(Closed))``) leaves a
         half-open client whose ``is_connected()`` may still read True. Reusing
         it makes the next auth hang and then falsely escalate to
-        ``session_expired`` even though the SSID is fine. On ANY reader crash
-        the client is released here so the retry loop rebuilds a fresh
-        ``PocketOptionAsync`` (authenticates on construction) instead.
+        ``session_expired`` even though the SSID is fine. This is the global
+        teardown (heartbeat stall recovery); a single reader crash uses
+        ``_release_reader_client`` so the other pairs keep streaming.
         """
+        clients = list(self._reader_clients.values())
+        self._reader_clients.clear()
         if self.client is not None:
+            clients.append(self.client)
+        for client in clients:
             try:
-                await self.client.disconnect()
+                await client.disconnect()
             except Exception:  # noqa: BLE001 - best-effort teardown
                 pass
         self.client = None
@@ -2087,12 +2274,7 @@ class PocketOptionBridge:
         self._assets_error = None
         self._assets_loaded_at = 0.0
         self._assets_last_attempt_at = 0.0
-        if self.client is not None:
-            try:
-                await self.client.disconnect()
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
-            self.client = None
+        await self._release_client()
 
     async def _watch_session_file(self) -> None:
         """2.3 HOT-RELOAD: poll po_session.json mtime every 10s.
@@ -2264,6 +2446,16 @@ class PocketOptionBridge:
                 await self.run_reader(symbol, asset)
             except asyncio.CancelledError:
                 raise
+            except ReaderCapReached as exc:
+                # Venue connection budget reached: stop THIS reader cleanly so
+                # it cannot trip the demo throttling that blocks even one auth.
+                logger.warning(
+                    "reader(%s) not started: %s — using REST fallback instead "
+                    "of opening another concurrent stream",
+                    symbol, exc,
+                )
+                self._skipped[symbol] = "live_stream_cap"
+                return
             except AssetSkippedError as exc:
                 # Permanent per-symbol condition: stop this reader so the pair
                 # is not retried forever, but do NOT degrade globally for a
@@ -2371,7 +2563,7 @@ class PocketOptionBridge:
                         )
                     delay_index = 0
                 try:
-                    await self._release_client()
+                    await self._release_reader_client(symbol)
                 except Exception:  # noqa: BLE001 - teardown must not mask
                     pass
                 await self._set_status("connection_error", str(exc))
@@ -2477,12 +2669,7 @@ class PocketOptionBridge:
         self._assets_error = None
         self._assets_loaded_at = 0.0
         self._assets_last_attempt_at = 0.0
-        if self.client is not None:
-            try:
-                await self.client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
-            self.client = None
+        await self._release_client()
         await self._set_status("stopped")
 
     async def _watch_first_tick(self) -> None:
@@ -2555,6 +2742,17 @@ class PocketOptionBridge:
         if send_keepalive and connected and self.client is not None:
             try:
                 await self.client.send_raw_message(self.settings.keepalive_message)
+                for symbol, reader_client in list(self._reader_clients.items()):
+                    try:
+                        await reader_client.send_raw_message(
+                            self.settings.keepalive_message
+                        )
+                    except Exception as exc:  # noqa: BLE001 - reader retries
+                        logger.warning(
+                            "READER_KEEPALIVE_FAIL symbol=%s error=%s — "
+                            "its reader will rebuild the client",
+                            symbol, exc,
+                        )
                 keepalive_ok = True
                 self._last_keepalive_at = wall_now
             except Exception as exc:  # noqa: BLE001 - recycle below

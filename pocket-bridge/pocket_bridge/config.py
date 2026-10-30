@@ -910,6 +910,8 @@ ENV_ALIASES: Dict[str, tuple] = {
     "POCKET_OPTION_UID": ("PO_USER_ID",),
     "POCKET_OPTION_SESSION_TOKEN": ("PO_SESSION_TOKEN",),
     "POCKET_OPTION_SSID_FILE": ("PO_SSID_FILE",),
+    "POCKET_OPTION_SYMBOLS": ("PO_SYMBOLS",),
+    "POCKET_OPTION_MAX_LIVE_STREAMS": ("PO_MAX_LIVE_STREAMS",),
 }
 
 
@@ -946,6 +948,44 @@ def _env_float(name: str, default: float) -> float:
             f"{name} must be a number (accepted aliases: "
             f"{', '.join(ENV_ALIASES.get(name, ())) or 'none'}); got {raw!r}"
         ) from exc
+
+
+#: Live per-symbol streams the bridge is allowed to keep open. Each stream is
+#: a separate SDK client (0.2.14 cannot multiplex), and the Pocket Option demo
+#: server starts timing out handshakes at 8+ concurrent connections. Raise it
+#: only for an account/venue that has proven it accepts more.
+MAX_LIVE_STREAMS: int = _env_int("POCKET_OPTION_MAX_LIVE_STREAMS", 7)
+
+DEFAULT_SYMBOLS: tuple = (
+    # PO OTC majors / crosses
+    "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD",
+    "AUD/USD", "EUR/JPY", "EUR/CHF",
+    "EUR/AUD", "EUR/CAD",
+    "AUD/JPY", "AUD/CAD", "AUD/CHF", "NZD/CAD",
+    # PART 38.2 — PO-listed whitelist symbols that were never subscribed
+    "CAD/JPY", "CHF/JPY",
+    "AUD/NZD", "CAD/CHF", "EUR/RUB", "MAD/USD", "KES/USD",
+    # PART 38.2 — PO-listed standard-forex (non-OTC venue) pairs
+    "EUR/SEK", "EUR/HUF",
+)
+
+
+def _default_symbols() -> list:
+    """Static reader set; ``POCKET_OPTION_SYMBOLS`` overrides the full list.
+
+    Each symbol needs its own SDK client on 0.2.14, so deployments can cap the
+    static set (broker connection budget) and let ``request_subscription`` arm
+    the rest on demand. Empty/blank entries are dropped; order is preserved.
+    """
+    raw = _env_value("POCKET_OPTION_SYMBOLS")
+    if not raw:
+        return list(DEFAULT_SYMBOLS[:MAX_LIVE_STREAMS])
+    symbols = []
+    for item in raw.replace(";", ",").split(","):
+        symbol = canonical_symbol(item.strip())
+        if symbol and "/" in symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return (symbols or list(DEFAULT_SYMBOLS))[:MAX_LIVE_STREAMS]
 
 
 def _coerce_int(value: object, default: int, field: str) -> int:
@@ -2098,18 +2138,7 @@ class BridgeSettings:
     #: an asset the broker has never heard of can only produce
     #: ``no_ssot_cache`` noise; those pairs must be served (and LABELLED) by
     #: the REST fallback tier instead. Retired pairs are never re-added.
-    symbols: List[str] = field(default_factory=lambda: [
-        # PO OTC majors / crosses
-        "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD",
-        "AUD/USD", "EUR/JPY", "EUR/CHF",
-        "EUR/AUD", "EUR/CAD",
-        "AUD/JPY", "AUD/CAD", "AUD/CHF", "NZD/CAD",
-        # PART 38.2 — PO-listed whitelist symbols that were never subscribed
-        "CAD/JPY", "CHF/JPY",
-        "AUD/NZD", "CAD/CHF", "EUR/RUB", "MAD/USD", "KES/USD",
-        # PART 38.2 — PO-listed standard-forex (non-OTC venue) pairs
-        "EUR/SEK", "EUR/HUF",
-    ])
+    symbols: List[str] = field(default_factory=_default_symbols)
 
     #: Reconnect / subscription tuning (seconds).
     connect_timeout: float = 60.0

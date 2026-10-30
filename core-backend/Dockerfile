@@ -71,8 +71,11 @@ EXPOSE 4000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "require('http').get('http://localhost:4000/health', r => { process.exit(r.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"
 
-# Run as a non-privileged user; init wrapper handles signals properly
-CMD ["node", "dist/index.js"]
+# Apply committed Prisma migrations before serving. Without this a fresh
+# postgres volume has no tables and every risk-state/query path degrades with
+# P2021 ("table does not exist") while /health still reports OK.
+# `exec` keeps Node as PID 1 so SIGTERM reaches the server.
+CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && exec node dist/index.js"]
 
 # =============================================================================
 #  LABELS — Metadata for container registries & observability

@@ -263,10 +263,9 @@ services:
       # this container IS the backend itself, so the bridge was never reached.
       POCKET_BRIDGE_HOST: pocket-bridge
       POCKET_BRIDGE_PORT: "8788"
-      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
-      POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
-      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
-      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # The bridge runs as its own container; auto-spawn would try to launch a
+      # Python process inside this Node image and fail.
+      POCKET_BRIDGE_AUTO_SPAWN: "false"
       # ── PO SSID SELF-HEALING (opt-in, OFF by default; PART 43.6) ──
       # Inert unless ALL credential gates are set. The backend forwards these to
       # the refresh_ssid.py child ONLY — never the bridge, logs, or /health.
@@ -424,9 +423,9 @@ services:
       # outside the compose network; core-backend is its only client.
       POCKET_BRIDGE_HOST: 0.0.0.0
       POCKET_BRIDGE_PORT: "8788"
-      POCKET_OPTION_SSID: ${POCKET_OPTION_SSID:-}
-      POCKET_OPTION_UID: ${POCKET_OPTION_UID:-}
-      POCKET_OPTION_IS_DEMO: ${POCKET_OPTION_IS_DEMO:-0}
+      # AUTH IS OWNED BY ./pocket-bridge/.env (env_file below). Defining
+      # POCKET_OPTION_SSID / UID / IS_DEMO / PLATFORM here would override that
+      # file and silently boot the bridge with the wrong session.
       # ── PO SSID SELF-HEALING (opt-in, OFF by default; PART 43.6) ──
       # The bridge's own refresh_ssid.py (session tier, then last-resort
       # credential tier) reads these. Inert unless EVERY gate is set:
