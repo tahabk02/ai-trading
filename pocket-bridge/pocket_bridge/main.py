@@ -29,12 +29,14 @@ from .bridge import PocketOptionBridge
 from .config import (
     BridgeSettings,
     credential_login_status,
+    env_file_diagnostics,
     load_settings,
     load_stored_session,
     mask_proxy_url,
     mask_secret,
     mask_uid,
     resolve_user_agent,
+    ssid_diagnostics,
 )
 from .m20_engine import M20Engine
 from .relay import RelayServer
@@ -51,10 +53,33 @@ async def amain(settings: BridgeSettings) -> None:
     if effective_user_agent != settings.user_agent:
         settings = replace(settings, user_agent=effective_user_agent)
     logger.info("handshake_fingerprint user_agent=%s", effective_user_agent)
+    for env_info in env_file_diagnostics():
+        logger.info(
+            "env file loaded: path=%s mtime=%s size=%d",
+            env_info["path"],
+            env_info["mtime"],
+            env_info["size"],
+        )
+    diagnostic = ssid_diagnostics()
     logger.info(
-        "SSID loaded: format=%s length=%d uid=%s isDemo=%s isOptimized=%s",
+        "SSID startup diagnostic source=%s format=%s payload=%s "
+        "credential=%s uid=%s isDemo=%s parse_error=%s",
+        diagnostic["source"],
+        diagnostic["format"],
+        diagnostic["payload"],
+        diagnostic["credential"],
+        mask_uid(diagnostic.get("uid")),
+        diagnostic.get("is_demo"),
+        diagnostic["parse_error"] or "none",
+    )
+    logger.info(
+        "SSID loaded: source=%s origin=%s format=%s length=%d sha256=%s "
+        "uid=%s isDemo=%s isOptimized=%s",
+        settings.ssid_source,
+        settings.ssid_origin,
         settings.ssid_format,
         len(settings.ssid),
+        settings.ssid_fingerprint,
         mask_uid(settings.uid),
         settings.is_demo,
         settings.auth.get("isOptimized", False),
@@ -222,22 +247,16 @@ async def amain(settings: BridgeSettings) -> None:
             uptime_s = None
             if bridge.connected_at is not None:
                 uptime_s = round(max(0.0, time.time() - bridge.connected_at), 1)
-            body = json.dumps(
+            # Single source of truth: the bridge payload already exposes the
+            # full streaming diagnostics (per-symbol sources, client
+            # connection states, live-stream cap, credential fingerprint).
+            # Merge the process-level session fields the relay /health does not
+            # own so both endpoints agree byte-for-byte on feed truth.
+            payload = bridge.health_payload()
+            payload.update(
                 {
                     "ok": True,
-                    "status": bridge.status,
-                    "ssid_present": bridge.has_credential,
-                    "ssid_format": bridge.settings.ssid_format,
-                    "last_tick_ts": (
-                        max(bridge._last_tick_source_ts.values(), default=None)
-                    ),
-                    "ticks_received": sum(bridge._tick_count.values()),
-                    "candles_emitted": bridge._candle_count,
-                    "session_file_present": bool(stored_session.exists),
-                    "is_optimized": bool(
-                        bridge.settings.auth.get("isOptimized")
-                    ),
-                    "symbols": sorted(bridge._subs),
+                    "ssid_origin": bridge.settings.ssid_origin,
                     "session_expired": bridge.session_expired,
                     "session_file": bool(stored_session.exists),
                     # `age_days` is `inf` when capturedAt is missing or
@@ -254,15 +273,11 @@ async def amain(settings: BridgeSettings) -> None:
                     "connect_epoch": bridge.connect_epoch,
                     "tick_seq": bridge._tick_seq,
                     "subscribed_symbols": len(bridge._subs),
-                    "proxy_enabled": bool(settings.proxy_url),
-                    "proxy": mask_proxy_url(settings.proxy_url),
-                    "server_public_ip": settings.server_public_ip or None,
                     "connected_at": bridge.connected_at,
                     "uptime_s": uptime_s,
-                    # Last-resort credential-login availability (opt-in, masked).
-                    **credential_login_status(),
                 }
             )
+            body = json.dumps(payload)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -300,7 +315,20 @@ def main() -> None:
     try:
         settings = load_settings()
     except ValueError as exc:
-        logger.critical("CONFIG_INVALID — %s", exc)
+        try:
+            diagnostic = ssid_diagnostics()
+            logger.critical(
+                "CONFIG_INVALID - %s | ssid_source=%s format=%s "
+                "payload=%s credential=%s parse_error=%s",
+                exc,
+                diagnostic["source"],
+                diagnostic["format"],
+                diagnostic["payload"],
+                diagnostic["credential"],
+                diagnostic["parse_error"] or "none",
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the cause
+            logger.critical("CONFIG_INVALID - %s", exc)
         raise SystemExit(2) from exc
     try:
         asyncio.run(amain(settings))

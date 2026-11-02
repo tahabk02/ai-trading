@@ -30,6 +30,7 @@ import { websocketService } from "./websocket.service";
 import { clampMinTierToEngineSet } from "../lib/signalTiers";
 import type { SignalTier } from "../lib/signalTiers";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
+import { realtimeCandleAggregatorService } from "./realtimeCandleAggregator.service";
 import { publishDurableSignal } from "../messaging/signalStream";
 import { isAlertEligible } from "../lib/alertGate";
 import {
@@ -371,12 +372,15 @@ public clearSelectedHorizonMinutes(symbol: string): void {
       seconds.length === window.length && seconds.every((s) => s != null)
         ? (seconds as number[])
         : undefined;
+    const intraCandle =
+      realtimeCandleAggregatorService.getIntraCandleFeatures(symbol, "M1");
     const payload = {
       symbol,
       timeframe: "1m",
       dataSource: "live_tick_ring",
       prices,
       ...(tickTimestamps ? { tick_timestamps: tickTimestamps } : {}),
+      ...(intraCandle ? { intra_candle: intraCandle } : {}),
       tick: prices[prices.length - 1],
       bid:
         spread.bid != null && Number.isFinite(spread.bid) && spread.bid > 0

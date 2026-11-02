@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { useMarketTerminalStore, quoteFieldsDiffer } from "@/store/useMarketTerminalStore";
+import {
+  useMarketTerminalStore,
+  quoteFieldsDiffer,
+  verdictFieldsDiffer,
+  type LiveVerdict,
+} from "@/store/useMarketTerminalStore";
 import type { MarketQuote } from "@/services/api";
 
 /** Build a quote snapshot; only the fields under test need to differ. */
@@ -136,5 +141,74 @@ describe("markPredictionsPending batching", () => {
     expect(keys).toContain("AUDUSD");
     expect(keys).not.toContain("");
     expect(keys).not.toContain("   ");
+  });
+});
+
+const v = (over: Partial<LiveVerdict> = {}): LiveVerdict & { symbol: string } => ({
+  symbol: "GBP/USD",
+  direction: "BUY",
+  confidence: 71.2,
+  current_price: 1.27,
+  target_price: 1.271,
+  market_waiting: false,
+  waiting_reason: null,
+  waiting_detail: null,
+  book_confluence: 70.5,
+  tier: "T4",
+  tier_label: "LOW",
+  dispatchable: true,
+  scored_only: false,
+  executable: true,
+  timestamp: "2026-11-01T10:00:00.000Z",
+  ...over,
+});
+
+describe("verdict structural sharing", () => {
+  it("treats timestamp / diagnostic price advances as unchanged", () => {
+    expect(
+      verdictFieldsDiffer(
+        v(),
+        v({
+          timestamp: "2026-11-01T10:00:01.000Z",
+          current_price: 1.2701,
+          target_price: 1.2711,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("detects a direction or confidence change", () => {
+    expect(verdictFieldsDiffer(v(), v({ direction: "SELL" }))).toBe(true);
+    expect(verdictFieldsDiffer(v(), v({ confidence: 72.2 }))).toBe(true);
+    expect(verdictFieldsDiffer(v(), v({ executable: false }))).toBe(true);
+  });
+
+  it("keeps object identity across repeated 1Hz frames", () => {
+    useMarketTerminalStore.getState().ingestVerdict(v());
+    const first = useMarketTerminalStore.getState().verdicts["GBP/USD"];
+
+    for (let i = 0; i < 5; i++) {
+      useMarketTerminalStore.getState().ingestVerdict(
+        v({
+          timestamp: `2026-11-01T10:00:0${i}.000Z`,
+          current_price: 1.27 + i / 10000,
+        }),
+      );
+    }
+
+    expect(useMarketTerminalStore.getState().verdicts["GBP/USD"]).toBe(first);
+  });
+
+  it("bumps _verdictVersion only when the verdict actually changes", () => {
+    useMarketTerminalStore.getState().ingestVerdict(v({ confidence: 80 }));
+    const idle = useMarketTerminalStore.getState()._verdictVersion;
+
+    useMarketTerminalStore.getState().ingestVerdict(
+      v({ confidence: 80, timestamp: "2026-11-01T10:00:09.000Z" }),
+    );
+    expect(useMarketTerminalStore.getState()._verdictVersion).toBe(idle);
+
+    useMarketTerminalStore.getState().ingestVerdict(v({ confidence: 81 }));
+    expect(useMarketTerminalStore.getState()._verdictVersion).toBe(idle + 1);
   });
 });

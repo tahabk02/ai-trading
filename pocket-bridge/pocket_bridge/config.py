@@ -12,6 +12,7 @@ local `.env` file, matching the rest of the monorepo).
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import logging
 import os
@@ -48,10 +49,17 @@ def _pocket_bridge_env_files() -> list[Path]:
     return [p for p in candidates if p.is_file()]
 
 
+#: Env files actually loaded by this process, highest precedence first.
+LOADED_ENV_FILES: list[Path] = []
+
 try:
     from dotenv import load_dotenv
     for _env_file in _pocket_bridge_env_files():
-        load_dotenv(_env_file, override=False)
+        # interpolate=False is deliberate: an SSID/session token can contain
+        # ``$`` and dotenv would otherwise silently expand it, corrupting the
+        # credential before the bridge ever sees it.
+        load_dotenv(_env_file, override=False, interpolate=False)
+        LOADED_ENV_FILES.append(_env_file)
     _PARENT_DOTENV = POCKET_BRIDGE_ROOT.parent / ".env"
     if _PARENT_DOTENV.is_file() and os.environ.get("POCKET_BRIDGE_ALLOW_PARENT_DOTENV") != "true":
         logging.getLogger("pocket_bridge.config").warning(
@@ -909,19 +917,69 @@ ENV_ALIASES: Dict[str, tuple] = {
     "POCKET_OPTION_IS_DEMO": ("PO_IS_DEMO",),
     "POCKET_OPTION_UID": ("PO_USER_ID",),
     "POCKET_OPTION_SESSION_TOKEN": ("PO_SESSION_TOKEN",),
+    "POCKET_OPTION_SESSION_TOKEN_FILE": ("PO_SESSION_TOKEN_FILE",),
     "POCKET_OPTION_SSID_FILE": ("PO_SSID_FILE",),
     "POCKET_OPTION_SYMBOLS": ("PO_SYMBOLS",),
     "POCKET_OPTION_MAX_LIVE_STREAMS": ("PO_MAX_LIVE_STREAMS",),
 }
 
 
+def _strip_wrapping_quotes(value: str) -> str:
+    """Trim BOM/whitespace and any balanced outer quote pairs.
+
+    ``load_dotenv`` normally removes one quoting layer, but values injected by
+    Compose/raw environment, or copied from a shell, may still be wrapped.
+    Stripping only balanced pairs preserves a credential that legitimately
+    starts or ends with a quote.
+    """
+    text = (value or "").lstrip("\ufeff").strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    return text
+
+
 def _env_value(name: str, default: str = "") -> str:
-    """Return the first non-empty value among ``name`` and its aliases."""
+    """Return the first non-empty value among ``name`` and its aliases.
+
+    A canonical key that is present but empty (for example ``PO_SSID=''``)
+    must not mask a usable alias; quoting is removed before the emptiness
+    check so ``"''"`` falls through as well.
+    """
     for candidate in (name, *ENV_ALIASES.get(name, ())):
-        raw = os.getenv(candidate, "")
-        if raw is not None and raw.strip():
-            return raw.strip()
+        raw = os.getenv(candidate)
+        if raw is None:
+            continue
+        value = _strip_wrapping_quotes(raw)
+        if value:
+            return value
     return default
+
+
+def _env_origin(name: str) -> str:
+    """Best-effort provenance for an env value: ``env:KEY`` or ``file:...``.
+
+    Used only for sanitized startup diagnostics. Values are compared after
+    quote normalization and are never logged here.
+    """
+    try:
+        from dotenv import dotenv_values
+    except Exception:  # pragma: no cover - dotenv is optional at runtime
+        dotenv_values = None  # type: ignore[assignment]
+    for candidate in (name, *ENV_ALIASES.get(name, ())):
+        current = _strip_wrapping_quotes(os.getenv(candidate) or "")
+        if not current:
+            continue
+        if dotenv_values is not None:
+            for path in LOADED_ENV_FILES:
+                try:
+                    values = dotenv_values(path, interpolate=False)
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    continue
+                file_value = _strip_wrapping_quotes(str(values.get(candidate) or ""))
+                if file_value == current:
+                    return f"file:{path}:{candidate}"
+        return f"env:{candidate}"
+    return ""
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1140,12 +1198,7 @@ def parse_ssid(value: str) -> dict:
     environment, which is why demo mode must be forwarded. Clean 32-hex raw
     tokens are inferred as real-account ``sessionToken`` credentials.
     """
-    raw = (value or "").strip()
-    if raw.startswith("'") and raw.endswith("'"):
-        raw = raw[1:-1].strip()
-    elif raw.startswith('"') and raw.endswith('"'):
-        raw = raw[1:-1].strip()
-    raw = raw.strip()
+    raw = _strip_wrapping_quotes(value)
     if not raw:
         return {}
     raw, token_prefixed = split_session_token_prefix(raw)
@@ -1171,7 +1224,7 @@ def parse_ssid(value: str) -> dict:
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             logger.critical(
                 "invalid POCKET_OPTION_SSID value=%s error=%s",
-                mask_secret(raw, 16),
+                mask_secret_preview(raw),
                 exc,
             )
             raise ValueError(
@@ -1445,9 +1498,29 @@ localStorage + sessionStorage + user-agent). Captured once by
 
 
 def mask_secret(value: str, head: int = 8) -> str:
-    """Mask a secret to its first ``head`` characters — never a full value."""
+    """Mask a secret to its first ``head`` characters - never a full value."""
     s = str(value or "")
     return s[:head] + "..." if s else "(empty)"
+
+
+def mask_secret_preview(value: str, head: int = 4, tail: int = 4) -> str:
+    """Return a non-reversible, correlation-friendly secret preview.
+
+    The result contains only the first/last few characters plus the value's
+    length and a SHA-256 prefix, so two boots can be compared without exposing
+    the credential. Values too short for a safe preview are fully masked.
+    """
+    s = str(value or "")
+    if not s:
+        return "(empty) len=0"
+    digest = hashlib.sha256(s.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    if len(s) <= 4:
+        body = "*" * len(s)
+    elif len(s) <= head + tail:
+        body = f"{s[0]}...{s[-1]}"
+    else:
+        body = f"{s[:head]}...{s[-tail:]}"
+    return f"{body} len={len(s)} sha256={digest}"
 
 
 def mask_uid(value) -> str:
@@ -1511,10 +1584,7 @@ _SSID_JSON_KEYS = (
 
 def normalize_ssid_value(value: str) -> str:
     """Trim file/env wrapping without touching the session frame internals."""
-    text = (value or "").lstrip("\ufeff").strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
-        text = text[1:-1].strip()
-    return text
+    return _strip_wrapping_quotes(value)
 
 
 def _decode_ssid_payload(raw: str, depth: int = 0) -> str:
@@ -1653,15 +1723,103 @@ def _load_explicit_session_token() -> str:
     return _session_token_marker(token) if token else ""
 
 
-def load_ssid() -> str:
-    """Resolve an explicit sessionToken first, then SSID file / env SSID."""
+def resolve_ssid() -> tuple[str, str]:
+    """Resolve SSID payload and its sanitized origin.
+
+    Priority: explicit session token, then ``POCKET_OPTION_SSID_FILE``, then
+    ``POCKET_OPTION_SSID`` / ``PO_SSID``. A configured file/token is
+    fail-closed: a missing or unreadable secret must never silently fall back
+    to a possibly stale ``.env`` SSID.
+    """
+    token_origin = _env_origin(SESSION_TOKEN_ENV) or _env_origin(
+        SESSION_TOKEN_FILE_ENV
+    )
     explicit_token = _load_explicit_session_token()
     if explicit_token:
-        return explicit_token
+        return explicit_token, token_origin or "token"
+
     file_path = _env_value(SSID_FILE_ENV)
     if file_path:
-        return read_ssid_file(file_path)
-    return _decode_ssid_payload(_env_value("POCKET_OPTION_SSID"))
+        return read_ssid_file(file_path), f"file:{file_path}"
+
+    env_value = _env_value("POCKET_OPTION_SSID")
+    if env_value:
+        decoded = _decode_ssid_payload(env_value)
+        if decoded:
+            return decoded, _env_origin("POCKET_OPTION_SSID") or "env"
+    return "", "none"
+
+
+def load_ssid() -> str:
+    """Resolve an explicit sessionToken first, then SSID file / env SSID."""
+    return resolve_ssid()[0]
+
+
+def ssid_diagnostics(value: str | None = None) -> Dict[str, Any]:
+    """Return a secret-safe SSID diagnostic snapshot for startup logs.
+
+    ``value=None`` resolves the live credential exactly as ``BridgeSettings``
+    does. The payload and credential are represented only by first/last
+    characters, length and a SHA-256 prefix.
+    """
+    if value is None:
+        raw, source = resolve_ssid()
+    else:
+        raw, source = _strip_wrapping_quotes(value), "explicit"
+    parsed: Dict[str, Any] = {}
+    parse_error = ""
+    if raw:
+        try:
+            parsed = parse_ssid(raw)
+        except ValueError as exc:
+            parse_error = str(exc)
+    credential = str(
+        parsed.get("session") or parsed.get(SESSION_TOKEN_FIELD) or ""
+    )
+    return {
+        "present": bool(raw),
+        "source": source,
+        "format": "full" if raw.startswith("42[") else ("raw" if raw else "none"),
+        "payload": mask_secret_preview(raw),
+        "payload_len": len(raw),
+        "payload_sha256": (
+            hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+            if raw
+            else ""
+        ),
+        "credential": mask_secret_preview(credential),
+        "credential_len": len(credential),
+        "credential_sha256": (
+            hashlib.sha256(
+                credential.encode("utf-8", "surrogatepass")
+            ).hexdigest()[:12]
+            if credential
+            else ""
+        ),
+        "uid": parsed.get("uid"),
+        "is_demo": parsed.get("isDemo"),
+        "parse_error": parse_error,
+    }
+
+
+def env_file_diagnostics() -> List[Dict[str, Any]]:
+    """Describe the env files loaded by this process (paths/mtimes only)."""
+    result: List[Dict[str, Any]] = []
+    for path in LOADED_ENV_FILES:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        result.append(
+            {
+                "path": str(path),
+                "mtime": datetime.fromtimestamp(
+                    stat.st_mtime, timezone.utc
+                ).isoformat(),
+                "size": stat.st_size,
+            }
+        )
+    return result
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
@@ -1688,11 +1846,7 @@ def write_env_ssid(env_path: Path, ssid: str) -> None:
     through this single writer so the file is never left half-updated.
     """
     env_path = Path(env_path)
-    value = (ssid or "").strip()
-    if value.startswith("'") and value.endswith("'"):
-        value = value[1:-1].strip()
-    elif value.startswith('"') and value.endswith('"'):
-        value = value[1:-1].strip()
+    value = _strip_wrapping_quotes(ssid)
     quoted = f"POCKET_OPTION_SSID='{value}'"
     existing = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     out: List[str] = []
@@ -1746,8 +1900,8 @@ def read_env_ssid(env_path: Path) -> str:
         if stripped.startswith("#") or "=" not in stripped:
             continue
         name, _, value = stripped.partition("=")
-        if name.strip() == "POCKET_OPTION_SSID":
-            return value.strip()
+        if name.strip() in ("POCKET_OPTION_SSID", "PO_SSID"):
+            return normalize_ssid_value(value)
     return ""
 
 
@@ -2125,7 +2279,7 @@ class BridgeSettings:
     """Resolved runtime settings for the bridge process."""
 
     #: Full `42["auth",{...}]` session cookie for BinaryOptionsToolsV2.
-    ssid: str = field(default_factory=load_ssid)
+    ssid: str = field(default_factory=load_ssid, repr=False)
 
     auth: dict = field(init=False, repr=False)
 
@@ -2298,18 +2452,42 @@ class BridgeSettings:
         return bool(self.proxy_url)
 
     @property
+    def ssid_origin(self) -> str:
+        """Detailed, sanitized credential origin used by startup diagnostics."""
+        if not self.has_ssid:
+            return "none"
+        try:
+            resolved, origin = resolve_ssid()
+        except ValueError:
+            return "invalid"
+        if resolved != self.ssid:
+            return "explicit"
+        return origin or "explicit"
+
+    @property
     def ssid_source(self) -> str:
         """Where boot credentials came from: token, file, env, or session."""
-        if (
-            _env_value(SESSION_TOKEN_ENV)
-            or _env_value(SESSION_TOKEN_FILE_ENV)
-        ):
+        origin = self.ssid_origin
+        if origin == "none":
+            return "session"
+        if "SESSION_TOKEN" in origin:
             return "token"
-        if _env_value(SSID_FILE_ENV):
+        if origin == f"file:{_env_value(SSID_FILE_ENV)}":
             return "file"
-        if self.ssid.strip():
+        if origin.startswith(("env:", "file:")):
             return "env"
-        return "session"
+        return "explicit"
+
+    @property
+    def ssid_fingerprint(self) -> str:
+        """Non-reversible SHA-256 prefix for correlating boot/runtime SSIDs."""
+        return (
+            hashlib.sha256(
+                self.ssid.encode("utf-8", "surrogatepass")
+            ).hexdigest()[:12]
+            if self.ssid
+            else ""
+        )
 
     @property
     def ssid_format(self) -> str:
@@ -2341,7 +2519,7 @@ class BridgeSettings:
         which case the caller keeps the previous credentials rather than
         downgrading to an unauthenticated frame.
         """
-        value = (raw or "").strip().strip("'\"").strip()
+        value = _strip_wrapping_quotes(raw)
         if not value:
             return False
         try:

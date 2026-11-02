@@ -45,6 +45,7 @@ import { forexDataService } from "./forexData.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { websocketService } from "./websocket.service";
 import { symbolRegistry } from "./symbolRegistry.service";
+import { marketSnapshotService } from "./marketSnapshot.service";
 import { poAuthManager } from "./poAuthManager";
 import {
   deriveBridgeFeedStatus,
@@ -88,6 +89,11 @@ interface BridgeTickFrame {
   symbol: string;
   asset: string;
   price: number;
+  bid?: number;
+  ask?: number;
+  volume?: number;
+  /** True when bid/ask were back-filled from the mid (not a real book). */
+  synthetic_quote?: boolean;
   ts_ms: number;
   ts_utc: number;
   /** Monotonic emit counter stamped by the relay (drop detection). */
@@ -951,6 +957,17 @@ export class PocketOptionBridgeService {
         tsUtc: toFiniteNumber(tick.ts_utc) ?? undefined,
         receivedUtcMs,
       },
+      {
+        bid:
+          tick.synthetic_quote === true
+            ? undefined
+            : toFiniteNumber(tick.bid) ?? undefined,
+        ask:
+          tick.synthetic_quote === true
+            ? undefined
+            : toFiniteNumber(tick.ask) ?? undefined,
+        volume: toFiniteNumber(tick.volume) ?? undefined,
+      },
     );
   }
 
@@ -1299,7 +1316,7 @@ export class PocketOptionBridgeService {
         });
         return;
       }
-      forexDataService.ingestPoCandle(
+      const stored = forexDataService.ingestPoCandle(
         candle.symbol,
         t,
         {
@@ -1311,6 +1328,20 @@ export class PocketOptionBridgeService {
         candle.closed,
         candle.asset_type,
       );
+      if (stored && candle.closed) {
+        marketSnapshotService.recordCandle({
+          symbol: candle.symbol,
+          timeframe: "S20",
+          timestamp: stored.timestamp,
+          open: stored.open,
+          high: stored.high,
+          low: stored.low,
+          close: stored.close,
+          volume: stored.volume,
+          closed: true,
+          assetType: candle.asset_type,
+        });
+      }
     } catch (err) {
       logger.debug("[PO Bridge] ingestPoCandle failed", {
         symbol: candle.symbol,

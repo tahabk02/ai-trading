@@ -175,6 +175,14 @@ class PredictRequest(BaseModel):
             "dynamics can use the tape without treating it as a news calendar."
         ),
     )
+    intra_candle: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional REAL forming-candle pullback features computed from the "
+            "live tick tape and S5 micro candles (wick rejection, exhaustion, "
+            "boundary, confluence). Omitted = engine computes from supplied data."
+        ),
+    )
     dataSource: Optional[str] = Field(
         default="unknown",
         description="Source of the data (e.g. 'alpaca', 'alpaca_historical')",

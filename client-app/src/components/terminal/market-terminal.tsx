@@ -17,6 +17,7 @@ import {
   selectMinConfidencePct,
   selectMinTier,
   selectHideBelowThreshold,
+  selectMarketClosedKey,
 } from "@/store/useMarketTerminalStore";
 import { HorizonSelector } from "./horizon-selector";
 import {
@@ -79,6 +80,9 @@ export const MarketTerminal: React.FC = () => {
   const hideBelowThreshold = useMarketTerminalStore(selectHideBelowThreshold);
   const predictions = useMarketTerminalStore(selectTerminalPredictions);
   const verdicts = useMarketTerminalStore(selectTerminalVerdicts);
+  // Value-stable signature (not the quote record) so the grid reacts to a
+  // weekly open/close without re-rendering on every tick.
+  const marketClosedKey = useMarketTerminalStore(selectMarketClosedKey);
 
   const live = connected && connectedFlag;
 
@@ -101,9 +105,17 @@ export const MarketTerminal: React.FC = () => {
 
     // Confidence Filter (hide mode): physically remove pairs whose measurable
     // confidence is below the active bar. Cards with no confidence yet (still
-    // evaluating / market-waiting) are NEVER hidden.
+    // evaluating / market-waiting) are NEVER hidden, and a REAL pair whose
+    // weekly market is CLOSED is always kept: its price is the last close, not
+    // a stale signal, so hiding it would erase the one state the operator must
+    // see. The closed set is derived from a value-stable signature, not from
+    // the quote record, so this does not add a per-tick render.
     if (!hideBelowThreshold) return base;
+    const closed = new Set(
+      marketClosedKey ? marketClosedKey.split(",").filter(Boolean) : [],
+    );
     const kept = base.filter((sym) => {
+      if (closed.has(sym)) return true;
       const pred = predictions[sym];
       const verdict = verdicts[sym];
       const conf = cardEffectiveConfidence(
@@ -123,6 +135,7 @@ export const MarketTerminal: React.FC = () => {
     minConfidencePct,
     predictions,
     verdicts,
+    marketClosedKey,
   ]);
 
   const hiddenCount = React.useMemo(

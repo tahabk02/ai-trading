@@ -74,8 +74,13 @@ from .signal_gatekeeper import (
 from .microstructure import analyze_candle_microstructure
 from .regime_adaptation import profile_market_regime
 from .bayesian_ensemble import get_ensemble
+from .intra_candle import (
+    apply_pullback_confidence,
+    build_intra_candle_features,
+)
 
 EPS = 1e-12
+PULLBACK_DIRECTION_WEIGHT = 0.12
 
 # ── GENUINE confidence [0, 100+] ──
 # For dispatched BUY/SELL, confidence is true directional agreement scaled by
@@ -635,6 +640,7 @@ def evaluate_quant_matrix(
     ask: Optional[float] = None,
     symbol: Optional[str] = None,
     event_times: Optional[list] = None,
+    intra_candle: Optional[Dict[str, Any]] = None,
 ) -> QuantVerdict:
     """Score REAL market structure into an unbiased CALL/PUT/HOLD verdict.
 
@@ -800,7 +806,24 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
         "macd_momentum": 0.05,
         "spread_quality": 0.04,
     }
-    direction_score = float(sum(factors[k] * weights[k] for k in weights))
+    intra = build_intra_candle_features(
+        candles,
+        symbol=symbol or "",
+        timeframe=timeframe.upper() if timeframe.upper() in ("M1", "S5") else "M1",
+        core_features=intra_candle,
+    )
+    pullback = intra.get("pullback", {}) if isinstance(intra, dict) else {}
+    pullback_signal = pullback.get("signal")
+    f_pullback = 0.0
+    if pullback_signal in ("CALL", "PUT"):
+        strength = max(0.5, float(pullback.get("confidence", 0.0) or 0.0) / 100.0)
+        f_pullback = strength if pullback_signal == "CALL" else -strength
+        factors["intra_candle_pullback"] = round(f_pullback, 4)
+
+    direction_score = float(
+        sum(factors[k] * weights[k] for k in weights)
+        + f_pullback * PULLBACK_DIRECTION_WEIGHT
+    )
 
     # ── DIRECTION — ALWAYS DEFINITIVE (NEVER HOLD) ──
     # The engine ALWAYS emits a directional trading state from the real
@@ -869,6 +892,14 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
     book_confirm = book.book_confirm
     confluence = book.confluence
     conf_score = float(confluence.get("score", 0.0))
+    pullback_score_before = conf_score
+    conf_score, pullback_lift = apply_pullback_confidence(
+        conf_score, intra, direction
+    )
+    if pullback_lift > 0:
+        confluence["structural_score"] = round(pullback_score_before, 2)
+        confluence["pullback_lift"] = round(pullback_lift, 2)
+        confluence["score"] = round(conf_score, 2)
     confluence_gate = str(confluence.get("gate", "INSUFFICIENT"))
 
     # ── TRUE 98% MULTI-BOOK CONFLUENCE CONFIDENCE (v9) ──
@@ -1009,6 +1040,8 @@ BOOK  — 10-book confluence (v9, STRICT MULTIPLICATIVE): Bollinger %B +
         "rsi_14": round(rsi_now, 4),
         "macd_momentum": round(f_macd, 4),
         "spread_quality": f_spread,
+        "intra_candle": intra,
+        "pullback": pullback,
         "atr_14": round(atr_now, 8),
         "atr_expansion": round(atr_expand, 4),
         "aligned_factors": aligned_count,

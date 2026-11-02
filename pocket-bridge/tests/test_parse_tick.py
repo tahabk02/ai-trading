@@ -12,7 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pocket_bridge.bridge import parse_tick  # noqa: E402
+from pocket_bridge.bridge import (  # noqa: E402
+    coerce_tick_payload,
+    parse_quote,
+    parse_tick,
+)
 
 
 def test_epoch_ms_passthrough():
@@ -46,3 +50,43 @@ def test_missing_price_or_ts_returns_none():
 
 def test_non_numeric_ts_returns_none():
     assert parse_tick({"price": 1.10, "timestamp": "not-a-number"}) is None
+
+
+def test_binary_utf8_frame_is_decoded():
+    now_ms = 1_765_000_000_000
+    frame = (
+        '42["tick",{"price":1.1010,"timestamp":' + str(now_ms) + "}]"
+    ).encode("utf-8")
+    result = parse_tick(frame)
+    assert result == (now_ms, 1.1010)
+
+
+def test_memoryview_binary_frame_is_decoded():
+    now_ms = 1_765_000_000_000
+    frame = memoryview(
+        ('451-["tick",{"close":1.25,"time":' + str(now_ms) + "}]").encode()
+    )
+    result = parse_tick(frame)
+    assert result == (now_ms, 1.25)
+
+
+def test_json_text_frame_without_envelope():
+    now_ms = 1_765_000_000_000
+    result = parse_quote(
+        '{"bid":1.1000,"ask":1.1004,"timestamp":%d}' % now_ms,
+        now_ms=now_ms,
+    )
+    assert result is not None
+    assert result["price"] == "1.1002"
+    assert result["synthetic_quote"] is False
+
+
+def test_update_assets_frame_is_not_a_tick():
+    frame = '451-["updateAssets",{"EURUSD_otc":true}]'
+    assert coerce_tick_payload(frame) == {"EURUSD_otc": True}
+    assert parse_tick(frame) is None
+
+
+def test_unparseable_binary_frame_returns_none():
+    assert coerce_tick_payload(b"\xff\xfe\x00") is None
+    assert parse_tick(b"not-json") is None

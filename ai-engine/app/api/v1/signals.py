@@ -85,6 +85,7 @@ from app.services.live_quant import (
     build_tick_signal_payload,
     LiveQuantVerdict,
 )
+from app.services.intra_candle import apply_pullback_projection
 from app.services.horizon_engine import (
     build_horizon_payload,
     resolve_horizon_minutes,
@@ -673,6 +674,11 @@ async def tick_signal(data: Dict[str, Any]):
         ask_depth_raw = data.get("ask_depth")
         bid_depth = float(bid_depth_raw) if bid_depth_raw is not None else None
         ask_depth = float(ask_depth_raw) if ask_depth_raw is not None else None
+        intra_payload = (
+            data.get("intra_candle")
+            if isinstance(data.get("intra_candle"), dict)
+            else None
+        )
 
         prices_raw = data.get("prices")
         candles_raw = data.get("candles")
@@ -808,6 +814,7 @@ async def tick_signal(data: Dict[str, Any]):
             symbol=symbol,
             event_times=data.get("event_times"),
             tick_timestamps=data.get("tick_timestamps"),
+            intra_candle=intra_payload,
         )
 
         # Genuine ATR from the verdict's real Wilder ATR diagnostics (robust on
@@ -840,8 +847,27 @@ async def tick_signal(data: Dict[str, Any]):
             timeframe=response["timeframe"],
             symbol_digits=digits,
         )
+        intra = verdict.diagnostics.get("intra_candle", {})
+        target_price, target_distance, pullback_entry, entry_timing = (
+            apply_pullback_projection(
+                intra,
+                response["signal"],
+                eval_price,
+                atr_now,
+                digits,
+                target_price,
+                target_distance,
+            )
+        )
         response["target_price"] = round(target_price, digits)
         response["target_distance"] = round(target_distance, digits)
+        response["intra_candle"] = intra
+        response["pullback_entry_price"] = pullback_entry
+        response["entry_timing"] = entry_timing or (
+            intra.get("pullback", {}).get("entryTiming")
+            if isinstance(intra, dict)
+            else None
+        )
         response["barCount"] = len(eval_array)
         response["proxyLatencyMs"] = 0.0
 
@@ -1206,6 +1232,7 @@ async def predict_signal(data: PredictRequest):
                 symbol,
                 data.event_times,
                 data.tick_timestamps,
+                data.intra_candle,
             )
         except InferenceAdmissionTimeout as e:
             logger.error(
@@ -1243,6 +1270,18 @@ async def predict_signal(data: PredictRequest):
         atr_now = float(candles_raw[-1].get("atr", candles_raw[-1].get("close", current_price) * 0.01))
         target_price, distance = project_target(
             verdict.direction, current_price, atr_now, timeframe, digits
+        )
+        intra = verdict.diagnostics.get("intra_candle", {})
+        target_price, distance, pullback_entry, entry_timing = (
+            apply_pullback_projection(
+                intra,
+                verdict.direction,
+                current_price,
+                atr_now,
+                digits,
+                target_price,
+                distance,
+            )
         )
         future_candles = build_future_candles(
             candles=candles_raw,
@@ -1307,6 +1346,14 @@ async def predict_signal(data: PredictRequest):
             ),
             "factors": verdict.factors,
             "diagnostics": verdict.diagnostics,
+            "intra_candle": intra,
+            "pullback": intra.get("pullback", {}) if isinstance(intra, dict) else {},
+            "pullback_entry_price": pullback_entry,
+            "entry_timing": entry_timing or (
+                intra.get("pullback", {}).get("entryTiming")
+                if isinstance(intra, dict)
+                else None
+            ),
             "predictive": verdict.diagnostics.get("predictive", {}),
             "market_waiting": market_waiting,
             "waiting_reason": getattr(verdict, "waiting_reason", None) if market_waiting else None,
@@ -1394,6 +1441,7 @@ async def predict_signal(data: PredictRequest):
             ask,
             symbol,
             data.event_times,
+            data.intra_candle,
         )
     except InferenceAdmissionTimeout as e:
         logger.error(
@@ -1493,6 +1541,16 @@ async def predict_signal(data: PredictRequest):
     digits = symbol_price_digits(symbol)
     target_price, distance = project_target(
         verdict.direction, current_price, atr_now, timeframe, digits
+    )
+    intra = verdict.diagnostics.get("intra_candle", {})
+    target_price, distance, pullback_entry, entry_timing = apply_pullback_projection(
+        intra,
+        verdict.direction,
+        current_price,
+        atr_now,
+        digits,
+        target_price,
+        distance,
     )
     future_candles = build_future_candles(
         candles=candles_raw,
@@ -1621,6 +1679,14 @@ async def predict_signal(data: PredictRequest):
         },
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
+        "intra_candle": intra,
+        "pullback": intra.get("pullback", {}) if isinstance(intra, dict) else {},
+        "pullback_entry_price": pullback_entry,
+        "entry_timing": entry_timing or (
+            intra.get("pullback", {}).get("entryTiming")
+            if isinstance(intra, dict)
+            else None
+        ),
         "predictive": verdict.diagnostics.get("predictive", {}),
         **quality_fields,
         "market_waiting": market_waiting,

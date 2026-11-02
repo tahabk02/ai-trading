@@ -13,6 +13,7 @@ remains the actual auth credential).
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -23,10 +24,12 @@ from pocket_bridge.bridge import DEFAULT_PO_WS_URL
 from pocket_bridge.config import (
     PO_SESSION_PATH,
     auth_message,
+    env_file_diagnostics,
     load_stored_session,
     mask_secret,
     mask_uid,
     parse_ssid,
+    ssid_diagnostics,
 )
 
 BASE = Path(__file__).resolve().parent
@@ -123,6 +126,19 @@ def main() -> int:
     print(f"SESSION_DEFAULT {PO_SESSION_PATH}")
     print(f"ENV_PATH {ENV_PATH}")
     print(f"CORE_ENV_PATH {CORE_ENV_PATH}")
+
+    if "--diagnostics" in sys.argv[1:]:
+        print(
+            json.dumps(
+                {
+                    "ssid": ssid_diagnostics(),
+                    "env_files": env_file_diagnostics(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
 
     # 1. Captured browser session (PRIMARY).
     stored = load_stored_session(PO_SESSION_PATH)

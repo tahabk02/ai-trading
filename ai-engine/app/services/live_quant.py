@@ -105,6 +105,10 @@ from .signal_gatekeeper import (
 from .microstructure import analyze_tick_stream
 from .regime_adaptation import profile_price_regime
 from .bayesian_ensemble import get_ensemble
+from .intra_candle import (
+    apply_pullback_confidence,
+    build_intra_candle_features,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -130,6 +134,8 @@ _FACTOR_WEIGHTS: Dict[str, float] = {
     "macd_momentum": 0.05,
     "spread_quality": 0.04,
 }
+
+PULLBACK_DIRECTION_WEIGHT = 0.12
 
 # Confidence scaling constants (aligned with quant_matrix)
 ALERT_THRESHOLD = HIGH_CONFIDENCE_ALERT_THRESHOLD  # 90% — priority high-confidence toast
@@ -207,6 +213,7 @@ def evaluate_live_tick_signal(
     symbol: Optional[str] = None,
     event_times: Optional[List[Any]] = None,
     tick_timestamps: Optional[List[float]] = None,
+    intra_candle: Optional[Dict[str, Any]] = None,
 ) -> LiveQuantVerdict:
     """Score a REAL price array into BUY / SELL / HOLD in <1ms.
 
@@ -366,8 +373,39 @@ def evaluate_live_tick_signal(
         "spread_quality": f_spread,
     }
 
+    intra_candles = []
+    if highs is not None and lows is not None:
+        start = max(0, n - 30)
+        intra_candles = [
+            {
+                "open": float(closes[index - 1]) if index > 0 else float(closes[index]),
+                "high": float(highs_arr[index]),
+                "low": float(lows_arr[index]),
+                "close": float(closes[index]),
+                "volume": 0.0,
+            }
+            for index in range(start, n)
+        ]
+    intra = build_intra_candle_features(
+        intra_candles,
+        symbol=symbol or "",
+        timeframe=timeframe.upper() if timeframe.upper() in ("M1", "S5") else "M1",
+        core_features=intra_candle,
+        tick_prices=closes.tolist(),
+        tick_timestamps=tick_timestamps,
+        live_price=eval_price,
+    )
+    pullback = intra.get("pullback", {}) if isinstance(intra, dict) else {}
+    pullback_signal = pullback.get("signal")
+    f_pullback = 0.0
+    if pullback_signal in ("CALL", "PUT"):
+        strength = max(0.5, float(pullback.get("confidence", 0.0) or 0.0) / 100.0)
+        f_pullback = strength if pullback_signal == "CALL" else -strength
+        factors["intra_candle_pullback"] = round(f_pullback, 4)
+
     direction_score = float(
         sum(factors[k] * _FACTOR_WEIGHTS[k] for k in _FACTOR_WEIGHTS)
+        + f_pullback * PULLBACK_DIRECTION_WEIGHT
     )
 
     # ── ZERO-TIE + GENUINE DIRECTION (ALWAYS DIRECTIONAL — NEVER HOLD) ──
@@ -425,6 +463,14 @@ def evaluate_live_tick_signal(
     book_confirm = book.book_confirm
     confluence = book.confluence
     conf_score = float(confluence.get("score", 0.0))
+    pullback_score_before = conf_score
+    conf_score, pullback_lift = apply_pullback_confidence(
+        conf_score, intra, direction
+    )
+    if pullback_lift > 0:
+        confluence["structural_score"] = round(pullback_score_before, 2)
+        confluence["pullback_lift"] = round(pullback_lift, 2)
+        confluence["score"] = round(conf_score, 2)
     confluence_gate = str(confluence.get("gate", "INSUFFICIENT"))
 
     # ── DIRECTIONAL STRENGTH AGGREGATES (diagnostics only — never confidence) ──
@@ -448,7 +494,9 @@ def evaluate_live_tick_signal(
         vol_confirm = 0.0
     agreement_val = book.agreement if direction in ("BUY", "SELL") else 0.0
     total_votes = max(book.active_count, 1)
-    magnitude = sum(abs(v) * _FACTOR_WEIGHTS[k] for k, v in factors.items())
+    magnitude = sum(
+        abs(v) * _FACTOR_WEIGHTS.get(k, 0.0) for k, v in factors.items()
+    )
 
     # ── THE THERMAL GATE (SOLE DISPATCH MECHANISM) ──
     # The emitted confidence of a directional LIVE signal IS the strict
@@ -549,6 +597,8 @@ def evaluate_live_tick_signal(
         "rsi_14": round(rsi_now, 4),
         "macd_momentum": round(f_macd, 4),
         "spread_quality": f_spread,
+        "intra_candle": intra,
+        "pullback": pullback,
         "atr_14": round(atr_now, 8),
         "atr_expansion": round(atr_expand, 4),
         "neutral_band": NEUTRAL_BAND,
@@ -752,6 +802,8 @@ def build_tick_signal_payload(
         "waiting_detail": verdict.waiting_detail,
         "factors": verdict.factors,
         "diagnostics": verdict.diagnostics,
+        "intra_candle": verdict.diagnostics.get("intra_candle", {}),
+        "pullback": verdict.diagnostics.get("pullback", {}),
         "predictive": verdict.diagnostics.get("predictive", {}),
         "timestamp": datetime.now(UTC).isoformat(),
     }

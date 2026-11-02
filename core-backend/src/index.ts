@@ -28,6 +28,7 @@ import { pocketOptionBridgeService } from "./services/pocketOptionBridge.service
 import { realtimeCandleAggregatorService } from "./services/realtimeCandleAggregator.service";
 import { realtimeTickBuffer } from "./services/realtimeTickBuffer.service";
 import { buildMarketQuotesSnapshot } from "./services/marketQuotes.service";
+import { marketSnapshotService } from "./services/marketSnapshot.service";
 import { SOCKET_SERVER_OPTIONS } from "./config/socket.config";
 import { feedMetrics } from "./lib/feedMetrics";
 import { brokerClock } from "./lib/serverClock";
@@ -292,6 +293,19 @@ io.engine.on("connection_error", (err) => {
 // bars; its own client aggregator paints only the current forming bar.
 realtimeCandleAggregatorService.setClosedHandler((candle) => {
   wsService.broadcastCandle(candle);
+  if (candle.timeframe === "S20" || candle.timeframe === "M1") {
+    marketSnapshotService.recordCandle({
+      symbol: candle.symbol,
+      timeframe: candle.timeframe,
+      timestamp: candle.timestamp,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+      closed: true,
+    });
+  }
 });
 realtimeCandleAggregatorService.setParityHandler((alert) => {
   wsService.broadcastCandleParity(alert);

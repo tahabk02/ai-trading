@@ -1,5 +1,11 @@
 import { logger } from "../utils/logger";
 import { canonicalizeSymbol } from "../utils/symbolFormat";
+import {
+  detectIntraCandlePullback,
+  type IntraCandleFeatures,
+  type IntraCandleOhlc,
+  type IntraCandleTick,
+} from "../lib/intraCandleFeatures";
 
 // ── Aggregated timeframes — Pocket Option's canonical multi-resolution grid ──
 // The server computes this exact PO ladder for every live symbol and emits each
@@ -19,6 +25,7 @@ export type AggregatedTimeframe =
   | "S5"
   | "S10"
   | "S15"
+  | "S20"
   | "S30"
   | "M1"
   | "M2"
@@ -37,6 +44,7 @@ export const SERVER_CANDLE_TFS: AggregatedTimeframe[] = [
   "S5",
   "S10",
   "S15",
+  "S20",
   "S30",
   "M1",
   "M2",
@@ -56,6 +64,7 @@ const TF_MS: Record<AggregatedTimeframe, number> = {
   S5: 5_000,
   S10: 10_000,
   S15: 15_000,
+  S20: 20_000,
   S30: 30_000,
   M1: 60_000,
   M2: 120_000,
@@ -78,6 +87,8 @@ const TF_ALIASES: Record<string, AggregatedTimeframe> = {
   "5s": "S5",
   "10s": "S10",
   "15s": "S15",
+  "20s": "S20",
+  "m20": "S20",
   "30s": "S30",
   "1m": "M1",
   "2m": "M2",
@@ -271,6 +282,7 @@ export class RealtimeCandleAggregatorService {
   private static instance: RealtimeCandleAggregatorService;
 
   private readonly states = new Map<string, Map<number /*tfMs*/, TfState>>();
+  private readonly tickTape = new Map<string, IntraCandleTick[]>();
   private closedHandler: ClosedHandler | null = null;
   private parityHandler: ParityHandler | null = null;
   private readonly parity = new Map<string, SymbolParity>();
@@ -317,6 +329,7 @@ export class RealtimeCandleAggregatorService {
   destroy(): void {
     this.stop();
     this.states.clear();
+    this.tickTape.clear();
     this.parity.clear();
     this.closedHandler = null;
     this.parityHandler = null;
@@ -328,6 +341,7 @@ export class RealtimeCandleAggregatorService {
     const norm = canonicalizeSymbol(symbol);
     if (!norm) return;
     this.states.delete(norm);
+    this.tickTape.delete(norm);
     this.parity.delete(norm);
   }
 
@@ -341,6 +355,23 @@ export class RealtimeCandleAggregatorService {
     // on, so a tick can never fork into a bucket the chart does not read.
     const norm = canonicalizeSymbol(symbol);
     if (!norm) return;
+
+    let tape = this.tickTape.get(norm);
+    if (!tape) {
+      tape = [];
+      this.tickTape.set(norm, tape);
+    }
+    const tick: IntraCandleTick = { tsMs, price };
+    if (tape.length === 0 || tsMs >= tape[tape.length - 1].tsMs) {
+      tape.push(tick);
+    } else {
+      let index = tape.length;
+      while (index > 0 && tape[index - 1].tsMs > tsMs) index -= 1;
+      tape.splice(index, 0, tick);
+    }
+    const tapeCutoff = Math.max(tsMs, this.latestTsMs) - 60_000;
+    while (tape.length > 0 && tape[0].tsMs < tapeCutoff) tape.shift();
+    if (tape.length > 1_200) tape.splice(0, tape.length - 1_200);
 
     // Advance the broker-clock anchor for the wall-clock sweep
     if (tsMs > this.latestTsMs) {
@@ -431,6 +462,52 @@ export class RealtimeCandleAggregatorService {
     const state = this.states.get(norm)?.get(TF_MS[tf]);
     if (!state || state.closed.length === 0) return null;
     return state.closed;
+  }
+
+  getIntraCandleFeatures(
+    symbol: string,
+    timeframe = "M1",
+  ): IntraCandleFeatures | null {
+    const norm = canonicalizeSymbol(symbol);
+    const tf = this.canonicalTimeframe(timeframe);
+    if (!norm || !tf) return null;
+
+    const state = this.states.get(norm)?.get(TF_MS[tf]);
+    if (!state || !state.open) return null;
+
+    const toOhlc = (candle: {
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+    }): IntraCandleOhlc => ({
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+    });
+
+    const microState = this.states.get(norm)?.get(TF_MS.S5);
+    const microClosed = microState
+      ? microState.closed.slice(-20).map(toOhlc)
+      : [];
+    const microForming =
+      microState && microState.open ? toOhlc(microState.open) : null;
+    const nowMs =
+      this.latestTsMs > 0 ? this.latestTsMs : state.open.lastTickMs;
+
+    return detectIntraCandlePullback({
+      symbol: norm,
+      timeframe: tf,
+      nowMs,
+      forming: toOhlc(state.open),
+      closed: state.closed.slice(-20).map(toOhlc),
+      microForming,
+      microClosed,
+      tape: this.tickTape.get(norm) ?? [],
+    });
   }
 
   // ── BOOT BACKFILL FROM PERSISTED HISTORY ────────────────────────────────

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { OTC_FOREX_PAIRS, REAL_FOREX_PAIRS } from "@/constants/symbols";
+import { OTC_FOREX_PAIRS, REAL_FOREX_PAIRS, ALL_MARKET_SYMBOLS } from "@/constants/symbols";
 import type { PredictionResponse, MarketQuote } from "@/services/api";
 import {
   clampMinConfidencePct,
@@ -95,6 +95,35 @@ const QUOTE_RENDER_FIELDS = [
  */
 export function quoteFieldsDiffer(prev: MarketQuote, next: MarketQuote): boolean {
   for (const field of QUOTE_RENDER_FIELDS) {
+    if (prev[field] !== next[field]) return true;
+  }
+  return false;
+}
+
+/**
+ * Fields a CARD actually renders from a live verdict. `timestamp` advances on
+ * every frame by construction and `current_price` / `target_price` are
+ * diagnostics that move with every tick; none of them is painted by the grid.
+ * Excluding them lets an unchanged verdict keep its object identity, which
+ * keeps the terminal parent (subscribed to the whole `verdicts` record) from
+ * re-rendering at 1Hz for a verdict that did not move.
+ */
+const VERDICT_RENDER_FIELDS = [
+  "direction",
+  "confidence",
+  "market_waiting",
+  "waiting_reason",
+  "waiting_detail",
+  "book_confluence",
+  "tier",
+  "tier_label",
+  "dispatchable",
+  "scored_only",
+  "executable",
+] as const satisfies readonly (keyof LiveVerdict)[];
+
+export function verdictFieldsDiffer(prev: LiveVerdict, next: LiveVerdict): boolean {
+  for (const field of VERDICT_RENDER_FIELDS) {
     if (prev[field] !== next[field]) return true;
   }
   return false;
@@ -309,37 +338,39 @@ export const useMarketTerminalStore = create<MarketTerminalState>()((set, get) =
     set((state) => {
       if (!payload?.symbol) return state;
       const sym = payload.symbol.trim().toUpperCase();
+      const next: LiveVerdict = {
+        direction: payload.direction,
+        confidence: payload.confidence,
+        current_price: payload.current_price,
+        target_price: payload.target_price,
+        market_waiting: payload.market_waiting,
+        waiting_reason: payload.waiting_reason ?? null,
+        waiting_detail: payload.waiting_detail ?? null,
+        book_confluence: payload.book_confluence,
+        // ── HONEST BAND (PART 38.1 [377]) ──
+        // `LiveVerdict` has declared tier / tier_label / dispatchable /
+        // scored_only / executable since the flexible-tier work, and the
+        // socket hook passes them in — this reducer was simply never
+        // writing them, so every live verdict reached the card bandless
+        // and `resolveCardTier` had to re-derive a tier from a micro-quant
+        // confidence. `isTier` keeps a malformed wire value from inventing
+        // a band; unrecognised → null (the documented "older/partial
+        // payload" state), never a silently widened one.
+        tier: isTier(payload.tier)
+          ? ((payload.tier as string).trim().toUpperCase() as SignalTier)
+          : null,
+        tier_label: payload.tier_label ?? null,
+        dispatchable: payload.dispatchable === true,
+        scored_only: payload.scored_only === true,
+        executable: payload.executable === true,
+        timestamp: payload.timestamp ?? new Date().toISOString(),
+      };
+      // Structural sharing: an idle 1Hz verdict keeps its identity so neither
+      // the card selector nor the grid parent re-renders for a non-change.
+      const prev = state.verdicts[sym];
+      if (prev && !verdictFieldsDiffer(prev, next)) return state;
       return {
-        verdicts: {
-          ...state.verdicts,
-          [sym]: {
-            direction: payload.direction,
-            confidence: payload.confidence,
-            current_price: payload.current_price,
-            target_price: payload.target_price,
-            market_waiting: payload.market_waiting,
-            waiting_reason: payload.waiting_reason ?? null,
-            waiting_detail: payload.waiting_detail ?? null,
-            book_confluence: payload.book_confluence,
-            // ── HONEST BAND (PART 38.1 [377]) ──
-            // `LiveVerdict` has declared tier / tier_label / dispatchable /
-            // scored_only / executable since the flexible-tier work, and the
-            // socket hook passes them in — this reducer was simply never
-            // writing them, so every live verdict reached the card bandless
-            // and `resolveCardTier` had to re-derive a tier from a micro-quant
-            // confidence. `isTier` keeps a malformed wire value from inventing
-            // a band; unrecognised → null (the documented "older/partial
-            // payload" state), never a silently widened one.
-            tier: isTier(payload.tier)
-              ? ((payload.tier as string).trim().toUpperCase() as SignalTier)
-              : null,
-            tier_label: payload.tier_label ?? null,
-            dispatchable: payload.dispatchable === true,
-            scored_only: payload.scored_only === true,
-            executable: payload.executable === true,
-            timestamp: payload.timestamp ?? new Date().toISOString(),
-          },
-        },
+        verdicts: { ...state.verdicts, [sym]: next },
         _verdictVersion: state._verdictVersion + 1,
       };
     }),
@@ -583,3 +614,21 @@ export const selectFavoritesOnly = (s: MarketTerminalState) => s.favoritesOnly;
 export const selectMinConfidencePct = (s: MarketTerminalState) => s.minConfidencePct;
 export const selectMinTier = (s: MarketTerminalState) => s.minTier;
 export const selectHideBelowThreshold = (s: MarketTerminalState) => s.hideBelowThreshold;
+
+/**
+ * Stable signature of the REAL pairs whose weekly market is currently closed.
+ *
+ * A selector returning the joined symbol list (instead of the quotes record)
+ * lets the grid react when a pair opens/closes WITHOUT subscribing to every
+ * tick. Zustand compares the returned string by value, so a price-only frame
+ * produces the same signature and schedules no render. Market-closed cards are
+ * isolated from the confidence/tier demotion and hide rules — the market state,
+ * not a stale signal, is what the operator must see.
+ */
+export const selectMarketClosedKey = (s: MarketTerminalState): string => {
+  let key = "";
+  for (const sym of ALL_MARKET_SYMBOLS) {
+    if (s.quotes[sym]?.marketClosed === true) key += `${sym},`;
+  }
+  return key;
+};

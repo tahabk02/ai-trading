@@ -1303,20 +1303,20 @@ class ForexDataService {
   // ═══════════════════════════════════════════════════════════════════════════
   //
   // Every real tick is folded into MULTIPLE wall-clock-aligned OHLCV buckets
-  // (5s and 1m by default; any timeframe supported via timeframeToMs). The
-  // in-progress bucket's high/low/close is updated on every tick so the candle
-  // "breathes" live; when a new bucket opens the previous bar is closed and a
-  // brand-new candle rolls over immediately. This mirrors the frontend's
+  // (1s, 20s and 1m by default; any timeframe supported via timeframeToMs).
+  // The in-progress bucket's high/low/close is updated on every tick so the
+  // candle "breathes" live; when a new bucket opens the previous bar is closed
+  // and a brand-new candle rolls over immediately. This mirrors the frontend's
   // RealtimeCandleAggregator so both sides stay in sync.
   //
-  // The sub-minute 5s bucket is what the prediction pipeline and tick-quant
-  // path use to derive precise live target/close-estimate projections.
+  // The 20s bucket is Pocket Option's M20 series; it is what the live target
+  // and close-estimate projections use on the broker grid.
 
   /** Timeframes the aggregator maintains in-memory for every active symbol.
-   *  1s and 1m are the wall-clock-aligned builders: 1s is the live chart
-   *  heartbeat, 1m is the binary-expiry decision bucket. Both map identically
-   *  to the Pocket Option active chart feed bar structure. */
-  private readonly AGGREGATE_TIMEFRAMES = ["1s", "1m"] as const;
+   *  1s is the live chart heartbeat, 20s is Pocket Option's M20 series, and
+   *  1m is the binary-expiry decision bucket. All three are wall-clock aligned
+   *  to the broker timestamp forwarded with every PO tick. */
+  private readonly AGGREGATE_TIMEFRAMES = ["1s", "20s", "1m"] as const;
 
   /**
    * Append a real observed tick price into the persistent candle buffers.
@@ -1324,11 +1324,18 @@ class ForexDataService {
    * candle's high/low/close and rolling over to a fresh bar when a bucket
    * boundary passes. Only accepts real finite positive prices.
    */
-  appendTick(symbol: string, price: number): void {
+  appendTick(
+    symbol: string,
+    price: number,
+    opts?: { tsMs?: number; bid?: number; ask?: number; volume?: number },
+  ): void {
     const norm = (symbol || "").trim().toUpperCase();
     if (!norm || !Number.isFinite(price) || price <= 0) return;
 
-    const now = Date.now();
+    const now =
+      Number.isFinite(opts?.tsMs) && (opts?.tsMs as number) > 0
+        ? (opts!.tsMs as number)
+        : Date.now();
 
     for (const timeframe of this.AGGREGATE_TIMEFRAMES) {
       this.appendToTimeframe(norm, timeframe, price, now);
@@ -1416,9 +1423,9 @@ class ForexDataService {
       ...(assetType ? { assetType } : {}),
     } as ForexCandle;
 
-    // Write into the 1m bucket (M20 bars roll up into 1m for the expiry
-    // decision matrix) matching PO's own bucket-start timestamp so the merge
-    // is stable and gap-free across bridge/flush cycles.
+    // Keep the exact 20s Pocket Option M20 series alongside the tick-built
+    // 20s bucket, then roll it up into 1m for the expiry decision matrix.
+    this.mergePoCandleIntoBuffer(norm, "20s", candle);
     this.mergePoCandleIntoBuffer(norm, "1m", candle);
     // Mirror into 1s for the tick-quant heartbeat (each M20 close is a 1s
     // sample of the live PO tape).

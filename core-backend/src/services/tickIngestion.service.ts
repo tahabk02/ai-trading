@@ -29,6 +29,7 @@ import { liveTickSignalDispatcher } from "./liveTickSignal.dispatch";
 import { githubDataProvider } from "./githubData.provider";
 import { symbolRegistry } from "./symbolRegistry.service";
 import { pocketOptionBridgeService } from "./pocketOptionBridge.service";
+import { marketSnapshotService } from "./marketSnapshot.service";
 import { exponentialBackoffMs } from "../lib/feedResilience";
 import { restoredFeedStatus } from "../lib/feedStatus";
 import { feedStateReporter, FeedStateReport } from "../lib/feedStateLog";
@@ -173,19 +174,40 @@ export class LiveTickIngestionService {
         // Broadcast to Socket.io clients
         this.wsService.broadcastLiveTick(tick);
 
+        const tsMs = Date.parse(timestamp);
+
         // Fold into high-frequency tick buffer
         realtimeTickBuffer.append(norm, price, {
           bid,
           ask,
+          volume: _volume,
+          tsMs: Number.isFinite(tsMs) ? tsMs : undefined,
           source: "github_data_provider",
         });
 
         // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
         liveTickSignalDispatcher.enqueue(norm);
 
+        // Coalesced Redis snapshot for the all-pairs market feed.
+        marketSnapshotService.recordTick({
+          symbol: norm,
+          price,
+          bid,
+          ask,
+          volume: _volume,
+          tsMs: Number.isFinite(tsMs) ? tsMs : undefined,
+          source: "github_data_provider",
+          assetType: tick.assetType,
+        });
+
         // Fold into persistent candle buffer
         try {
-          forexDataService.appendTick(norm, price);
+          forexDataService.appendTick(norm, price, {
+            bid,
+            ask,
+            volume: _volume,
+            tsMs: Number.isFinite(tsMs) ? tsMs : undefined,
+          });
         } catch (bufErr) {
           logger.debug("[TickIngestion] Candle buffer append failed", {
             symbol: norm,
@@ -583,6 +605,7 @@ export class LiveTickIngestionService {
         source: `${spot.source}:live`,
         assetType: symbolRegistry.getAssetSubType(symbol),
       };
+      const tickTsMs = Date.parse(tick.timestamp);
 
       // Broadcast strict live tick to WebSocket clients
       this.wsService.broadcastLiveTick(tick);
@@ -591,16 +614,35 @@ export class LiveTickIngestionService {
       realtimeTickBuffer.append(symbol, liveMid, {
         bid: tick.bid,
         ask: tick.ask,
+        volume: tick.volume,
+        tsMs: Number.isFinite(tickTsMs) ? tickTsMs : undefined,
         source: spot.source,
       });
 
       // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
       liveTickSignalDispatcher.enqueue(symbol);
 
+      // Coalesced Redis snapshot for the all-pairs market feed.
+      marketSnapshotService.recordTick({
+        symbol,
+        price: liveMid,
+        bid: tick.bid,
+        ask: tick.ask,
+        volume: tick.volume,
+        tsMs: Number.isFinite(tickTsMs) ? tickTsMs : undefined,
+        source: tick.source,
+        assetType: tick.assetType,
+      });
+
       // Fold into the persistent multi-timeframe candle buffer (non-fatal on
       // failure). PO not covering = this authoring is a genuine 1s bootstrapper.
       try {
-        forexDataService.appendTick(symbol, liveMid);
+        forexDataService.appendTick(symbol, liveMid, {
+          bid: tick.bid,
+          ask: tick.ask,
+          volume: tick.volume,
+          tsMs: Number.isFinite(tickTsMs) ? tickTsMs : undefined,
+        });
       } catch (bufErr) {
         logger.debug("[TickIngestion] Candle buffer append failed", {
           symbol,
@@ -825,20 +867,38 @@ export class LiveTickIngestionService {
     timestamp?: string,
     assetType?: string,
     diag?: { seq?: number; tsUtc?: number; receivedUtcMs?: number },
+    quote?: { bid?: number; ask?: number; volume?: number },
   ): void {
     // Canonicalize the incoming symbol to the strict "/" whitelist format so a
     // Pocket Option tick ("EURUSD", "USDJPY", "EUR-USD") lands on the SAME
-    // symbol the chart, candle buffers and prediction pipeline index by —
+    // symbol the chart, candle buffers and prediction pipeline index by -
     // otherwise every PO pair would fork into a disconnected symbol/candle.
     const norm = forexDataService.toCanonicalSymbol(symbol || "");
     if (!norm || !Number.isFinite(price) || price <= 0) return;
 
+    const rawBid =
+      Number.isFinite(quote?.bid) && (quote?.bid as number) > 0
+        ? (quote!.bid as number)
+        : undefined;
+    const rawAsk =
+      Number.isFinite(quote?.ask) && (quote?.ask as number) > 0
+        ? (quote!.ask as number)
+        : undefined;
+    const crossedBook =
+      rawBid !== undefined && rawAsk !== undefined && rawAsk < rawBid;
+    const bid = crossedBook ? undefined : rawBid;
+    const ask = crossedBook ? undefined : rawAsk;
+    const volume =
+      Number.isFinite(quote?.volume) && (quote?.volume as number) >= 0
+        ? (quote!.volume as number)
+        : 0;
+
     // Route genuine Pocket Option prices to the authoritative PO cache so the
     // whole platform (price, candles, targets) consumes the SSOT value when it
-    // is fresh — achieving PO parity for covered pairs.
+    // is fresh - achieving PO parity for covered pairs.
     // (`isPo` is declared below once, right before the tick payload is built.)
     if ((source || "").toLowerCase() === "pocket_option") {
-      forexDataService.setPocketOptionPrice(norm, price);
+      forexDataService.setPocketOptionPrice(norm, price, bid, ask);
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -878,7 +938,9 @@ export class LiveTickIngestionService {
     const tick: LiveMarketTick = {
       symbol: norm,
       price,
-      volume: 0,
+      ...(bid !== undefined ? { bid } : {}),
+      ...(ask !== undefined ? { ask } : {}),
+      volume,
       timestamp:
         resolvedTs ?? this.nextTickTimestamp(norm, Date.now()),
       source: isPo ? "pocket_option" : source || "pocket_option",
@@ -902,22 +964,47 @@ export class LiveTickIngestionService {
         : {}),
     };
 
+    const tickTsMs = Date.parse(tick.timestamp);
+
     // Broadcast strict live tick to WebSocket clients (symbol room).
     this.wsService.broadcastLiveTick(tick);
 
     // Fold into the high-frequency real-tick ring (tick-quant signal path).
-    // No bid/ask arms are passed here: the Pocket Option OTC feed exposes no
-    // real order book, so we refuse to fabricate a zero-spread quote. The
-    // bidAskPressure micro-factor therefore honestly reads neutral (no_book)
-    // instead of pretending there is market depth we do not actually have.
-    realtimeTickBuffer.append(norm, price, { source: tick.source });
+    // Bid/ask/volume are forwarded ONLY when the bridge supplied real values;
+    // an arm-less PO mid print stays an honest no-book print.
+    realtimeTickBuffer.append(norm, price, {
+      ...(bid !== undefined ? { bid } : {}),
+      ...(ask !== undefined ? { ask } : {}),
+      volume,
+      tsMs: Number.isFinite(tickTsMs) ? tickTsMs : undefined,
+      source: tick.source,
+    });
 
     // Arm the live-quant /tick-signal forwarder (coalesced, no drops)
     liveTickSignalDispatcher.enqueue(norm);
 
-    // Fold into the persistent candle buffer (non-fatal on failure).
+    // Coalesced Redis snapshot: latest bid/ask/spread/volume/timestamp metrics
+    // per symbol, written off the hot path (never awaits Redis inline).
+    marketSnapshotService.recordTick({
+      symbol: norm,
+      price,
+      bid,
+      ask,
+      volume,
+      tsMs: Number.isFinite(tickTsMs) ? tickTsMs : undefined,
+      source: tick.source,
+      assetType: tick.assetType,
+    });
+
+    // Fold into the persistent candle buffer (non-fatal on failure) using the
+    // Pocket Option server timestamp so M1/M20 buckets stay on the PO grid.
     try {
-      forexDataService.appendTick(norm, price);
+      forexDataService.appendTick(norm, price, {
+        bid,
+        ask,
+        volume,
+        tsMs: Number.isFinite(tickTsMs) ? tickTsMs : undefined,
+      });
     } catch (bufErr) {
       logger.debug("[TickIngestion] PO candle buffer append failed", {
         symbol: norm,

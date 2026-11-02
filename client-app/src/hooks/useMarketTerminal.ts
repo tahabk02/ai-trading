@@ -18,6 +18,24 @@ import { isTier, type TierSelection } from "@/lib/signalTiers";
 // slow /multi-predict can never overwrite a newer refresh's verdicts.
 const REFRESH_DEBOUNCE_MS = 700;
 
+// ── REACTIVE SYNC (WS primary, REST fallback) ──
+// The 1Hz `market_quotes` WS beat is the primary transport. A tunnel / proxy /
+// half-open socket can drop that beat while the REST API stays perfectly
+// healthy, which used to leave the grid frozen on the last snapshot forever.
+// The fallback loop below is the safety net: while the WS beat is stale or the
+// socket is down, pull the same enriched snapshot over REST every 2s. The
+// cadence sits inside the requested 1–3s window and the in-flight guard keeps
+// a slow request from stacking.
+const FALLBACK_POLL_MS = 2_000;
+/** A WS snapshot older than this means the beat is not healthy. */
+const WS_QUOTE_STALE_MS = 3_500;
+/**
+ * Heavier horizon refresh fallback. If neither the 1Hz `live_quant_signal`
+ * feed nor a `/multi-predict` batch has landed for this long, ask the engine
+ * for one debounced batch so the grid still gets verdicts over REST alone.
+ */
+const PREDICT_FALLBACK_MS = 15_000;
+
 /**
  * useMarketTerminal — WebSocket orchestrator for the all-pairs market grid.
  *
@@ -40,6 +58,28 @@ export function useMarketTerminal() {
     useMarketTerminalStore.getState().globalHorizon,
   );
   const latestSymbolsRef = useRef<string[]>(ALL_MARKET_SYMBOLS);
+
+  // Reactive-sync clocks. `lastWsQuoteAtRef` is written ONLY by the WS
+  // handler, so a REST fallback pull can never mask a dead WS beat.
+  const lastWsQuoteAtRef = useRef(0);
+  const lastVerdictAtRef = useRef(0);
+  const lastPredictRequestAtRef = useRef(0);
+  const pollInFlightRef = useRef(false);
+
+  const pullQuotes = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    try {
+      const resp = await apiClient.getQuotes();
+      if (Array.isArray(resp?.quotes) && resp.quotes.length > 0) {
+        useMarketTerminalStore.getState().setQuotes(resp.quotes);
+      }
+    } catch {
+      /* WS remains primary; a failed fallback must stay silent */
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, []);
 
   // ── HYDRATION SAFETY (Confidence Filter — P1-2026-09-24) ──
   // The store initializes DETERMINISTICALLY to the engine default (T1 / 95.0%)
@@ -72,11 +112,13 @@ export function useMarketTerminal() {
 
     const onMarketQuotes = (payload: any) => {
       if (!payload || !Array.isArray(payload.quotes)) return;
+      lastWsQuoteAtRef.current = Date.now();
       store().setQuotes(payload.quotes);
     };
 
     const onLiveQuantSignal = (payload: any) => {
       if (!payload?.symbol) return;
+      lastVerdictAtRef.current = Date.now();
       const direction =
         payload.signalType === "BUY" || payload.signalType === "SELL"
           ? payload.signalType
@@ -159,6 +201,7 @@ export function useMarketTerminal() {
       // choice scored-only AT THE SOURCE, so the grid renders honest
       // executable state without any client-side guesswork.
       const minTier = useMarketTerminalStore.getState().minTier;
+      lastPredictRequestAtRef.current = Date.now();
       // Mark the batch symbols as "pending" so cards show a refreshing state.
       // ONE store write for the whole batch (was 26 setPrediction calls,
       // each spreading the full predictions record and notifying every card).
@@ -190,6 +233,48 @@ export function useMarketTerminal() {
         });
     }, REFRESH_DEBOUNCE_MS);
   }, []);
+
+  // ── REACTIVE SYNC LOOP ──
+  // WS is primary; this loop only fills the gaps. Every tick:
+  //   • quotes  → REST pull when the 1Hz WS beat is stale (or the socket is
+  //               down) and the tab is visible.
+  //   • verdicts → one debounced /multi-predict batch when NEITHER the live
+  //               signal feed NOR a batch has landed for PREDICT_FALLBACK_MS.
+  // The interval is torn down on unmount / dependency change, so a route
+  // change can never leave a background poller running.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const tick = () => {
+      const now = Date.now();
+      const wsFresh =
+        connected &&
+        lastWsQuoteAtRef.current > 0 &&
+        now - lastWsQuoteAtRef.current < WS_QUOTE_STALE_MS;
+      if (document.visibilityState !== "hidden" && !wsFresh) {
+        void pullQuotes();
+      }
+
+      const verdictFresh =
+        now - Math.max(lastVerdictAtRef.current, lastPredictRequestAtRef.current) <
+        PREDICT_FALLBACK_MS;
+      if (document.visibilityState !== "hidden" && !verdictFresh) {
+        latestSymbolsRef.current = ALL_MARKET_SYMBOLS;
+        scheduleRefresh();
+      }
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+
+    const id = setInterval(tick, FALLBACK_POLL_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [connected, pullQuotes, scheduleRefresh]);
 
   const setGlobalHorizon = useCallback(
     (horizon: HorizonMinutes) => {

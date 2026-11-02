@@ -16,6 +16,9 @@ const PO_TIMEFRAME_SET = [
   "S5",
   "S10",
   "S15",
+  // Pocket Option's "M20" channel is 20 SECONDS. The server grid uses the
+  // canonical S20 code; "20s"/"m20" resolve through canonicalTimeframe().
+  "S20",
   "S30",
   "M1",
   "M2",
@@ -42,7 +45,7 @@ describe("QUICK FIX configuration contract", () => {
     // The aggregator grid MUST equal the confirmed PO ladder,
     // element-for-element and in order.
     expect(SERVER_CANDLE_TFS).toEqual([...PO_TIMEFRAME_SET]);
-    expect(SERVER_CANDLE_TFS).toHaveLength(16);
+    expect(SERVER_CANDLE_TFS).toHaveLength(17);
   });
 
   it("test_epipe_is_ignored", () => {

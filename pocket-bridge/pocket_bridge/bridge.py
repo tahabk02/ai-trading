@@ -399,13 +399,57 @@ class AssetsNotReadyError(Exception):
         self.detail = detail
 
 
+_SOCKETIO_ENVELOPE_RE = re.compile(r"^\s*\d+(?:-\d+)?-?")
+
+
+def coerce_tick_payload(payload: object) -> Optional[Dict]:
+    """Return a tick dict from every frame shape the SDK/transport can emit.
+
+    Pocket Option wraps payloads in Socket.IO envelopes (``42[...]``,
+    ``451-["updateAssets",...]``) and some SDK builds surface raw ``bytes``
+    instead of already-decoded dicts. Dropping those frames silently would
+    zero-out live ticks, so normalise here (binary + text + dict) before
+    validation. Non-tick frames (e.g. ``updateAssets``) return ``None`` and are
+    ignored by the caller, never misparsed as a quote.
+    """
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, (bytes, bytearray, memoryview)):
+        try:
+            payload = bytes(payload).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - undecodable frame is a drop
+            return None
+    if not isinstance(payload, str):
+        return None
+    text = payload.strip()
+    if not text:
+        return None
+    match = _SOCKETIO_ENVELOPE_RE.match(text)
+    if match:
+        text = text[match.end():].lstrip()
+    if not text or text[0] not in "[{":
+        return None
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
 def parse_quote(
-    payload: Dict,
+    payload: object,
     now_ms: Optional[int] = None,
     validate_window: bool = True,
 ) -> Optional[Dict[str, object]]:
     """Normalize and validate one Pocket Option quote in UTC milliseconds."""
-    if not isinstance(payload, dict):
+    payload = coerce_tick_payload(payload)
+    if payload is None:
         return None
 
     received_ms = now_ms if now_ms is not None else time.time_ns() // 1_000_000
@@ -460,14 +504,16 @@ def parse_quote(
     }
 
 
-def parse_tick(payload: Dict, now_ms: Optional[int] = None) -> Optional[Tuple[int, float]]:
-    """Extract ``(timestamp_ms, price)`` from a raw PO tick dict.
+def parse_tick(payload: object, now_ms: Optional[int] = None) -> Optional[Tuple[int, float]]:
+    """Extract ``(timestamp_ms, price)`` from a raw PO tick frame.
 
+    Accepts the same dict/bytes/Socket.IO-text shapes as :func:`parse_quote`.
     The library's raw ticks carry either ``close``/``price`` and
     ``timestamp``/``time`` keys. Values are float prices and epoch
     milliseconds. Returns ``None`` if the tick cannot be parsed.
     """
-    if not isinstance(payload, dict) or payload.get("timestamp", payload.get("time")) is None:
+    payload = coerce_tick_payload(payload)
+    if payload is None or payload.get("timestamp", payload.get("time")) is None:
         return None
     quote = parse_quote(payload, now_ms, validate_window=now_ms is not None)
     if quote is None:
@@ -615,7 +661,7 @@ class PocketOptionBridge:
 
     @property
     def is_connected(self) -> bool:
-        return self.client is not None and bool(self.client.is_connected())
+        return self._client_connected(self.client)
 
     def health_payload(self) -> Dict:
         ticks = sum(self._tick_count.values())
@@ -640,11 +686,63 @@ class PocketOptionBridge:
                 self._subscribed_at.get(symbol, 0.0),
             )) >= stale_window
         ]
+        primary_streaming = (
+            self._primary_symbol is not None
+            and self._primary_symbol in self._subs
+        )
+        live_streams_open = len(self._reader_clients) + (
+            1 if primary_streaming else 0
+        )
+        stream_states = {
+            symbol: (
+                "streaming"
+                if symbol in self._subs
+                else "capped"
+                if self._skipped.get(symbol) == "live_stream_cap"
+                else "skipped"
+                if symbol in self._skipped
+                else "pending"
+            )
+            for symbol in sorted(
+                set(self._assets)
+                | set(self._subs)
+                | set(self._reader_symbols)
+                | set(self._skipped)
+            )
+        }
+        streaming_sources: Dict[str, Dict[str, object]] = {}
+        connection_states: Dict[str, str] = {}
+        for symbol in sorted(self._subs):
+            primary = self._is_primary_symbol(symbol)
+            client = self.client if primary else self._reader_clients.get(symbol)
+            connected = self._client_connected(client)
+            receipt = self._last_tick_ts.get(symbol)
+            streaming_sources[symbol] = {
+                "asset": self._assets.get(symbol),
+                "client": "primary" if primary else "dedicated",
+                "connected": connected,
+                "ticks": self._tick_count.get(symbol, 0),
+                "last_tick_age_s": (
+                    round(max(0.0, now - receipt), 1)
+                    if receipt is not None
+                    else None
+                ),
+                "stalled": symbol in stalled,
+            }
+            connection_states[symbol] = (
+                "connected" if connected else "disconnected"
+            )
+        for symbol, client in sorted(self._reader_clients.items()):
+            connection_states.setdefault(
+                symbol,
+                "connected" if self._client_connected(client) else "disconnected",
+            )
         return {
             "status": status,
             "ssid_present": self.has_credential,
             "ssid_format": self.settings.ssid_format,
             "ssid_source": self.settings.ssid_source,
+            "ssid_sha256": self.settings.ssid_fingerprint,
             "last_tick_ts": last_tick_ts,
             "last_tick_age_s": (
                 round(max(0.0, now - tick_receipt), 1)
@@ -656,6 +754,27 @@ class PocketOptionBridge:
             "session_file_present": bool(self.session.exists),
             "is_optimized": bool(self.settings.auth.get("isOptimized")),
             "symbols": sorted(self._subs),
+            "symbols_configured": sorted(self._assets),
+            "symbols_streaming": sorted(self._subs),
+            "active_assets_loaded": len(self._available_assets or set()),
+            "active_assets_ready": self._assets_ready,
+            "live_stream_limit": MAX_LIVE_STREAMS,
+            "live_streams_open": live_streams_open,
+            "live_streams_available": max(
+                0, MAX_LIVE_STREAMS - live_streams_open
+            ),
+            "reader_clients_open": len(self._reader_clients),
+            "reader_clients_connected": sum(
+                1
+                for client in self._reader_clients.values()
+                if self._client_connected(client)
+            ),
+            "client_connected": self.is_connected,
+            "stream_states": stream_states,
+            "streaming_sources": streaming_sources,
+            "connection_states": connection_states,
+            "skipped_symbols": dict(sorted(self._skipped.items())),
+            "ticks_by_symbol": dict(sorted(self._tick_count.items())),
             "stalled_symbols": sorted(stalled),
             "proxy_enabled": bool(self.settings.proxy_url),
             "proxy": mask_proxy_url(self.settings.proxy_url),

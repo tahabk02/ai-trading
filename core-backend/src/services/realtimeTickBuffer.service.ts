@@ -73,6 +73,7 @@ interface TickEntry {
   tsMs: number;
   bid?: number;
   ask?: number;
+  volume?: number;
   /**
    * True when this entry is a HELD (previously observed) real print re-pended
    * for continuity, not a genuinely fresh quote. Stale entries keep the tape
@@ -99,6 +100,8 @@ export interface SymbolQuoteSnapshot {
   bid: number | null;
   ask: number | null;
   spread: number | null;
+  /** Real traded volume carried by the newest tick, when the feed supplies it. */
+  volume: number | null;
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
@@ -229,6 +232,7 @@ class RealtimeTickBufferService {
       tsMs?: number;
       bid?: number;
       ask?: number;
+      volume?: number;
       stale?: boolean;
       source?: string;
     },
@@ -243,6 +247,7 @@ class RealtimeTickBufferService {
       tsMs: now,
       bid: opts?.bid,
       ask: opts?.ask,
+      volume: opts?.volume,
       ...(opts?.stale ? { stale: true } : {}),
       ...(opts?.source ? { source: opts.source } : {}),
     });
@@ -527,6 +532,10 @@ class RealtimeTickBufferService {
       bid: bid != null && bid > 0 ? bid : null,
       ask: ask != null && ask > 0 ? ask : null,
       spread: bid != null && ask != null && ask > bid ? ask - bid : null,
+      volume:
+        Number.isFinite(last.volume) && (last.volume as number) >= 0
+          ? (last.volume as number)
+          : null,
       tickCount: this.tickCounts.get(norm) ?? 0,
       lastTickAt: this.lastTickAt.get(norm) ?? null,
       ageMs: this.getLatestAgeMs(norm),

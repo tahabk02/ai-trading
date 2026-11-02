@@ -9,7 +9,9 @@ import asyncio
 import json
 import time
 
-from pocket_bridge.bridge import PocketOptionBridge
+import pytest
+
+from pocket_bridge.bridge import PocketOptionBridge, ReaderCapReached
 from pocket_bridge.config import BridgeSettings
 from pocket_bridge.m20_engine import M20Engine
 
@@ -163,3 +165,21 @@ def test_releasing_one_reader_leaves_the_others_streaming(monkeypatch, tmp_path)
     assert bridge.client is control
     assert not control.disconnected
     assert "AUD/USD" in bridge._reader_clients
+
+
+def test_cap_exhaustion_keeps_extra_symbol_on_rest_fallback(tmp_path):
+    bridge = _bridge(tmp_path)
+    bridge._primary_symbol = "EUR/USD"
+    bridge._reader_clients = {
+        f"PAIR{i}/USD": _FakeClient("secondary") for i in range(6)
+    }
+
+    assert len(bridge._reader_clients) == 6
+    with pytest.raises(ReaderCapReached):
+        asyncio.run(bridge._ensure_reader_client("EUR/JPY"))
+
+    reply = asyncio.run(bridge.request_subscription("EUR/JPY"))
+
+    assert reply["status"] == "subscribe_error"
+    assert "REST fallback" in reply["error"]
+    assert "EUR/JPY" not in bridge._reader_clients

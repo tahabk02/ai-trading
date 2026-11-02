@@ -19,6 +19,7 @@ import asyncio
 import json
 import socket
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -140,3 +141,70 @@ def test_bridge_health_reports_ssid():
     assert body["last_tick_ts"] is None
     assert body["ticks_received"] == 0
     assert body["candles_emitted"] == 0
+
+
+def test_health_reports_live_stream_cap_and_symbol_states():
+    symbols = [f"PAIR{i}/USD" for i in range(8)]
+    settings = BridgeSettings(symbols=symbols)
+    bridge = PocketOptionBridge(settings, M20Engine(symbols))
+
+    streaming = symbols[:7]
+    bridge._assets = {symbol: symbol for symbol in symbols}
+    bridge._subs = {symbol: object() for symbol in streaming}
+    bridge._primary_symbol = streaming[0]
+    bridge._reader_clients = {symbol: object() for symbol in streaming[1:]}
+    bridge._skipped = {symbols[7]: "live_stream_cap"}
+    bridge._tick_count = {streaming[0]: 4}
+
+    body = bridge.health_payload()
+
+    assert body["live_stream_limit"] == 7
+    assert body["live_streams_open"] == 7
+    assert body["live_streams_available"] == 0
+    assert body["reader_clients_open"] == 6
+    assert body["symbols_streaming"] == streaming
+    assert body["symbols_configured"] == symbols
+    assert body["stream_states"][streaming[0]] == "streaming"
+    assert body["stream_states"][symbols[7]] == "capped"
+    assert body["skipped_symbols"] == {symbols[7]: "live_stream_cap"}
+    assert body["ticks_by_symbol"] == {streaming[0]: 4}
+
+
+class _ConnectedClient:
+    def is_connected(self):
+        return True
+
+
+def test_health_reports_streaming_sources_and_connection_states():
+    symbols = ["EUR/USD", "USD/JPY"]
+    settings = BridgeSettings(
+        ssid='42["auth",{"session":"session-value","uid":123}]',
+        symbols=symbols,
+    )
+    bridge = PocketOptionBridge(settings, M20Engine(symbols))
+    bridge.client = _ConnectedClient()
+    bridge._assets = {symbol: f"{symbol.replace('/', '')}_otc" for symbol in symbols}
+    bridge._subs = {symbol: object() for symbol in symbols}
+    bridge._primary_symbol = symbols[0]
+    bridge._reader_clients = {symbols[1]: _ConnectedClient()}
+    bridge._tick_count = {symbols[0]: 3}
+    bridge._last_tick_ts = {symbols[0]: time.time()}
+
+    body = bridge.health_payload()
+
+    assert body["ssid_sha256"] == settings.ssid_fingerprint
+    assert body["client_connected"] is True
+    assert body["reader_clients_connected"] == 1
+    assert body["connection_states"] == {
+        symbols[0]: "connected",
+        symbols[1]: "connected",
+    }
+    primary_source = body["streaming_sources"][symbols[0]]
+    assert primary_source["asset"] == "EURUSD_otc"
+    assert primary_source["client"] == "primary"
+    assert primary_source["connected"] is True
+    assert primary_source["ticks"] == 3
+    assert primary_source["last_tick_age_s"] >= 0.0
+    assert primary_source["stalled"] is False
+    assert body["streaming_sources"][symbols[1]]["client"] == "dedicated"
+    assert body["streaming_sources"][symbols[1]]["connected"] is True

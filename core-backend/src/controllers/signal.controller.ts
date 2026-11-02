@@ -8,6 +8,7 @@ import { symbolRegistry } from "../services/symbolRegistry.service";
 import { forexDataService, ForexCandle } from "../services/forexData.service";
 import { websocketService } from "../services/websocket.service";
 import { realtimeTickBuffer } from "../services/realtimeTickBuffer.service";
+import { realtimeCandleAggregatorService } from "../services/realtimeCandleAggregator.service";
 import {
   engineCircuitOpen,
   recordEngineFailure,
@@ -1255,12 +1256,15 @@ export const predictSignal = async (req: Request, res: Response) => {
   // bid_ask_pressure factor is computed from genuine quoted arms (never a
   // proxy). Zero synthetic values are forwarded.
   const latestSpread = realtimeTickBuffer.getLatestSpread(normalizedSymbol);
+  const intraCandle =
+    realtimeCandleAggregatorService.getIntraCandleFeatures(normalizedSymbol, "M1");
   const payload = {
     symbol: normalizedSymbol,
     timeframe: engineDispatchTimeframe,
     candles: mapCandlesToAiFormat(bars),
     dataSource: "forex_otc",
     live_price: Number(effectiveLivePrice),
+    ...(intraCandle ? { intra_candle: intraCandle } : {}),
     bid:
       Number.isFinite(latestSpread.bid) && (latestSpread.bid as number) > 0
         ? Number(latestSpread.bid)

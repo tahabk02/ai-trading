@@ -7,6 +7,7 @@ import { secrets } from "../config/secrets";
 import axios from "axios";
 import { forexDataService } from "../services/forexData.service";
 import { realtimeTickBuffer } from "../services/realtimeTickBuffer.service";
+import { marketSnapshotService } from "../services/marketSnapshot.service";
 import { pocketOptionBridgeService } from "../services/pocketOptionBridge.service";
 import { poAuthManager } from "../services/poAuthManager";
 import { orderbookHealth } from "../controllers/orderbook.controller";
@@ -142,6 +143,12 @@ export const rootHealthRouter: Router = (() => {
   });
   r.get("/feed", (_req: Request, res: Response) => {
     res.json(buildFeedHealthSnapshot());
+  });
+  r.get("/market", (_req: Request, res: Response) => {
+    res.json({
+      ...marketSnapshotService.getMetrics(),
+      timestamp: new Date().toISOString(),
+    });
   });
   r.get("/orderbook", (_req: Request, res: Response) => {
     res.json({

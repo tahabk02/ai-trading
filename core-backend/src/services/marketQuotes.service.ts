@@ -29,6 +29,7 @@ export interface MarketQuote {
   bid: number | null;
   ask: number | null;
   spread: number | null;
+  volume: number | null;
   tickCount: number;
   lastTickAt: string | null;
   ageMs: number | null;
@@ -111,6 +112,7 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
         bid: q.bid,
         ask: q.ask,
         spread: q.spread,
+        volume: q.volume,
         tickCount: q.tickCount,
         lastTickAt: q.lastTickAt,
         ageMs: q.ageMs,
