@@ -2295,6 +2295,12 @@ class PocketOptionBridge:
         self._transient_connect_retries = 0
         logger.info("AUTH_SUCCESS uid=%s isDemo=%s", mask_uid(self.settings.uid), self.settings.is_demo)
         logger.info("auth_response=authenticated and assets_ready pending")
+        
+        # FIX: Transition to "connected" immediately upon successful auth.
+        # This prevents the "PO OFFLINE" (connecting) state in the backend 
+        # while we wait for the asset registry to populate.
+        await self._set_status("connected", "authenticated, loading asset registry...")
+
         # Load the authoritative asset list NOW, while the client is
         # guaranteed authenticated, so no later active_assets() call can hit
         # the "Uninitialized, Assets not initialized yet" transient — every
@@ -2309,10 +2315,7 @@ class PocketOptionBridge:
                 "(%s); readers will retry instead of subscribing",
                 self._assets_error or "empty asset list",
             )
-            await self._set_status(
-                "connecting",
-                "broker asset registry not initialised — retrying",
-            )
+            # We keep status as "connected" but do not mark as "ready".
             return
         await self._set_status("connected")
         await self._mark_ready()
