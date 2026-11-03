@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -58,14 +59,42 @@ from .m20_engine import M20Engine, M20Candle
 logger = logging.getLogger("pocket_bridge.bridge")
 DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket"
 
+def _env_int_min(name: str, default: int, minimum: int = 1) -> int:
+    """Read a positive integer tuning knob without breaking module import."""
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float_min(name: str, default: float, minimum: float = 0.0) -> float:
+    """Read a non-negative float tuning knob without breaking module import."""
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 #: BinaryOptionsToolsV2 0.2.14 can only stream ONE asset per client: a second
 #: concurrent ``subscribe_symbol`` starves every stream on that client (both
-#: go silent). The bridge therefore gives every symbol its own client and caps
-#: how many handshakes may overlap, so opening 17 symbols does not look like a
-#: connection burst to Pocket Option (which then times out the handshakes).
-READER_CONNECT_CONCURRENCY = 3
-#: Minimum spacing between new reader-client handshakes (seconds).
-READER_CONNECT_STAGGER_SECONDS = 0.75
+#: go silent). The bridge therefore gives every symbol its own client. Opening
+#: the full 30-pair budget at once looks like a connection burst to Pocket
+#: Option (which then times out handshakes), so starts are serialised by the
+#: stagger lock below; this semaphore only bounds how many handshakes may
+#: overlap while ``wait_for_assets`` is in flight.
+READER_CONNECT_CONCURRENCY = _env_int_min(
+    "POCKET_BRIDGE_READER_CONCURRENCY", 2
+)
+#: Base spacing between new reader-client handshakes (seconds).
+READER_CONNECT_STAGGER_SECONDS = _env_float_min(
+    "POCKET_BRIDGE_READER_STAGGER_SECS", 1.0
+)
+#: Extra randomized spacing added to every handshake (0..N seconds). Jitter
+#: prevents 30 reconnects from re-synchronising into a single burst after a
+#: gateway/timeout event.
+READER_CONNECT_JITTER_SECONDS = _env_float_min(
+    "POCKET_BRIDGE_READER_STAGGER_JITTER_SECS", 0.5
+)
 
 
 
@@ -587,6 +616,11 @@ class PocketOptionBridge:
         #: SDK 0.2.14 cannot multiplex subscriptions on one connection.
         self._reader_clients: Dict[str, object] = {}
         self._reader_client_locks: Dict[str, asyncio.Lock] = {}
+        #: symbols with a handshake IN FLIGHT (reserved budget slots). Counted
+        #: against MAX_LIVE_STREAMS so two concurrent arms cannot overshoot.
+        self._reader_pending: set = set()
+        #: serialises slot reservation + LRU eviction (not the handshake itself).
+        self._reader_slot_lock = asyncio.Lock()
         self._reader_connect_sem = asyncio.Semaphore(READER_CONNECT_CONCURRENCY)
         self._reader_connect_lock = asyncio.Lock()
         self._last_reader_connect_at: float = 0.0
@@ -598,6 +632,10 @@ class PocketOptionBridge:
         self._assets_ready = False
         #: configured symbols permanently skipped (broker has no matching asset).
         self._skipped: Dict[str, str] = {}
+        #: symbols whose reader was recycled to free a live-stream slot (LRU).
+        #: They are NOT dead tokens: they remain fully configured and can be
+        #: re-armed by a dynamic request. Surfaced as BUFFERED, never PO OFFLINE.
+        self._buffered: set = set()
         #: callbacks: on_tick(payload_dict), on_candle(candle), on_status(status)
         self.on_tick = None
         self.on_candle = None
@@ -690,13 +728,17 @@ class PocketOptionBridge:
             self._primary_symbol is not None
             and self._primary_symbol in self._subs
         )
-        live_streams_open = len(self._reader_clients) + (
-            1 if primary_streaming else 0
+        live_streams_open = (
+            len(self._reader_clients)
+            + len(self._reader_pending)
+            + (1 if primary_streaming else 0)
         )
         stream_states = {
             symbol: (
                 "streaming"
                 if symbol in self._subs
+                else "buffered"
+                if symbol in self._buffered
                 else "capped"
                 if self._skipped.get(symbol) == "live_stream_cap"
                 else "skipped"
@@ -708,6 +750,7 @@ class PocketOptionBridge:
                 | set(self._subs)
                 | set(self._reader_symbols)
                 | set(self._skipped)
+                | set(self._buffered)
             )
         }
         streaming_sources: Dict[str, Dict[str, object]] = {}
@@ -759,11 +802,16 @@ class PocketOptionBridge:
             "active_assets_loaded": len(self._available_assets or set()),
             "active_assets_ready": self._assets_ready,
             "live_stream_limit": MAX_LIVE_STREAMS,
+            "live_stream_budget": MAX_LIVE_STREAMS,
             "live_streams_open": live_streams_open,
             "live_streams_available": max(
                 0, MAX_LIVE_STREAMS - live_streams_open
             ),
+            "live_streams_recyclable": max(
+                0, len(self._reader_clients)
+            ),
             "reader_clients_open": len(self._reader_clients),
+            "reader_clients_pending": len(self._reader_pending),
             "reader_clients_connected": sum(
                 1
                 for client in self._reader_clients.values()
@@ -774,6 +822,7 @@ class PocketOptionBridge:
             "streaming_sources": streaming_sources,
             "connection_states": connection_states,
             "skipped_symbols": dict(sorted(self._skipped.items())),
+            "buffered_symbols": sorted(self._buffered),
             "ticks_by_symbol": dict(sorted(self._tick_count.items())),
             "stalled_symbols": sorted(stalled),
             "proxy_enabled": bool(self.settings.proxy_url),
@@ -1127,8 +1176,27 @@ class PocketOptionBridge:
     def _is_primary_symbol(self, symbol: str) -> bool:
         return self._primary_symbol is not None and symbol == self._primary_symbol
 
+    def _reader_activity_ts(self, symbol: str) -> float:
+        """Last meaningful activity for LRU recycling (tick or subscription)."""
+        return max(
+            self._last_tick_ts.get(symbol, 0.0),
+            self._subscribed_at.get(symbol, 0.0),
+        )
+
+    def _has_evictable_reader(self, symbol: str) -> bool:
+        """True when a secondary reader can be recycled to make room."""
+        return any(
+            candidate != symbol and not self._is_primary_symbol(candidate)
+            for candidate in self._reader_clients
+        )
+
     def _live_stream_slots_available(self, symbol: str) -> bool:
-        """True when this symbol may stream without exceeding the proven cap."""
+        """True when this symbol may stream within the connection budget.
+
+        At the boundary a stale secondary can be recycled (LRU), so a dynamic
+        request is not permanently rejected just because every slot is
+        momentarily in use. Only a truly un-evictable budget raises.
+        """
         if (
             self._is_primary_symbol(symbol)
             or symbol in self._reader_clients
@@ -1136,7 +1204,51 @@ class PocketOptionBridge:
         ):
             return True
         max_secondaries = max(0, MAX_LIVE_STREAMS - 1)
-        return len(self._reader_clients) < max_secondaries
+        reserved = len(self._reader_clients) + len(self._reader_pending)
+        if reserved < max_secondaries:
+            return True
+        return self._has_evictable_reader(symbol)
+
+    async def _evict_lru_reader(self, exclude: str) -> Optional[str]:
+        """Recycle the least-recently-active secondary reader for one slot.
+
+        Never evicts the primary/control client or the symbol currently being
+        armed. The victim is cancelled + disconnected, then parked in
+        ``_buffered`` so the UI can render STREAM CAP / BUFFERED instead of
+        conflating a capacity decision with a dead token. Returns the evicted
+        symbol, or ``None`` when no candidate exists.
+        """
+        candidates = [
+            candidate
+            for candidate in self._reader_clients
+            if candidate != exclude and not self._is_primary_symbol(candidate)
+        ]
+        if not candidates:
+            return None
+        victim = min(candidates, key=self._reader_activity_ts)
+        task = self._reader_tasks.pop(victim, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._reader_symbols.discard(victim)
+        self._reader_pending.discard(victim)
+        self._subs.pop(victim, None)
+        self._subscribed_at.pop(victim, None)
+        self._skipped.pop(victim, None)
+        client = self._reader_clients.pop(victim, None)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001 - eviction is best-effort
+                pass
+        self._buffered.add(victim)
+        logger.info(
+            "READER_RECYCLED_LRU victim=%s new=%s open=%d budget=%d",
+            victim,
+            exclude,
+            len(self._reader_clients),
+            MAX_LIVE_STREAMS,
+        )
+        return victim
 
     @staticmethod
     def _build_client(payload: str, kwargs: Dict):
@@ -1172,49 +1284,69 @@ class PocketOptionBridge:
                 except Exception:  # noqa: BLE001 - best-effort teardown
                     pass
                 self._reader_clients.pop(symbol, None)
-            if not self._live_stream_slots_available(symbol):
-                raise ReaderCapReached(symbol, MAX_LIVE_STREAMS)
-            async with self._reader_connect_sem:
-                # Space handshakes out: a burst of 17 simultaneous auths made
-                # Pocket Option time out every one of them.
-                async with self._reader_connect_lock:
-                    elapsed = time.monotonic() - self._last_reader_connect_at
-                    wait = READER_CONNECT_STAGGER_SECONDS - elapsed
-                    if self._last_reader_connect_at and wait > 0:
-                        await asyncio.sleep(wait)
-                    self._last_reader_connect_at = time.monotonic()
-                self._check_dependency()
-                sdk_config, _urls = self._sdk_config()
-                client = self._build_client(
-                    self._auth_payload(), {"config": sdk_config}
-                )
-                deadline = (
-                    max(
-                        self.settings.connect_timeout,
-                        self.settings.po_init_timeout,
+            async with self._reader_slot_lock:
+                if not self._live_stream_slots_available(symbol):
+                    raise ReaderCapReached(symbol, MAX_LIVE_STREAMS)
+                # Budget boundary: recycle the least-recently-active secondary
+                # instead of permanently parking this pair on the REST tier.
+                max_secondaries = max(0, MAX_LIVE_STREAMS - 1)
+                reserved = len(self._reader_clients) + len(self._reader_pending)
+                if reserved >= max_secondaries:
+                    if await self._evict_lru_reader(symbol) is None:
+                        raise ReaderCapReached(symbol, MAX_LIVE_STREAMS)
+                # Reserve the slot BEFORE the handshake so concurrent arms
+                # cannot both pass the budget check and overshoot 30.
+                self._reader_pending.add(symbol)
+            try:
+                async with self._reader_connect_sem:
+                    # Space handshakes out: an unthrottled burst makes Pocket
+                    # Option time out every one of them. Jitter keeps 30 readers
+                    # from re-synchronising into a single burst after a reconnect.
+                    async with self._reader_connect_lock:
+                        interval = (
+                            READER_CONNECT_STAGGER_SECONDS
+                            + random.uniform(0.0, READER_CONNECT_JITTER_SECONDS)
+                        )
+                        elapsed = time.monotonic() - self._last_reader_connect_at
+                        wait = interval - elapsed
+                        if self._last_reader_connect_at and wait > 0:
+                            await asyncio.sleep(wait)
+                        self._last_reader_connect_at = time.monotonic()
+                    self._check_dependency()
+                    sdk_config, _urls = self._sdk_config()
+                    client = self._build_client(
+                        self._auth_payload(), {"config": sdk_config}
                     )
-                    + CONNECT_DEADLINE_GRACE
-                )
-                try:
-                    await asyncio.wait_for(
-                        client.wait_for_assets(timeout=deadline),
-                        timeout=deadline,
+                    deadline = (
+                        max(
+                            self.settings.connect_timeout,
+                            self.settings.po_init_timeout,
+                        )
+                        + CONNECT_DEADLINE_GRACE
                     )
-                except Exception:
                     try:
-                        await client.disconnect()
-                    except Exception:  # noqa: BLE001 - best-effort teardown
-                        pass
-                    raise
-                self._reader_clients[symbol] = client
-                logger.info(
-                    "READER_CLIENT_READY symbol=%s readers_open=%d",
-                    symbol, len(self._reader_clients),
-                )
-                return client
+                        await asyncio.wait_for(
+                            client.wait_for_assets(timeout=deadline),
+                            timeout=deadline,
+                        )
+                    except Exception:
+                        try:
+                            await client.disconnect()
+                        except Exception:  # noqa: BLE001 - best-effort teardown
+                            pass
+                        raise
+                    self._reader_clients[symbol] = client
+                    logger.info(
+                        "READER_CLIENT_READY symbol=%s readers_open=%d",
+                        symbol, len(self._reader_clients),
+                    )
+                    return client
+            finally:
+                self._reader_pending.discard(symbol)
 
     async def _release_reader_client(self, symbol: str) -> None:
         """Drop ONLY this symbol's client; other pairs keep streaming."""
+        self._reader_pending.discard(symbol)
         self._subs.pop(symbol, None)
         self._subscribed_at.pop(symbol, None)
         if self._is_primary_symbol(symbol):
@@ -1790,6 +1922,10 @@ class PocketOptionBridge:
             await self._set_status("connection_error", str(exc))
             return
         self._subs[symbol] = stream
+        # A successful (re)arm clears any prior capacity/skip annotation: this
+        # pair is streaming again, not buffered and not capped.
+        self._skipped.pop(symbol, None)
+        self._buffered.discard(symbol)
         # Anchor the stall watchdog to the moment THIS subscription went live:
         # a fresh subscribe must get a full stale window before it is recycled.
         self._subscribed_at[symbol] = time.time()
@@ -1979,6 +2115,10 @@ class PocketOptionBridge:
             self._assets[canonical] = asset
         base["asset"] = asset
         self._dynamic_symbols.add(canonical)
+        # A dynamic request is an explicit re-arm: clear any stale capacity
+        # annotation so the reader can claim a slot (possibly by LRU recycling).
+        self._skipped.pop(canonical, None)
+        self._buffered.discard(canonical)
         self._spawn_reader(canonical, asset)
         logger.info(
             "subscription push [%s] -> asset %s armed (dynamic reader started)",
@@ -2292,10 +2432,20 @@ class PocketOptionBridge:
         logger.info("dynamic subscription removed [%s]", canonical)
 
     def _start_static_readers(self) -> None:
-        """Spawn reader tasks for the configured startup pairs (idempotent)."""
+        """Spawn eager readers for the first ``MAX_LIVE_STREAMS`` pairs.
+
+        ``self._assets`` deliberately holds the FULL configured universe: the
+        stream budget bounds eager startup readers only, so a later dynamic
+        ``request_subscription`` can arm pair #N+1 by recycling an LRU reader.
+        """
         self._assets = self.settings.assets()
-        for symbol, asset in self._assets.items():
-            self._spawn_reader(symbol, asset) if symbol not in self._reader_symbols else None
+        for symbol in self.settings.static_symbols():
+            if symbol in self._reader_symbols:
+                continue
+            asset = self._assets.get(symbol)
+            if asset is None:
+                continue
+            self._spawn_reader(symbol, asset)
 
     def _rearm_dynamic_readers(self) -> None:
         """Re-spawn readers for symbols armed DYNAMICALLY by a client
@@ -2970,6 +3120,11 @@ class PocketOptionBridge:
                     "heartbeat_interval_s": self.settings.heartbeat_interval,
                     "keepalive_ok": keepalive_ok,
                     "symbols_subscribed": subscribed,
+                    # Capacity truth for the terminal: a capped/buffered pair
+                    # is NOT a dead PO token, and the UI must label it as such.
+                    "live_stream_limit": MAX_LIVE_STREAMS,
+                    "skipped_symbols": dict(sorted(self._skipped.items())),
+                    "buffered_symbols": sorted(self._buffered),
                 })
             except Exception:  # noqa: BLE001 - a broken heartbeat relay must
                 # never kill the liveness probe loop.

@@ -12,6 +12,8 @@ import {
   quoteProvenance,
   isPoOfflineOtc,
   isPocketOptionSource,
+  isStreamCappedOtc,
+  poOfflineLabel,
   QUOTE_PROVENANCE_STALE_MS,
 } from "@/lib/quoteProvenance";
 
@@ -150,6 +152,39 @@ describe("[469] isPocketOptionSource / isPoOfflineOtc", () => {
         source: "market_closed_last_close",
         marketClosed: true,
       }),
+    ).toBe(false);
+  });
+});
+
+describe("[474] stream-cap provenance is distinct from PO OFFLINE", () => {
+  const capped = {
+    source: "frankfurter:live",
+    stale: false,
+    freshAgeMs: 500,
+    streamCapped: true,
+  };
+
+  it("labels a buffered OTC pair STREAM CAP, not PO OFFLINE", () => {
+    const p = quoteProvenance(capped);
+    expect(p.label).toBe("STREAM CAP");
+    expect(p.tone).toBe("capped");
+    expect(p.title).toMatch(/BUFFERED/);
+  });
+
+  it("keeps the cap state separate from a dead PO feed", () => {
+    expect(isStreamCappedOtc("EUR/USD", capped)).toBe(true);
+    expect(poOfflineLabel("EUR/USD", capped)).toBe(
+      "STREAM CAP · market proxy",
+    );
+    expect(poOfflineLabel("EUR/USD", { source: "frankfurter:live" })).toBe(
+      "PO OFFLINE · market proxy",
+    );
+  });
+
+  it("never treats a capped REAL pair or MARKET CLOSED as a cap", () => {
+    expect(isStreamCappedOtc("EUR/SEK", capped)).toBe(false);
+    expect(
+      isStreamCappedOtc("EUR/USD", { ...capped, marketClosed: true }),
     ).toBe(false);
   });
 });

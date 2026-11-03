@@ -17,7 +17,11 @@ import {
   selectGetPrediction,
 } from "@/store/useTradingStore";
 import { useMarketTerminalStore } from "@/store/useMarketTerminalStore";
-import { QUOTE_PROVENANCE_STALE_MS, isPoOfflineOtc } from "@/lib/quoteProvenance";
+import {
+  QUOTE_PROVENANCE_STALE_MS,
+  isPoOfflineOtc,
+  poOfflineLabel,
+} from "@/lib/quoteProvenance";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -250,7 +254,7 @@ export const SignalWidget: React.FC<SignalProps> = ({ signal }) => {
               data-testid="rail-po-offline-marker"
               className="text-st-caution text-[9px] sm:text-[10px] font-bold uppercase tracking-wider truncate mt-0.5"
             >
-              PO OFFLINE · MARKET PROXY
+              {poOfflineLabel(railSymbol, symbolQuote ?? null).toUpperCase()}
             </p>
           ) : null}
           {/* PART 41 [399] — same stale marker as the panel: age the quote out

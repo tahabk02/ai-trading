@@ -9,10 +9,8 @@ import asyncio
 import json
 import time
 
-import pytest
-
-from pocket_bridge.bridge import PocketOptionBridge, ReaderCapReached
-from pocket_bridge.config import BridgeSettings
+from pocket_bridge.bridge import PocketOptionBridge
+from pocket_bridge.config import BridgeSettings, MAX_LIVE_STREAMS
 from pocket_bridge.m20_engine import M20Engine
 
 SSID = (
@@ -167,19 +165,31 @@ def test_releasing_one_reader_leaves_the_others_streaming(monkeypatch, tmp_path)
     assert "AUD/USD" in bridge._reader_clients
 
 
-def test_cap_exhaustion_keeps_extra_symbol_on_rest_fallback(tmp_path):
+def test_cap_recycles_lru_reader_instead_of_permanent_skip(monkeypatch, tmp_path):
+    from BinaryOptionsToolsV2 import pocketoption as po
+
+    _FakeClient.instances = []
+    monkeypatch.setattr(po, "PocketOptionAsync", _FakeClient)
+
     bridge = _bridge(tmp_path)
     bridge._primary_symbol = "EUR/USD"
-    bridge._reader_clients = {
-        f"PAIR{i}/USD": _FakeClient("secondary") for i in range(6)
-    }
+    bridge._subs = {"EUR/USD": object()}
+    bridge.client = _FakeClient("control")
+    # Fill every secondary slot; PAIR0 is the oldest and must be recycled.
+    bridge._reader_clients = {}
+    for i in range(MAX_LIVE_STREAMS - 1):
+        symbol = f"PAIR{i}/USD"
+        bridge._reader_clients[symbol] = _FakeClient("secondary")
+        bridge._last_tick_ts[symbol] = float(i)
 
-    assert len(bridge._reader_clients) == 6
-    with pytest.raises(ReaderCapReached):
-        asyncio.run(bridge._ensure_reader_client("EUR/JPY"))
+    victim = "PAIR0/USD"
+    victim_client = bridge._reader_clients[victim]
 
-    reply = asyncio.run(bridge.request_subscription("EUR/JPY"))
+    client = asyncio.run(bridge._ensure_reader_client("EUR/JPY"))
 
-    assert reply["status"] == "subscribe_error"
-    assert "REST fallback" in reply["error"]
-    assert "EUR/JPY" not in bridge._reader_clients
+    assert client is not None
+    assert victim not in bridge._reader_clients
+    assert victim in bridge._buffered
+    assert victim_client.disconnected
+    assert "EUR/JPY" in bridge._reader_clients
+    assert len(bridge._reader_clients) == MAX_LIVE_STREAMS - 1

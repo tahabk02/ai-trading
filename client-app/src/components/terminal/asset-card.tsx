@@ -15,7 +15,11 @@ import {
   isBelowConfidenceBar,
 } from "@/lib/minConfidenceFilter";
 import { resolveCardTier, tierClearsSelection } from "@/lib/tierFilter";
-import { quoteProvenance, isPoOfflineOtc } from "@/lib/quoteProvenance";
+import {
+  quoteProvenance,
+  isPoOfflineOtc,
+  poOfflineLabel,
+} from "@/lib/quoteProvenance";
 import { targetReasonCopy, targetStateForPayload } from "@/lib/signalRender";
 import { TierBadge } from "@/components/shared/tier-badge";
 
@@ -355,13 +359,13 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
           {poOffline ? (
             <span
               data-testid="po-offline-chip"
-              title={`PO feed offline — price is a ${
+              title={`Not a live Pocket Option tick — price is a ${
                 provenance?.label ?? "market proxy"
-              } market proxy, not a live Pocket Option tick`}
+              } proxy tick (capacity/buffered state, not a dead token)`}
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-chip font-bold text-[8px] leading-none text-gold bg-gold/10 border border-gold/40 whitespace-nowrap"
             >
               <WifiOff size={9} />
-              PO OFFLINE · market proxy
+              {poOfflineLabel(symbol, quote ?? null)}
             </span>
           ) : (
             <span />
@@ -374,6 +378,7 @@ const AssetCardImpl: React.FC<AssetCardProps> = ({ symbol, onHorizonChange }) =>
                 "num-fig text-[8px] leading-none truncate cursor-help",
                 provenance.tone === "held" && "text-bear font-semibold",
                 provenance.tone === "fallback" && "text-gold",
+                provenance.tone === "capped" && "text-gold font-semibold",
                 provenance.tone === "live" && "text-term-ink-faint",
                 provenance.tone === "unknown" && "text-term-ink-dim",
               )}

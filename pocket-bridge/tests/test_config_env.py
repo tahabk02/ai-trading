@@ -62,27 +62,29 @@ def test_symbols_env_override_keeps_order_and_normalises(monkeypatch):
     assert settings.symbols == ["EUR/USD", "USD/JPY"]
 
 
-def test_symbols_default_to_live_stream_cap(monkeypatch):
+def test_symbols_default_to_full_universe_not_stream_budget(monkeypatch):
     monkeypatch.delenv("POCKET_OPTION_SYMBOLS", raising=False)
     monkeypatch.delenv("PO_SYMBOLS", raising=False)
 
     settings = BridgeSettings(ssid=SSID)
 
-    assert MAX_LIVE_STREAMS == 7
-    assert settings.symbols == list(DEFAULT_SYMBOLS[:MAX_LIVE_STREAMS])
-    assert len(settings.symbols) == 7
+    assert MAX_LIVE_STREAMS == 30
+    assert settings.symbols == list(DEFAULT_SYMBOLS)
+    assert len(settings.symbols) == len(DEFAULT_SYMBOLS)
+    # The eager startup set is bounded, but the universe is not discarded.
+    assert settings.static_symbols() == list(DEFAULT_SYMBOLS[:MAX_LIVE_STREAMS])
 
 
-def test_symbols_override_is_truncated_to_cap(monkeypatch):
+def test_symbols_override_is_not_truncated_to_cap(monkeypatch):
     monkeypatch.delenv("POCKET_OPTION_SYMBOLS", raising=False)
-    monkeypatch.setenv(
-        "PO_SYMBOLS",
-        ",".join(f"EUR/{c}" for c in "USD GBP JPY CHF CAD AUD NZD"),
-    )
+    symbols = [f"EUR/{c}" for c in "USD GBP JPY CHF CAD AUD NZD SEK NOK PLN".split()]
+    monkeypatch.setenv("PO_SYMBOLS", ",".join(symbols))
 
     settings = BridgeSettings(ssid=SSID)
 
-    assert len(settings.symbols) == 7
+    assert settings.symbols == symbols
+    assert len(settings.symbols) == len(symbols)
+    assert len(settings.static_symbols(3)) == 3
 
 
 def test_po_ssid_file_alias_is_read(monkeypatch, tmp_path):

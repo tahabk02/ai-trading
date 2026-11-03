@@ -10,7 +10,7 @@ import { TradingPanel } from "@/components/trading/trading-panel";
 import { Header } from "@/components/shared/header";
 import { FeedHealthBar } from "@/components/shared/feed-health";
 import { resolveProSymbol, resolveTfParam } from "@/lib/pro-deep-link";
-import { isPoOfflineOtc } from "@/lib/quoteProvenance";
+import { isPoOfflineOtc, isStreamCappedOtc } from "@/lib/quoteProvenance";
 import { useSignalViewStore, selectSignalView } from "@/lib/signalViewStore";
 import apiClient from "@/services/api";
 
@@ -183,6 +183,7 @@ function ProTerminalInner() {
   const proSymbol = (selectedSymbol || activeSymbol).toUpperCase();
   const proQuote = useMarketTerminalStore((s) => s.quotes[proSymbol]);
   const activePoOffline = isPoOfflineOtc(proSymbol, proQuote ?? null);
+  const activeStreamCapped = isStreamCappedOtc(proSymbol, proQuote ?? null);
 
   // ═══ FOCUS MODE (chart-only) ═══
   // Hides both side rails AND the AI panel so the chart owns the full viewport
@@ -618,6 +619,7 @@ function ProTerminalInner() {
                       streamStalled={streamStalled}
                       stalePrice={stalePrice}
                       poOfflineOtc={activePoOffline}
+                      streamCappedOtc={activeStreamCapped}
                       candleParityBreach={candleParityBreach}
                     />
                   </ErrorBoundary>

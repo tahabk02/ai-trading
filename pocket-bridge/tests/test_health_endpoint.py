@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import websockets  # noqa: E402
 
 from pocket_bridge.bridge import PocketOptionBridge  # noqa: E402
-from pocket_bridge.config import BridgeSettings  # noqa: E402
+from pocket_bridge.config import BridgeSettings, MAX_LIVE_STREAMS  # noqa: E402
 from pocket_bridge.m20_engine import M20Engine  # noqa: E402
 from pocket_bridge.relay import RelayServer  # noqa: E402
 
@@ -144,29 +144,32 @@ def test_bridge_health_reports_ssid():
 
 
 def test_health_reports_live_stream_cap_and_symbol_states():
-    symbols = [f"PAIR{i}/USD" for i in range(8)]
+    symbols = [f"PAIR{i}/USD" for i in range(MAX_LIVE_STREAMS + 1)]
     settings = BridgeSettings(symbols=symbols)
     bridge = PocketOptionBridge(settings, M20Engine(symbols))
 
-    streaming = symbols[:7]
+    streaming = symbols[:MAX_LIVE_STREAMS]
     bridge._assets = {symbol: symbol for symbol in symbols}
     bridge._subs = {symbol: object() for symbol in streaming}
     bridge._primary_symbol = streaming[0]
     bridge._reader_clients = {symbol: object() for symbol in streaming[1:]}
-    bridge._skipped = {symbols[7]: "live_stream_cap"}
+    bridge._skipped = {symbols[MAX_LIVE_STREAMS]: "live_stream_cap"}
+    bridge._buffered = {symbols[1]}
     bridge._tick_count = {streaming[0]: 4}
 
     body = bridge.health_payload()
 
-    assert body["live_stream_limit"] == 7
-    assert body["live_streams_open"] == 7
+    assert body["live_stream_limit"] == MAX_LIVE_STREAMS
+    assert body["live_stream_budget"] == MAX_LIVE_STREAMS
+    assert body["live_streams_open"] == MAX_LIVE_STREAMS
     assert body["live_streams_available"] == 0
-    assert body["reader_clients_open"] == 6
-    assert body["symbols_streaming"] == streaming
-    assert body["symbols_configured"] == symbols
+    assert body["reader_clients_open"] == MAX_LIVE_STREAMS - 1
+    assert body["symbols_streaming"] == sorted(streaming)
+    assert body["symbols_configured"] == sorted(symbols)
     assert body["stream_states"][streaming[0]] == "streaming"
-    assert body["stream_states"][symbols[7]] == "capped"
-    assert body["skipped_symbols"] == {symbols[7]: "live_stream_cap"}
+    assert body["stream_states"][symbols[MAX_LIVE_STREAMS]] == "capped"
+    assert body["skipped_symbols"] == {symbols[MAX_LIVE_STREAMS]: "live_stream_cap"}
+    assert body["buffered_symbols"] == [symbols[1]]
     assert body["ticks_by_symbol"] == {streaming[0]: 4}
 
 

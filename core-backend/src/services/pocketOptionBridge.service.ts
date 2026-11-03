@@ -51,6 +51,7 @@ import {
   deriveBridgeFeedStatus,
   type BridgeFeedStatus,
 } from "../lib/bridgeFeedStatus";
+import { setBridgeStreamCappedSymbols } from "../lib/streamCapState";
 
 // ─── Bridge Process Constants ───
 const BRIDGE_PYTHON_MODULE = "pocket_bridge.main";
@@ -1054,6 +1055,9 @@ export class PocketOptionBridgeService {
       status === "stopped" ||
       status === "stalled"
     ) {
+      // Capacity state is only meaningful while the bridge is alive; clear it
+      // so a real outage is reported as offline, not as a stale STREAM CAP.
+      setBridgeStreamCappedSymbols([]);
       this.lastStatus = "DEGRADED";
       this.broadcastFeedStatusIfChanged();
       return;
@@ -1080,6 +1084,31 @@ export class PocketOptionBridgeService {
    *  rule and used to re-derive + push the authoritative feed_status. */
   private handleHeartbeat(payload: Record<string, unknown>): void {
     this.lastHeartbeatAt = Date.now();
+    // PART 43.6 [474] — capacity truth from the bridge. A pair with no live
+    // stream slot is BUFFERED, not offline; quotes carry `streamCapped` so the
+    // terminal never mislabels it as a dead PO token.
+    const capped = new Set<string>();
+    const skipped = payload?.skipped_symbols;
+    if (skipped && typeof skipped === "object") {
+      for (const [symbol, reason] of Object.entries(
+        skipped as Record<string, unknown>,
+      )) {
+        if (
+          reason === "live_stream_cap" ||
+          reason === "capped" ||
+          reason === "buffered"
+        ) {
+          capped.add(symbol);
+        }
+      }
+    }
+    const buffered = payload?.buffered_symbols;
+    if (Array.isArray(buffered)) {
+      for (const symbol of buffered) {
+        if (typeof symbol === "string" && symbol) capped.add(symbol);
+      }
+    }
+    setBridgeStreamCappedSymbols(capped);
     if (
       typeof payload?.status === "string" &&
       payload.status !== this.lastRelayStatus

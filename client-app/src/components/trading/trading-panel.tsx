@@ -34,7 +34,7 @@ import {
 } from "@/lib/realtimeCandleAggregator";
 import { expirySelectorState } from "@/lib/expirySelection";
 import { MIN_EXECUTABLE_TIER } from "@/lib/signalTiers";
-import { isPoOfflineOtc } from "@/lib/quoteProvenance";
+import { isPoOfflineOtc, isStreamCappedOtc } from "@/lib/quoteProvenance";
 import { clientClockSync } from "@/lib/timeSync";
 
 // ── POCKET-OPTION CANONICAL EXPIRATION SET ──
@@ -323,7 +323,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 data-testid="panel-po-offline-marker"
                 className="text-[9px] sm:text-[10px] text-st-warn font-bold uppercase tracking-wider whitespace-nowrap"
               >
-                {poBridgeOnline ? "PAIR ON PROXY" : "PO OFFLINE"}
+                {isStreamCappedOtc(activeSymbol, activeQuote ?? null)
+                  ? "STREAM CAP"
+                  : poBridgeOnline
+                    ? "PAIR ON PROXY"
+                    : "PO OFFLINE"}
               </span>
             )}
             <span className="text-xs sm:text-sm text-ink font-bold font-mono tabular-nums">
@@ -358,9 +362,11 @@ export const TradingPanel: React.FC<{ stalePrice: boolean }> = ({
                 data-testid="panel-po-offline-signal"
                 className="truncate"
               >
-                {poBridgeOnline
-                  ? "PO ONLINE - PAIR ON PROXY"
-                  : "PO OFFLINE - PROXY TICKS"}
+                {isStreamCappedOtc(activeSymbol, activeQuote ?? null)
+                  ? "STREAM CAP - BUFFERED ON PROXY"
+                  : poBridgeOnline
+                    ? "PO ONLINE - PAIR ON PROXY"
+                    : "PO OFFLINE - PROXY TICKS"}
               </span>
             </>
           ) : stalePrice ? (

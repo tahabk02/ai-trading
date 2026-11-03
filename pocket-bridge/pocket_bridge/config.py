@@ -1009,10 +1009,13 @@ def _env_float(name: str, default: float) -> float:
 
 
 #: Live per-symbol streams the bridge is allowed to keep open. Each stream is
-#: a separate SDK client (0.2.14 cannot multiplex), and the Pocket Option demo
-#: server starts timing out handshakes at 8+ concurrent connections. Raise it
-#: only for an account/venue that has proven it accepts more.
-MAX_LIVE_STREAMS: int = _env_int("POCKET_OPTION_MAX_LIVE_STREAMS", 7)
+#: a separate SDK client (0.2.14 cannot multiplex), so this is a CONNECTION
+#: budget, not a symbol-universe limit. The default is 30; handshakes are
+#: deliberately staggered by ``bridge.READER_CONNECT_*`` because an unthrottled
+#: burst still makes the PO gateway time out connections. The budget bounds
+#: EAGER static readers only — the configured universe below is never truncated,
+#: so dynamic subscriptions can still arm any pair on demand.
+MAX_LIVE_STREAMS: int = _env_int("POCKET_OPTION_MAX_LIVE_STREAMS", 30)
 
 DEFAULT_SYMBOLS: tuple = (
     # PO OTC majors / crosses
@@ -1029,21 +1032,24 @@ DEFAULT_SYMBOLS: tuple = (
 
 
 def _default_symbols() -> list:
-    """Static reader set; ``POCKET_OPTION_SYMBOLS`` overrides the full list.
+    """FULL configured reader universe; NEVER truncated to the stream budget.
 
-    Each symbol needs its own SDK client on 0.2.14, so deployments can cap the
-    static set (broker connection budget) and let ``request_subscription`` arm
-    the rest on demand. Empty/blank entries are dropped; order is preserved.
+    ``MAX_LIVE_STREAMS`` bounds how many readers boot eagerly (see
+    :meth:`BridgeSettings.static_symbols`), not which symbols the bridge knows
+    about. Slicing here used to discard pair #8+ before the bridge ever saw
+    them, so ``request_subscription`` had nothing to arm and the terminal could
+    only ever label those pairs as a REST/market proxy. Empty/blank entries are
+    dropped; order is preserved.
     """
     raw = _env_value("POCKET_OPTION_SYMBOLS")
     if not raw:
-        return list(DEFAULT_SYMBOLS[:MAX_LIVE_STREAMS])
+        return list(DEFAULT_SYMBOLS)
     symbols = []
     for item in raw.replace(";", ",").split(","):
         symbol = canonical_symbol(item.strip())
         if symbol and "/" in symbol and symbol not in symbols:
             symbols.append(symbol)
-    return (symbols or list(DEFAULT_SYMBOLS))[:MAX_LIVE_STREAMS]
+    return symbols or list(DEFAULT_SYMBOLS)
 
 
 def _coerce_int(value: object, default: int, field: str) -> int:
@@ -2622,6 +2628,17 @@ class BridgeSettings:
         if self.session_path and self.session_path.strip():
             return Path(self.session_path).expanduser().resolve()
         return Path(PO_SESSION_PATH).expanduser().resolve()
+
+    def static_symbols(self, limit: int | None = None) -> List[str]:
+        """Configured symbols eligible for EAGER startup/reconnect readers.
+
+        The full universe stays in ``symbols`` / :meth:`assets` so a dynamic
+        ``request_subscription`` can arm any pair. This only bounds how many
+        readers are spawned eagerly; at the budget boundary the bridge recycles
+        the least-recently-active reader instead of permanently skipping a pair.
+        """
+        budget = MAX_LIVE_STREAMS if limit is None else limit
+        return list(self.symbols[: max(0, int(budget))])
 
     def assets(self) -> Dict[str, str]:
         """Return `{backend_symbol: po_asset}` mapping for all symbols."""

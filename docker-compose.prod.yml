@@ -424,8 +424,11 @@ services:
       POCKET_BRIDGE_HOST: 0.0.0.0
       POCKET_BRIDGE_PORT: "8788"
       # AUTH IS OWNED BY ./pocket-bridge/.env (env_file below). Defining
-      # POCKET_OPTION_SSID / UID / IS_DEMO / PLATFORM here would override that
-      # file and silently boot the bridge with the wrong session.
+      # POCKET_OPTION_SSID / SESSION_TOKEN / UID / IS_DEMO / PLATFORM here would
+      # override that file and silently boot the bridge with the wrong session.
+      # Stream budget / pacing also live there (POCKET_OPTION_MAX_LIVE_STREAMS,
+      # POCKET_BRIDGE_READER_CONCURRENCY, POCKET_BRIDGE_READER_STAGGER_SECS,
+      # POCKET_BRIDGE_READER_STAGGER_JITTER_SECS).
       # ── PO SSID SELF-HEALING (opt-in, OFF by default; PART 43.6) ──
       # The bridge's own refresh_ssid.py (session tier, then last-resort
       # credential tier) reads these. Inert unless EVERY gate is set:

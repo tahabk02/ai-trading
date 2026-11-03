@@ -540,6 +540,10 @@ export interface MarketQuote {
   /** PART 43.5 [473] — OTC pair whose fresh ticks are NOT Pocket Option prints
    *  (PO offline / market closed); the price is a non-tradeable market proxy. */
   poOffline?: boolean;
+  /** PART 43.6 [474] — the bridge has no live-stream slot for this pair and
+   *  parked it in the buffered/REST tier. Capacity state, NOT a dead token or
+   *  network outage: render "STREAM CAP"/"BUFFERED", never "PO OFFLINE". */
+  streamCapped?: boolean;
 }
 
 export interface QuotesResponse {

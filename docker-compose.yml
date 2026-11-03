@@ -164,11 +164,15 @@ services:
     container_name: pocket_option_bridge
     environment:
       POCKET_BRIDGE_HOST: 0.0.0.0
-      POCKET_BRIDGE_PORT: 8788
+      POCKET_BRIDGE_PORT: "8788"
       # AUTH IS OWNED BY ./pocket-bridge/.env. Do NOT add POCKET_OPTION_SSID /
-      # UID / IS_DEMO / PLATFORM here: `environment` overrides `env_file`, so a
-      # stale root .env session silently replaced the demo session and the
-      # bridge booted with isDemo=0/platform=2 (session_expired).
+      # SESSION_TOKEN / UID / IS_DEMO / PLATFORM here: `environment` overrides
+      # `env_file`, so a stale root .env session silently replaced the demo
+      # session and the bridge booted with isDemo=0/platform=2 (session_expired).
+      # Stream budget / pacing also live in pocket-bridge/.env (see
+      # pocket-bridge/.env.example): POCKET_OPTION_MAX_LIVE_STREAMS=30,
+      # POCKET_BRIDGE_READER_CONCURRENCY, POCKET_BRIDGE_READER_STAGGER_SECS,
+      # POCKET_BRIDGE_READER_STAGGER_JITTER_SECS.
       POCKET_OPTION_USER_AGENT: ${POCKET_OPTION_USER_AGENT:-}
       # Never inherit the SDK's 60s handshake default again; 120s lets the
       # regional endpoint rotation reach a healthy host.
@@ -180,7 +184,10 @@ services:
       POCKET_BRIDGE_STREAM_STALE_SECS: ${POCKET_BRIDGE_STREAM_STALE_SECS:-50}
       TZ: UTC
     env_file:
-      - ./pocket-bridge/.env
+      # Optional so a fresh clone boots in awaiting_ssid instead of failing
+      # compose config; production uses the same required:false contract.
+      - path: ./pocket-bridge/.env
+        required: false
     volumes:
       # Captured browser session (read-only): the bridge authenticates with the
       # stored `ssid` cookie and hot-reloads it; refresh runs INSIDE the

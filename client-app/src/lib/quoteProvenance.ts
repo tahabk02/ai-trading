@@ -23,7 +23,13 @@ import { getAssetSubType } from "@/constants/symbols";
 /** Freshness floor mirrored from the backend (`QUOTE_STALE_AFTER_MS`). */
 export const QUOTE_PROVENANCE_STALE_MS = 15_000;
 
-export type ProvenanceTone = "live" | "fallback" | "held" | "unknown" | "closed";
+export type ProvenanceTone =
+  | "live"
+  | "fallback"
+  | "held"
+  | "unknown"
+  | "closed"
+  | "capped";
 
 export interface QuoteProvenance {
   /** Short chip text (fits the card). */
@@ -43,6 +49,7 @@ type ProvenanceQuote = Partial<
     | "ageMs"
     | "marketClosed"
     | "lastTickAt"
+    | "streamCapped"
   >
 >;
 
@@ -114,7 +121,40 @@ export function isPoOfflineOtc(
   if (!quote || quote.marketClosed === true) return false;
   if (getAssetSubType(symbol) !== "otc") return false;
   const source = normalizeSource(quote.source);
+  // A capped pair is still priced by a non-PO proxy, so it remains
+  // non-tradeable (this predicate stays true) — only its LABEL changes.
   return source != null && !source.startsWith("pocket_option");
+}
+
+/**
+ * PART 43.6 [474] — TRUE when this OTC pair has no live stream because the
+ * bridge's connection budget is saturated and parked it in the buffered tier.
+ *
+ * This is an INFRASTRUCTURE state, not a dead token and not a network outage:
+ * the pair stays configured and a later dynamic request can recycle an LRU
+ * reader to arm it. Callers must say "STREAM CAP"/"BUFFERED", never
+ * "PO OFFLINE".
+ */
+export function isStreamCappedOtc(
+  symbol: string,
+  quote?: ProvenanceQuote | null,
+): boolean {
+  if (!quote || quote.marketClosed === true) return false;
+  if (getAssetSubType(symbol) !== "otc") return false;
+  return quote.streamCapped === true;
+}
+
+/**
+ * The honest label for an OTC pair priced by a non-PO proxy. Capacity
+ * saturation is a distinct state from a genuinely dead/absent PO feed.
+ */
+export function poOfflineLabel(
+  symbol: string,
+  quote?: ProvenanceQuote | null,
+): string {
+  return isStreamCappedOtc(symbol, quote)
+    ? "STREAM CAP · market proxy"
+    : "PO OFFLINE · market proxy";
 }
 
 function secondsText(ms: number | null | undefined): string {
@@ -147,6 +187,18 @@ export function quoteProvenance(quote?: ProvenanceQuote | null): QuoteProvenance
       label: "MARKET CLOSED",
       title: `Weekly forex market closed — price is the last close (${at} UTC), never live`,
       tone: "closed",
+    };
+  }
+
+  // PART 43.6 [474] — capacity saturation is its own provenance state. The
+  // pair is buffered, not offline: do not accuse the PO feed of being dead
+  // when the bridge simply has no stream slot for it yet.
+  if (quote?.streamCapped === true) {
+    return {
+      label: "STREAM CAP",
+      title:
+        "Live-stream budget saturated — this pair is BUFFERED on the market-proxy tier (not a dead PO token); a dynamic request can recycle a slot",
+      tone: "capped",
     };
   }
 

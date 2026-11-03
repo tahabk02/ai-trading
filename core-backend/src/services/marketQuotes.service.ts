@@ -15,6 +15,7 @@ import { symbolRegistry } from "./symbolRegistry.service";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { isForexMarketClosed } from "../lib/marketSchedule";
 import { resolveQuoteLiveness } from "../lib/quoteLiveness";
+import { isBridgeStreamCapped } from "../lib/streamCapState";
 import { logger } from "../utils/logger";
 
 export interface MarketQuote {
@@ -49,6 +50,12 @@ export interface MarketQuote {
    * the OTC verdict/target/execution on the same server-derived truth.
    */
   poOffline: boolean;
+  /**
+   * PART 43.6 [474] — true when the bridge has NO live-stream slot for this
+   * pair and parked it in the buffered/REST tier. This is a capacity state,
+   * not a dead token/network outage: the terminal renders STREAM CAP/BUFFERED.
+   */
+  streamCapped: boolean;
   /**
    * PART 42.1 [421]/[422] — true when this REAL pair's weekly forex market is
    * closed (Fri ~17:00 → Sun ~17:00 New York). The price is the LAST CLOSE,
@@ -121,6 +128,7 @@ export async function buildMarketQuotesSnapshot(): Promise<MarketQuote[]> {
         freshAgeMs: live.freshAgeMs,
         staleLive: live.staleLive,
         poOffline: live.poOffline,
+        streamCapped: isBridgeStreamCapped(q.symbol),
         marketClosed,
       });
     }

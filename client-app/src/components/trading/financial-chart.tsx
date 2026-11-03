@@ -164,6 +164,13 @@ interface FinancialChartProps {
    * symbols and a genuine PO print are never this state.
    */
   poOfflineOtc?: boolean;
+  /**
+   * PART 43.6 [474] — the PO-offline state is caused by stream-capacity
+   * saturation (buffered), NOT a dead token. The verdict stays withheld, but
+   * the label must say STREAM CAP/BUFFERED rather than accuse the feed of
+   * being offline.
+   */
+  streamCappedOtc?: boolean;
   candleParityBreach?: {
     symbol: string;
     timeframe: string;
@@ -520,6 +527,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   streamStalled = false,
   stalePrice = false,
   poOfflineOtc = false,
+  streamCappedOtc = false,
   candleParityBreach = null,
 }) => {
   const activeSymbol = symbol.trim().toUpperCase();
@@ -1857,6 +1865,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // PART 43.5 [473]/[474] — PO-offline OTC: the proxy tape may be flowing, but
   // no PO print authorizes a verdict or a target shape.
   const hudPoOffline = poOfflineOtc;
+  const hudStreamCapped = streamCappedOtc;
   const hudSignal = hudPoOffline ? null : hudView.gatedSignal;
   const hudTargetCandles = targetCandlesLabelFor(hudView, targetCandleCount);
   const hudZone = hudTargetCandles.enabled;
@@ -1866,10 +1875,15 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
   // decision, no blank.
   const hudTargetState = targetRenderState(hudView, hudTarget);
   const hudTargetCopy = hudPoOffline
-    ? {
-        label: "PO OFFLINE — NO VERDICT",
-        hint: "No Pocket Option print for this OTC pair — the market may be closed or the feed is unavailable. The verdict and target resume only when PO quotes return; proxy ticks are not tradable.",
-      }
+    ? hudStreamCapped
+      ? {
+          label: "STREAM CAP — BUFFERED",
+          hint: "The live-stream budget is full, so this OTC pair is buffered on the market-proxy tier (not a dead PO token). The verdict and target resume as soon as a stream slot is recycled for it; proxy ticks are not tradable.",
+        }
+      : {
+          label: "PO OFFLINE — NO VERDICT",
+          hint: "No Pocket Option print for this OTC pair — the market may be closed or the feed is unavailable. The verdict and target resume only when PO quotes return; proxy ticks are not tradable.",
+        }
     : targetReasonCopy(hudTargetState.reason, hudTargetState.detail);
   const hudTargetShown =
     !hudPoOffline && hudTargetState.showTarget && hudTarget > 0;
@@ -2026,7 +2040,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
           <AssetClassBadge symbol={activeSymbol} />
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
           <span className="text-[9px] font-mono text-st-warn uppercase tracking-widest font-black">
-            PO OFFLINE · PROXY TICKS
+            {hudStreamCapped ? "STREAM CAP · BUFFERED" : "PO OFFLINE · PROXY TICKS"}
           </span>
         </div>
       ) : null}
@@ -2159,7 +2173,7 @@ export const FinancialChart: React.FC<FinancialChartProps> = ({
               className="flex items-center gap-2 rounded-md border border-amber-400/40 bg-st-warn/10 backdrop-blur-sm px-2 py-1"
             >
               <span className="text-[10px] font-mono font-black uppercase tracking-widest text-st-warn">
-                PO OFFLINE — PROXY TICKS
+                {hudStreamCapped ? "STREAM CAP — BUFFERED" : "PO OFFLINE — PROXY TICKS"}
               </span>
             </div>
           ) : null}
