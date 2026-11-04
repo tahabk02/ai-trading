@@ -110,7 +110,8 @@ class RelayServer:
         self.candles_emitted: int = 0
 
     async def process_request(self, _connection, request):
-        if request.path.rstrip("/") != "/health":
+        path = request.path.split("?", 1)[0].rstrip("/")
+        if path != "/health":
             return None
         payload = self.health_provider() if self.health_provider else {"status": "degraded"}
         payload = dict(payload)

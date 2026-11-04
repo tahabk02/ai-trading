@@ -296,6 +296,17 @@ describe("502 fault tolerance", () => {
     expect(a).toBe(b);
     expect(a).not.toBe(c);
   });
+
+  it("uses an HTTPS agent for an HTTPS upstream", () => {
+    const https = require("node:https");
+    const agent = proxy.agentFor({
+      host: "secure.example",
+      port: 443,
+      prefix: "",
+      protocol: "https:",
+    });
+    expect(agent).toBeInstanceOf(https.Agent);
+  });
 });
 
 describe("forwarded-chain integrity", () => {

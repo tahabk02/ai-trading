@@ -143,10 +143,6 @@ export class PocketOptionBridgeService {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectDelayMs: number;
   private connected = false;
-  /** True between an 'error' event and its guaranteed 'close' — prevents the
-   *  same failed attempt from being counted twice (error + close) and double
-   *  fast-forwarding the backoff / tripping the circuit breaker on one drop. */
-  private wsErrorSeen = false;
   private lastStatus: "ONLINE" | "DEGRADED" | "awaiting_ssid" | "idle" = "idle";
   /** Raw relay status string ("connected" | "stalled" | "awaiting_ssid" |
    *  "connection_error" | "session_expired" ...) — the precise source for the
@@ -787,7 +783,6 @@ export class PocketOptionBridgeService {
       // `live` is only set by a connected status/heartbeat or a real tick.
       this.lastRelayStatus = "connecting";
       this.lastStatus = "DEGRADED";
-      this.wsErrorSeen = false;
       this.recordReconnectSuccess();
       logger.info("[PO Bridge] Connected to Pocket Option relay", {
         url: this.url,
@@ -805,8 +800,8 @@ export class PocketOptionBridgeService {
     this.ws.on("message", (data) => this.onMessage(data));
 
     this.ws.on("close", () => {
-      // Only the CLOSE event records the failure + schedules the reconnect —
-      // exactly once, even when an 'error' preceded it (wsErrorSeen). The dead
+      // Only the CLOSE event records the failure + schedules the reconnect, so
+      // an `error` followed by `close` counts as one failed attempt. The dead
       // socket is released immediately so a stale 'close' after a reconnect
       // can never re-enter this handler.
       this.connected = false;
@@ -818,13 +813,15 @@ export class PocketOptionBridgeService {
       if (this.lastStatus === "ONLINE") {
         this.lastStatus = "DEGRADED";
       }
-      const failed = !this.wsErrorSeen;
-      this.wsErrorSeen = false;
+      // A close is the single accounting point for a failed attempt. The old
+      // `!wsErrorSeen` guard skipped the most common failure mode entirely:
+      // `ws` emits `error` and THEN `close`, so a connection-refused/reset
+      // never incremented consecutiveFailures and the circuit breaker never
+      // opened. `stop()` removes these listeners before terminating, so an
+      // intentional shutdown cannot reach this handler.
       this.ws?.removeAllListeners();
       this.ws = null;
-      if (failed) {
-        this.recordReconnectFailure();
-      }
+      this.recordReconnectFailure();
       this.broadcastFeedStatusIfChanged();
       logger.warn(
         "[PO Bridge] Relay connection closed — scheduling reconnect",
@@ -856,10 +853,9 @@ export class PocketOptionBridgeService {
         );
       }
 
-      // Set the dedup guard and forcibly release the dead socket so ws emits
-      // its guaranteed 'close' exactly once — the single accounting point for
-      // this failed attempt. Nothing is recorded or scheduled here.
-      this.wsErrorSeen = true;
+      // Forcibly release the dead socket so ws emits its guaranteed 'close' —
+      // the single accounting point for this failed attempt. Nothing is
+      // recorded or scheduled here.
       try {
         this.ws?.terminate();
       } catch {
@@ -875,7 +871,6 @@ export class PocketOptionBridgeService {
       // A fresh socket is created every attempt; drop any leftover reference
       // (with listeners already removed by the close handler) so connect()
       // always starts from a clean slate.
-      this.wsErrorSeen = false;
       this.connected = false;
       this.ws = null;
       this.connect();

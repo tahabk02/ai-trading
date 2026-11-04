@@ -171,7 +171,18 @@ class ExecutionEngine:
             signal = json.loads(raw_data)
             symbol = signal.get("symbol")
             confidence = signal.get("confidence", 0)
-            side = "buy" if signal.get("signal_type") == "BUY" else "sell"
+            signal_type = signal.get("signal_type")
+            # Never turn a malformed/missing direction into a SELL order. The
+            # old ternary defaulted everything that was not exactly "BUY" to
+            # "sell", so a corrupt payload could open a short position.
+            if signal_type not in ("BUY", "SELL"):
+                logger.warning(
+                    "REJECTED_INVALID_SIGNAL_TYPE",
+                    symbol=symbol,
+                    signal_type=signal_type,
+                )
+                return
+            side = "buy" if signal_type == "BUY" else "sell"
             price = signal.get("price")
             atr = signal.get("indicators", {}).get("atr")
 
@@ -195,7 +206,10 @@ class ExecutionEngine:
 
             # 2. Execution
             logger.info("PLACING_REAL_TRADE", symbol=symbol, side=side, amount=amount)
-            order = self.broker.execute_market_order(symbol, side, amount)
+            # ccxt's sync client blocks; keep the signal loop responsive.
+            order = await asyncio.to_thread(
+                self.broker.execute_market_order, symbol, side, amount
+            )
             
             # 3. Audit & Logging
             self.trade_logger.log_trade({

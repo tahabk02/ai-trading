@@ -240,7 +240,13 @@ async def amain(settings: BridgeSettings) -> None:
     )
 
     # ── /health HTTP ENDPOINT (3.3) ──
-    health_port = (settings.relay_port + 1) % 65_536
+    # Avoid port 0 (the OS picks an unrelated ephemeral port) at the top of
+    # the range by stepping down instead of wrapping.
+    health_port = (
+        settings.relay_port + 1
+        if settings.relay_port < 65_535
+        else settings.relay_port - 1
+    )
 
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - HTTP method name
@@ -255,7 +261,9 @@ async def amain(settings: BridgeSettings) -> None:
             payload = bridge.health_payload()
             payload.update(
                 {
-                    "ok": True,
+                    # Liveness is the process itself; readiness is the feed.
+                    # `awaiting_ssid` is a valid, non-fabricating idle state.
+                    "ok": payload.get("status") in {"live", "awaiting_ssid"},
                     "ssid_origin": bridge.settings.ssid_origin,
                     "session_expired": bridge.session_expired,
                     "session_file": bool(stored_session.exists),

@@ -97,6 +97,38 @@ describe("PoSessionMonitor ([483])", () => {
     expect(monitor.getState().invalidSince).toBeNull();
   });
 
+  it("does not announce recovery while the relay is only reconnecting", async () => {
+    const monitor = makeMonitor();
+    bridgeMock.status = "session_expired";
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    await monitor.tick();
+    vi.setSystemTime(new Date("2026-01-01T00:20:00Z"));
+    await monitor.tick(); // critical
+    expect(poAlertMock).toHaveBeenCalledTimes(1);
+
+    bridgeMock.status = "connection_error";
+    vi.setSystemTime(new Date("2026-01-01T00:21:00Z"));
+    await monitor.tick();
+    expect(poAlertMock).toHaveBeenCalledTimes(1);
+    expect(monitor.getState().alertActive).toBe(true);
+    expect(monitor.getState().invalidSince).not.toBeNull();
+  });
+
+  it("retries a failed alert instead of marking the outage notified", async () => {
+    const monitor = makeMonitor();
+    poAlertMock.mockRejectedValueOnce(new Error("sink down"));
+    bridgeMock.status = "session_expired";
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    await monitor.tick();
+    vi.setSystemTime(new Date("2026-01-01T00:20:00Z"));
+    await expect(monitor.tick()).rejects.toThrow("sink down");
+    expect(monitor.getState().alertActive).toBe(false);
+
+    await monitor.tick();
+    expect(poAlertMock).toHaveBeenCalledTimes(2);
+    expect(monitor.getState().alertActive).toBe(true);
+  });
+
   it("stays silent on a blip shorter than the threshold", async () => {
     const monitor = makeMonitor();
     bridgeMock.status = "session_expired";

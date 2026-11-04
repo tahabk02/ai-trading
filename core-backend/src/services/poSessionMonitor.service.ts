@@ -59,9 +59,20 @@ export class PoSessionMonitor {
 
   public start(intervalMs = 60_000): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.tick(), intervalMs);
+    this.timer = setInterval(() => void this.tickSafely(), intervalMs);
     this.timer.unref?.();
-    void this.tick();
+    void this.tickSafely();
+  }
+
+  /** Never allow an alert-sink failure to become an unhandled rejection. */
+  private async tickSafely(): Promise<void> {
+    try {
+      await this.tick();
+    } catch (err) {
+      logger.error("[PO Session] monitor tick failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   public stop(): void {
@@ -72,13 +83,12 @@ export class PoSessionMonitor {
   public async tick(): Promise<void> {
     const staleMin = Math.max(1, Number(secrets.PO_SESSION_STALE_ALERT_MIN) || 15);
     const now = Date.now();
+    const relayStatus = pocketOptionBridgeService.getLastRelayStatus();
 
-    if (this.isSessionInvalidNow()) {
+    if (relayStatus === "session_expired") {
       if (this.invalidSinceMs === 0) this.invalidSinceMs = now;
       const invalidForMin = (now - this.invalidSinceMs) / 60_000;
       if (invalidForMin >= staleMin && !this.alertActive) {
-        this.alertActive = true;
-        this.lastAlertAtMs = now;
         await poAlert({
           level: "critical",
           title: "[PO Session] SSID dead — live Pocket Option ticks stopped",
@@ -89,9 +99,17 @@ export class PoSessionMonitor {
             `POST /health/po-auth/refresh) or re-capture the session — see ` +
             `docs/hosting/po-session-continuity.md.`,
         });
+        this.alertActive = true;
+        this.lastAlertAtMs = now;
       }
       return;
     }
+
+    // A transport outage (connection_error/disconnected/stalled) is NOT a
+    // restored session. Only an authenticated `connected` relay clears the
+    // outage; otherwise the monitor would announce "SSID restored" while the
+    // bridge is still down.
+    if (this.invalidSinceMs !== 0 && relayStatus !== "connected") return;
 
     const recovered = this.invalidSinceMs !== 0;
     if (recovered) {
@@ -102,13 +120,13 @@ export class PoSessionMonitor {
     }
     this.invalidSinceMs = 0;
     if (this.alertActive) {
-      this.alertActive = false;
       await poAlert({
         level: "info",
         title: "[PO Session] SSID restored",
         message:
           "The Pocket Option session is valid again; live PO ticks resumed.",
       });
+      this.alertActive = false;
     }
   }
 }

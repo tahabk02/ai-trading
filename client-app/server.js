@@ -38,7 +38,9 @@
 "use strict";
 
 const http = require("http");
+const https = require("https");
 const net = require("net");
+const tls = require("tls");
 const next = require("next");
 
 const DEV = process.env.NODE_ENV !== "production";
@@ -118,7 +120,10 @@ function agentFor(upstream) {
   const key = `${upstream.protocol}//${upstream.host}:${upstream.port}`;
   let agent = AGENTS.get(key);
   if (!agent) {
-    agent = new http.Agent({
+    // HTTPS upstreams must use https.Agent; an http.Agent would still send
+    // plaintext to port 443 and fail (or, worse, look like an upstream fault).
+    const Agent = upstream.protocol === "https:" ? https.Agent : http.Agent;
+    agent = new Agent({
       keepAlive: true,
       keepAliveMsecs: AGENT_KEEPALIVE_MSECS,
       maxSockets: AGENT_MAX_SOCKETS,
@@ -355,8 +360,9 @@ function statusForError(err) {
  * A piped request stream is single-use, so a connection-phase failure could
  * only ever be surfaced as a 502. Buffering small bodies (the entire API
  * surface here is JSON — a /predict payload is tens of KB) buys a safe single
- * retry. Anything larger than the cap, or a chunked body, is streamed through
- * untouched and marked non-retryable rather than buffered without bound.
+ * retry. Anything larger than the cap is rejected with 413 rather than
+ * forwarded: buffering without bound is unsafe, and streaming after this
+ * reader has already consumed bytes would silently truncate the body.
  */
 function readRetryableBody(req) {
   const method = String(req.method || "GET").toUpperCase();
@@ -364,9 +370,16 @@ function readRetryableBody(req) {
     return Promise.resolve({ body: Buffer.alloc(0), replayable: true });
   }
 
+  const tooLarge = () =>
+    Object.assign(
+      new Error(`request body exceeds ${RETRYABLE_BODY_LIMIT} bytes`),
+      { code: "BODY_TOO_LARGE" },
+    );
+
   const declared = Number(req.headers["content-length"]);
   if (Number.isFinite(declared) && declared > RETRYABLE_BODY_LIMIT) {
-    return Promise.resolve({ body: null, replayable: false, oversized: true });
+    req.resume();
+    return Promise.reject(tooLarge());
   }
 
   return new Promise((resolve, reject) => {
@@ -378,12 +391,13 @@ function readRetryableBody(req) {
       if (overflowed) return;
       size += chunk.length;
       if (size > RETRYABLE_BODY_LIMIT) {
-        // Past the cap: stop accumulating and hand the request back for
-        // streaming. Already-read bytes are retained by the caller.
+        // Do NOT resolve here and then stream the request: the bytes already
+        // consumed by this reader are gone, so `req.pipe()` would forward a
+        // truncated body. Reject instead and drain the remaining bytes.
         overflowed = true;
         chunks.length = 0;
-        resolve({ body: null, replayable: false, overflowChunks: true, partialSize: size });
-        req.pause();
+        req.resume();
+        reject(tooLarge());
         return;
       }
       chunks.push(chunk);
@@ -427,7 +441,8 @@ function dispatchUpstream({ req, res, route, upstream, targetPath, body, replaya
   let settled = false;
   const budget = retryBudget();
 
-  const proxyReq = http.request(options, (proxyRes) => {
+  const transport = upstream.protocol === "https:" ? https : http;
+  const proxyReq = transport.request(options, (proxyRes) => {
     responded = true;
     res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
     proxyRes.pipe(res);
@@ -534,6 +549,10 @@ function proxyHttp(req, res) {
     },
     (err) => {
       if (res.headersSent) return res.destroy(err);
+      if (err && err.code === "BODY_TOO_LARGE") {
+        sendProxyError(res, 413, "request_body_too_large", String(err.message));
+        return;
+      }
       sendProxyError(res, 400, "request_body_error", String(err));
     },
   );
@@ -561,24 +580,36 @@ function proxyUpgrade(req, socket, head) {
     return true;
   }
 
-  // `net.connect` (not `http.request`) because a WS upgrade is an opaque byte
-  // tunnel: we forward the original handshake verbatim and thereafter copy
-  // bytes both ways until either side closes.
-  const upstreamSocket = net.connect(
-    { host: upstream.host, port: upstream.port },
-    () => {
-      const requestLine = `GET ${upstream.prefix}${rewriteUrl(req.url, route)} HTTP/1.1\r\n`;
-      // isUpgrade=true: the handshake NEEDS Connection/Upgrade forwarded.
-      const headers = buildForwardHeaders(req, upstream, true);
-      const raw = Object.entries(headers)
-        .map(([k, v]) => `${k}: ${v}`)
-        .join("\r\n");
-      upstreamSocket.write(`${requestLine}${raw}\r\n\r\n`);
-      if (head && head.length) upstreamSocket.write(head);
-      upstreamSocket.pipe(socket);
-      socket.pipe(upstreamSocket);
-    },
-  );
+  // A raw byte tunnel (not `http.request`) because a WS upgrade is opaque:
+  // forward the original handshake verbatim, then copy bytes both ways until
+  // either side closes. TLS upstreams (`https://`/`wss://`) need `tls.connect`;
+  // plain `net.connect` would send the handshake in cleartext.
+  const onConnect = () => {
+    const requestLine = `GET ${upstream.prefix}${rewriteUrl(req.url, route)} HTTP/1.1\r\n`;
+    // isUpgrade=true: the handshake NEEDS Connection/Upgrade forwarded.
+    const headers = buildForwardHeaders(req, upstream, true);
+    const raw = Object.entries(headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join("\r\n");
+    upstreamSocket.write(`${requestLine}${raw}\r\n\r\n`);
+    if (head && head.length) upstreamSocket.write(head);
+    upstreamSocket.pipe(socket);
+    socket.pipe(upstreamSocket);
+  };
+  const upstreamSocket =
+    upstream.protocol === "https:"
+      ? tls.connect(
+          {
+            host: upstream.host,
+            port: upstream.port,
+            servername: upstream.host,
+          },
+          onConnect,
+        )
+      : net.connect(
+          { host: upstream.host, port: upstream.port },
+          onConnect,
+        );
 
   // ── IDLE TIMERS: the reconnect-storm fix ──────────────────────────────────
   // Socket.IO's engine pings every 25s (pingInterval, socket.config.ts) and

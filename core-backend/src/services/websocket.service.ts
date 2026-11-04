@@ -459,8 +459,10 @@ export class WebSocketService {
   public broadcastHighConfidenceSignal(payload: HighConfidenceSignalPayload) {
     if (!this.io) return;
 
-    // Global priority channel + symbol room for subscribed clients
-    this.io.emit("high_confidence_signal", payload);
+    // Global priority channel, but exclude the symbol room: clients that
+    // joined it would otherwise receive the same event twice (global emit
+    // and room emit are separate broadcasts, so Socket.IO cannot de-dupe).
+    this.io.except(payload.symbol).emit("high_confidence_signal", payload);
     this.io.to(payload.symbol).emit("high_confidence_signal", payload);
 
     logger.info("[WebSocketService] High-confidence signal broadcast", {

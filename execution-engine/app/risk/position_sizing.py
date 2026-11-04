@@ -1,3 +1,5 @@
+import math
+
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -19,10 +21,12 @@ class RiskManager:
         """
         risk_amount = self.account_balance * self.risk_per_trade
         stop_loss_distance = price * stop_loss_pct
-        
-        if stop_loss_distance == 0:
+
+        # A negative stop distance would silently flip the position size's
+        # sign; a non-finite one would poison every downstream order.
+        if not math.isfinite(stop_loss_distance) or stop_loss_distance <= 0:
             return 0
-            
+
         quantity = risk_amount / stop_loss_distance
         return round(quantity, 6)
 

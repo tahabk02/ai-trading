@@ -15,11 +15,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import logging
+import math
 import os
 import re
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1000,12 +1001,17 @@ def _env_float(name: str, default: float) -> float:
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(
             f"{name} must be a number (accepted aliases: "
             f"{', '.join(ENV_ALIASES.get(name, ())) or 'none'}); got {raw!r}"
         ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{name} must be a finite number; got {raw!r}"
+        )
+    return value
 
 
 #: Live per-symbol streams the bridge is allowed to keep open. Each stream is
@@ -1015,7 +1021,9 @@ def _env_float(name: str, default: float) -> float:
 #: burst still makes the PO gateway time out connections. The budget bounds
 #: EAGER static readers only — the configured universe below is never truncated,
 #: so dynamic subscriptions can still arm any pair on demand.
-MAX_LIVE_STREAMS: int = _env_int("POCKET_OPTION_MAX_LIVE_STREAMS", 30)
+MAX_LIVE_STREAMS: int = max(
+    1, _env_int("POCKET_OPTION_MAX_LIVE_STREAMS", 30)
+)
 
 DEFAULT_SYMBOLS: tuple = (
     # PO OTC majors / crosses
@@ -2653,8 +2661,13 @@ def load_settings(overrides: dict | None = None) -> BridgeSettings:
     base = BridgeSettings()
     if not overrides:
         return base
-    merged = {k: v for k, v in vars(base).items()}
-    for key, value in (overrides or {}).items():
-        if value is not None:
-            merged[key] = value
-    return BridgeSettings(**merged)
+    # ``auth`` is derived (init=False) in __post_init__; passing it back into
+    # the dataclass constructor raises TypeError. Only constructor fields may
+    # be overridden, and ``replace`` preserves the frozen-instance semantics.
+    constructible = {f.name for f in fields(base) if f.init}
+    cleaned = {
+        key: value
+        for key, value in overrides.items()
+        if key in constructible and value is not None
+    }
+    return replace(base, **cleaned)

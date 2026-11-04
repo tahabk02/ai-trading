@@ -10,6 +10,7 @@ from pocket_bridge.config import (
     DEFAULT_SYMBOLS,
     MAX_LIVE_STREAMS,
     BridgeSettings,
+    load_settings,
     load_ssid,
     mask_secret_preview,
     read_env_ssid,
@@ -37,6 +38,21 @@ def test_malformed_numeric_env_names_the_variable(monkeypatch):
 
     with pytest.raises(ValueError, match="POCKET_OPTION_TIMEOUT_SECS"):
         BridgeSettings(ssid=SSID)
+
+
+def test_non_finite_float_env_is_rejected(monkeypatch):
+    monkeypatch.setenv("POCKET_OPTION_TIMEOUT_SECS", "nan")
+
+    with pytest.raises(ValueError, match="POCKET_OPTION_TIMEOUT_SECS.*finite"):
+        BridgeSettings(ssid=SSID)
+
+
+def test_load_settings_overrides_do_not_replay_derived_auth():
+    settings = load_settings({"relay_port": 9999, "auth": {"session": "must-not-be-used"}})
+
+    assert settings.relay_port == 9999
+    assert settings.auth.get("session") != "must-not-be-used"
+    assert settings.auth == BridgeSettings().auth
 
 
 def test_malformed_port_is_rejected_at_construction(monkeypatch):

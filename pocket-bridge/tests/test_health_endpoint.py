@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -47,6 +48,19 @@ def _http_get(host: str, port: int, path: str = "/health") -> tuple[int, dict]:
         f"http://{host}:{port}{path}", timeout=5
     ) as resp:
         return resp.status, json.loads(resp.read().decode("utf-8"))
+
+
+def test_health_route_accepts_query_string():
+    relay = RelayServer(BridgeSettings(), M20Engine(["EUR/USD"]))
+    relay.health_provider = lambda: {"status": "live"}
+
+    response = asyncio.run(
+        relay.process_request(None, SimpleNamespace(path="/health?probe=1"))
+    )
+
+    assert response is not None
+    assert response.status_code == 200
+    assert json.loads(response.body)["status"] == "live"
 
 
 def test_health_returns_200_on_bridge():

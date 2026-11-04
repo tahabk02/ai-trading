@@ -27,9 +27,15 @@ class ExchangeClient:
         try:
             logger.info("Placing market order", symbol=symbol, side=side, amount=amount)
             
-            # In production, we'd use self.exchange.create_market_order
-            # For this "vraie" implementation, we wrap it in a safety check
-            if self.exchange.apiKey == 'YOUR_API_KEY':
+            # The previous guard compared against the literal 'YOUR_API_KEY',
+            # but the configured default is now the empty string. Empty keys
+            # therefore fell through to a real exchange call. Refuse to send a
+            # real order without credentials.
+            if (
+                not self.exchange.apiKey
+                or not self.exchange.secret
+                or self.exchange.apiKey == "YOUR_API_KEY"
+            ):
                 logger.warning("DRY RUN: API keys not set. Simulating order.")
                 return {"id": "mock-order-id", "status": "simulated", "symbol": symbol, "side": side}
 

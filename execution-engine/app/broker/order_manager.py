@@ -1,3 +1,5 @@
+import asyncio
+
 import structlog
 from typing import Dict, Any
 from .binance_client import ExchangeClient
@@ -19,7 +21,12 @@ class OrderManager:
         Polls or listens for order status updates.
         """
         try:
-            order = await self.exchange.fetch_order(order_id, symbol)
+            # `ExchangeClient` wraps synchronous ccxt, so awaiting the return
+            # value raised "object dict can't be used in 'await' expression".
+            # Run it in a worker thread to avoid blocking the event loop.
+            order = await asyncio.to_thread(
+                self.exchange.fetch_order, order_id, symbol
+            )
             logger.info("Order status update", id=order_id, status=order['status'])
             return order
         except Exception as e:
@@ -31,7 +38,8 @@ class OrderManager:
         Emergency stop: cancels all open orders for a symbol.
         """
         try:
-            await self.exchange.cancel_all_orders(symbol)
+            # Synchronous ccxt client (see track_order above).
+            await asyncio.to_thread(self.exchange.cancel_all_orders, symbol)
             logger.warning("All orders cancelled", symbol=symbol)
         except Exception as e:
             logger.error("Cancellation failed", symbol=symbol, error=str(e))
