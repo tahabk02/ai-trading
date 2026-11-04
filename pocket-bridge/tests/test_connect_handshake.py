@@ -383,18 +383,83 @@ def test_unparseable_ssid_stops_the_reader_loop(monkeypatch, tmp_path):
     assert bridge.status == "session_expired"
 
 
-def test_no_endpoints_pinned_uses_sdk_default(monkeypatch, tmp_path, fake_client):
-    """Unset POCKET_OPTION_WS_URLS keeps the SDK's own streaming defaults
-    (pinning url= previously killed the tick stream) while still shipping the
-    tuned timeouts."""
+def test_no_endpoints_pinned_uses_preflighted_region_list(
+    monkeypatch, tmp_path, fake_client
+):
+    """Unset POCKET_OPTION_WS_URLS sends a preflighted region list through
+    ``config["urls"]`` instead of pinning the single ``url=`` that previously
+    killed the tick stream."""
     monkeypatch.delenv("POCKET_OPTION_USER_AGENT", raising=False)
     bridge = _bridge(monkeypatch, tmp_path)
     asyncio.run(bridge._import_client())
     fake = fake_client.instances[-1]
     assert fake.url is None
-    assert "urls" not in fake.config
+    urls = fake.config["urls"]
+    assert urls == list(bridge_mod.PO_API_WS_URLS)
     assert fake.config["connection_initialization_timeout_secs"] > 60
     assert fake.config["user_agent"] == DEFAULT_UA
+
+
+def test_preflight_selects_only_reachable_endpoints(monkeypatch, tmp_path):
+    monkeypatch.setenv("POCKET_BRIDGE_ENDPOINT_PREFLIGHT", "1")
+    bridge = _bridge(monkeypatch, tmp_path)
+
+    async def _reachable(url: str) -> bool:
+        return "api-us-south" in url
+
+    monkeypatch.setattr(bridge, "_endpoint_reachable", _reachable)
+    config, urls = asyncio.run(bridge._sdk_config())
+    assert urls
+    assert all("api-us-south" in url for url in urls)
+    assert config["urls"] == urls
+
+
+def test_preflight_skipped_when_proxy_is_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("POCKET_BRIDGE_ENDPOINT_PREFLIGHT", "1")
+    bridge = _bridge(monkeypatch, tmp_path, proxy_url="socks5://127.0.0.1:1080")
+    called = False
+
+    async def _reachable(url: str) -> bool:
+        nonlocal called
+        called = True
+        return False
+
+    monkeypatch.setattr(bridge, "_endpoint_reachable", _reachable)
+    config, urls = asyncio.run(bridge._sdk_config())
+    assert called is False
+    assert urls == list(bridge_mod.PO_API_WS_URLS)
+    assert config["proxy"] == "socks5://127.0.0.1:1080"
+
+
+def test_all_endpoints_unreachable_fails_fast_without_sdk(
+    monkeypatch, tmp_path, fake_client
+):
+    monkeypatch.setenv("POCKET_BRIDGE_ENDPOINT_PREFLIGHT", "1")
+    bridge = _bridge(monkeypatch, tmp_path)
+
+    async def _unreachable(url: str) -> bool:
+        return False
+
+    monkeypatch.setattr(bridge, "_endpoint_reachable", _unreachable)
+    before = len(fake_client.instances)
+    with pytest.raises(bridge_mod.EndpointUnreachableError):
+        asyncio.run(bridge._sdk_config())
+    assert len(fake_client.instances) == before
+
+
+def test_ensure_connected_unreachable_endpoint_sets_connection_error(
+    monkeypatch, tmp_path, fake_client
+):
+    monkeypatch.setenv("POCKET_BRIDGE_ENDPOINT_PREFLIGHT", "1")
+    bridge = _bridge(monkeypatch, tmp_path)
+
+    async def _unreachable(url: str) -> bool:
+        return False
+
+    monkeypatch.setattr(bridge, "_endpoint_reachable", _unreachable)
+    asyncio.run(bridge._ensure_connected())
+    assert bridge.status == "connection_error"
+    assert fake_client.instances == []
 
 
 def test_configured_user_agent_is_sent_to_sdk(monkeypatch, tmp_path, fake_client):

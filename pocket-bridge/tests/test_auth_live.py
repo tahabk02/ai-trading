@@ -16,6 +16,7 @@ Prints, in order:
 Exit code:
     0 = SSID found + auth OK + at least one real tick received
     1 = missing SSID / auth failed / no tick within 15s
+    2 = no Pocket Option WebSocket endpoint reachable (environmental)
 """
 
 from __future__ import annotations
@@ -40,8 +41,12 @@ logging.basicConfig(level=logging.ERROR, format="%(levelname)s:%(name)s:%(messag
 
 import pytest  # noqa: E402
 
-from pocket_bridge.bridge import CONNECT_DEADLINE_GRACE  # noqa: E402
+from pocket_bridge.bridge import (  # noqa: E402
+    CONNECT_DEADLINE_GRACE,
+    PocketOptionBridge,
+)
 from pocket_bridge.config import BridgeSettings, parse_ssid  # noqa: E402
+from pocket_bridge.m20_engine import M20Engine  # noqa: E402
 
 WAIT_SECONDS = 15
 
@@ -94,6 +99,23 @@ async def _probe() -> int:
         return 1
 
     settings = BridgeSettings(ssid=ssid)
+    bridge = PocketOptionBridge(settings, M20Engine([], max_history=10))
+    # Exercise the SAME endpoint preflight the bridge uses in production. A
+    # dead demo host otherwise blocks the native constructor for the full
+    # 120s handshake budget and looks like an auth bug.
+    candidates = bridge._candidate_sdk_urls()
+    urls = [
+        url
+        for url in candidates
+        if await bridge._endpoint_reachable(url)
+    ]
+    if not urls:
+        print(
+            "AUTH_FAILED reason=endpoint_unreachable candidates="
+            f"{','.join(candidates)}"
+        )
+        return 2
+
     client = None
     # Exercise the SAME handshake budget the bridge uses in production — the
     # SDK's own 60s default is what aborts the endpoint rotation with
@@ -111,6 +133,7 @@ async def _probe() -> int:
                 ),
                 "timeout_secs": int(settings.po_request_timeout),
                 "reconnect_time": int(settings.po_reconnect_time),
+                "urls": urls,
             },
         )
     except Exception as exc:  # NOQA: BLE001
@@ -157,7 +180,13 @@ def test_auth_and_first_tick_live():
             "POCKET_OPTION_SSID not set (env, core-backend/.env or "
             "pocket-bridge/.env) — live auth probe skipped"
         )
-    assert asyncio.run(_probe()) == 0
+    result = asyncio.run(_probe())
+    if result == 2:
+        pytest.skip(
+            "no Pocket Option WebSocket endpoint reachable — live auth "
+            "probe skipped (environmental, not an auth failure)"
+        )
+    assert result == 0
 
 
 def main() -> int:

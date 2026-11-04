@@ -57,7 +57,7 @@ from .config import (
 from .m20_engine import M20Engine, M20Candle
 
 logger = logging.getLogger("pocket_bridge.bridge")
-DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket"
+
 
 def _env_int_min(name: str, default: int, minimum: int = 1) -> int:
     """Read a positive integer tuning knob without breaking module import."""
@@ -73,6 +73,27 @@ def _env_float_min(name: str, default: float, minimum: float = 0.0) -> float:
         return max(minimum, float(os.getenv(name, str(default))))
     except (TypeError, ValueError):
         return default
+
+
+#: Raw Socket.IO endpoint used by the health/raw probe (never a stream override).
+DEFAULT_PO_WS_URL = "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket"
+#: Demo sessions are routed to this host by the pinned SDK. It is a SINGLE
+#: compiled endpoint, so when it is unreachable the SDK blocks the event loop
+#: for the full handshake budget instead of rotating. Preflight it first.
+PO_DEMO_WS_URL = "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket"
+#: Reachable API hosts to fall back to when POCKET_OPTION_WS_URLS is unset.
+PO_API_WS_URLS = (
+    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-us-south.po.market/socket.io/?EIO=4&transport=websocket",
+    "wss://api-msk.po.market/socket.io/?EIO=4&transport=websocket",
+)
+#: Per-endpoint preflight budget. Kept short: a dead demo host must be skipped
+#: in seconds, not after the SDK's 120s native handshake budget.
+ENDPOINT_PROBE_TIMEOUT = _env_float_min(
+    "POCKET_BRIDGE_ENDPOINT_PROBE_TIMEOUT", 4.0
+)
+#: How long a reachable-endpoint result is trusted before re-probing.
+ENDPOINT_PROBE_TTL = _env_float_min("POCKET_BRIDGE_ENDPOINT_PROBE_TTL", 60.0)
 
 
 #: BinaryOptionsToolsV2 0.2.14 can only stream ONE asset per client: a second
@@ -395,6 +416,17 @@ class AssetSkippedError(Exception):
         self.candidates = candidates
 
 
+class EndpointUnreachableError(Exception):
+    """Raised when NO Pocket Option WebSocket endpoint passes the preflight.
+
+    This is a TRANSPORT condition (dead demo host / blocked egress), not a bad
+    credential. Raising it BEFORE ``PocketOptionAsync`` is constructed is
+    critical: the native constructor blocks the Python event loop for its full
+    handshake budget, so a dead demo endpoint otherwise freezes the relay and
+    leaves ``/health`` (and the UI) stuck on ``connecting`` for minutes.
+    """
+
+
 class ReaderCapReached(Exception):
     """Raised when opening another per-symbol client would exceed the venue's
     proven concurrent-stream budget. Not retried: the reader stops cleanly and
@@ -677,6 +709,10 @@ class PocketOptionBridge:
         #: that is blocked/failing the handshake is bypassed on the very next
         #: attempt instead of being probed first every single time.
         self._endpoint_rotation = 0
+        #: reachable endpoints selected by the async preflight, cached for
+        #: ENDPOINT_PROBE_TTL so 30 readers do not re-probe the same hosts.
+        self._resolved_sdk_urls: Optional[list[str]] = None
+        self._resolved_sdk_urls_at: float = 0.0
         #: last raw exception raised while connecting, inspected by
         #: ``_is_transport_error`` to separate a dead socket from a dead SSID.
         self._last_transport_error: Optional[BaseException] = None
@@ -1010,22 +1046,135 @@ class PocketOptionBridge:
             return client
         return None
 
-    def _sdk_config(self) -> tuple[Dict[str, object], list[str]]:
+    def _preflight_enabled(self) -> bool:
+        return os.getenv(
+            "POCKET_BRIDGE_ENDPOINT_PREFLIGHT", "1"
+        ).strip().lower() not in {"", "0", "false", "no", "off"}
+
+    def _candidate_sdk_urls(self) -> list[str]:
+        """Configured URLs, or the demo host / API regions when none are set."""
+        configured = [url.strip() for url in self.settings.urls if url.strip()]
+        if configured:
+            return configured
+        if self.settings.is_demo:
+            # The pinned SDK only compiles demo-api-eu for demo sessions and
+            # ignores API URLs when isDemo=1 (verified: it retried only the demo
+            # host even with [demo, api-eu, api-us-south] configured). Never
+            # pretend an API host is usable here: if demo-api-eu is filtered we
+            # must fail fast instead of blocking 120s in the native handshake.
+            return [PO_DEMO_WS_URL]
+        return list(PO_API_WS_URLS)
+
+    async def _endpoint_reachable(self, url: str) -> bool:
+        """Raw Socket.IO preflight: TCP/TLS/HTTP + the initial 0{...} frame.
+
+        This runs in the async event loop (websockets is already a dependency),
+        so it cannot block health/relay traffic. It intentionally sends NO
+        credential: the SDK still performs the real auth after a host passes.
+        """
+        try:
+            import websockets  # noqa: F401 - optional but pinned in requirements
+        except ImportError:  # pragma: no cover - dependency is pinned
+            return True
+        try:
+            async with websockets.connect(
+                url,
+                open_timeout=ENDPOINT_PROBE_TIMEOUT,
+                close_timeout=1.0,
+                origin="https://pocketoption.com",
+                user_agent_header=resolve_user_agent(self.settings.user_agent),
+            ) as ws:
+                await asyncio.wait_for(
+                    ws.recv(), timeout=ENDPOINT_PROBE_TIMEOUT
+                )
+            logger.info("WS_ENDPOINT_REACHABLE url=%s", url)
+            return True
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort
+            logger.warning(
+                "WS_ENDPOINT_UNREACHABLE url=%s error_type=%s error=%s",
+                url,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return False
+
+    async def _resolve_sdk_urls(self) -> list[str]:
+        """Pick reachable endpoints before the blocking native constructor.
+
+        A dead demo host leaves the SDK's single compiled URL unusable; calling
+        ``PocketOptionAsync`` then freezes the event loop for the full
+        ``connection_initialization_timeout_secs`` and leaves the relay/health
+        endpoint unable to answer (the UI's "stuck connecting" symptom). The
+        probe result is cached for ``ENDPOINT_PROBE_TTL`` so 30 readers do not
+        re-run it per handshake.
+        """
+        candidates = self._candidate_sdk_urls()
+        now = time.monotonic()
+        if (
+            self._resolved_sdk_urls is not None
+            and (now - self._resolved_sdk_urls_at) < ENDPOINT_PROBE_TTL
+            # Re-probe if the credential tier changed (demo <-> real) so a
+            # cached demo host is never reused for a real-session handshake.
+            and all(url in candidates for url in self._resolved_sdk_urls)
+        ):
+            return list(self._resolved_sdk_urls)
+        # The preflight probe is direct (websockets has no stable proxy option
+        # across the pinned range). When the SDK is configured to egress via a
+        # proxy, a direct probe would produce false negatives and wrongly fail
+        # a healthy proxied deployment, so leave endpoint selection to the SDK.
+        if (
+            not self._preflight_enabled()
+            or not candidates
+            or self.settings.proxy_url
+        ):
+            if self.settings.proxy_url:
+                logger.info(
+                    "WS_ENDPOINT_PREFLIGHT_SKIPPED proxy=%s — SDK owns the "
+                    "network path",
+                    mask_proxy_url(self.settings.proxy_url),
+                )
+            self._resolved_sdk_urls = list(candidates)
+            self._resolved_sdk_urls_at = now
+            return list(candidates)
+
+        results = await asyncio.gather(
+            *(self._endpoint_reachable(url) for url in candidates)
+        )
+        reachable = [
+            url for url, ok in zip(candidates, results) if ok
+        ]
+        skipped = [url for url in candidates if url not in reachable]
+        if reachable:
+            logger.info(
+                "WS_ENDPOINTS_SELECTED reachable=%s skipped=%s "
+                "isDemo=%s probe_timeout=%ss",
+                reachable,
+                skipped,
+                self.settings.is_demo,
+                ENDPOINT_PROBE_TIMEOUT,
+            )
+        else:
+            logger.critical(
+                "WS_ENDPOINTS_UNREACHABLE candidates=%s isDemo=%s "
+                "probe_timeout=%ss — refusing to block the event loop in the "
+                "native handshake",
+                candidates,
+                self.settings.is_demo,
+                ENDPOINT_PROBE_TIMEOUT,
+            )
+        self._resolved_sdk_urls = reachable
+        self._resolved_sdk_urls_at = now
+        return list(reachable)
+
+    async def _sdk_config(self) -> tuple[Dict[str, object], list[str]]:
         """Build the SDK config shared by the control and per-symbol clients.
 
-        The SDK's own compiled regional endpoint list is used whenever
-        POCKET_OPTION_WS_URLS is unset — it authenticates AND streams live
-        ticks, whereas pinning url= to DEFAULT_PO_WS_URL broke subscriptions
-        entirely (Core(ChannelReceiver(Closed)); auth reported OK but the tick
-        stream died instantly). The constant above stays the raw-socket
-        probe / health target, never a stream override here.
-
-        The config dict is ALWAYS passed so the native handshake budget is
-        ours, not the SDK default of 60s: the Rust core aborts the whole
-        connection with "General error: Connection initialization timed out"
-        when the endpoint rotation has not authenticated inside
-        connection_initialization_timeout_secs, and 60s is not enough to walk
-        a blocked regional host through to a healthy one.
+        Endpoints are preflighted first (see ``_resolve_sdk_urls``). The config
+        dict is ALWAYS passed so the native handshake budget is ours, not the
+        SDK default of 60s. When no configured URL is reachable we raise
+        :class:`EndpointUnreachableError` BEFORE constructing the native client:
+        the constructor holds the GIL/event loop for its whole budget, which is
+        what made ``/health`` time out and the feed look stuck on "connecting".
         """
         sdk_config: Dict[str, object] = {
             "connection_initialization_timeout_secs": int(self.settings.po_init_timeout),
@@ -1040,12 +1189,22 @@ class PocketOptionBridge:
         # SDK keeps its own handshake semantics.
         if self.settings.proxy_url:
             sdk_config["proxy"] = self.settings.proxy_url
-        urls = list(self.settings.urls)
-        if urls:
-            if len(urls) > 1 and self._endpoint_rotation:
-                cut = self._endpoint_rotation % len(urls)
-                urls = urls[cut:] + urls[:cut]
-            sdk_config["urls"] = urls
+        urls = await self._resolve_sdk_urls()
+        if not urls:
+            hint = (
+                " — demo-api-eu is filtered and demo sessions cannot use API "
+                "regions; capture a fresh session or use a real sessionToken"
+                if self.settings.is_demo
+                else ""
+            )
+            raise EndpointUnreachableError(
+                "no Pocket Option WebSocket endpoint is reachable "
+                f"(candidates: {', '.join(self._candidate_sdk_urls())}){hint}"
+            )
+        if len(urls) > 1 and self._endpoint_rotation:
+            cut = self._endpoint_rotation % len(urls)
+            urls = urls[cut:] + urls[:cut]
+        sdk_config["urls"] = urls
         return sdk_config, urls
 
     async def _import_client(self):
@@ -1053,7 +1212,7 @@ class PocketOptionBridge:
             return self.client
         self._check_dependency()
         from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync  # noqa: E402
-        sdk_config, urls = self._sdk_config()
+        sdk_config, urls = await self._sdk_config()
         kwargs: Dict[str, object] = {"config": sdk_config}
         auth_dict = self._auth_dict()
         payload = self._auth_payload()
@@ -1313,7 +1472,7 @@ class PocketOptionBridge:
                             await asyncio.sleep(wait)
                         self._last_reader_connect_at = time.monotonic()
                     self._check_dependency()
-                    sdk_config, _urls = self._sdk_config()
+                    sdk_config, _urls = await self._sdk_config()
                     client = self._build_client(
                         self._auth_payload(), {"config": sdk_config}
                     )
@@ -2210,7 +2369,19 @@ class PocketOptionBridge:
                 except Exception:  # noqa: BLE001 - best-effort teardown
                     pass
                 self.client = None
-            client = await self._import_client()
+            try:
+                client = await self._import_client()
+            except EndpointUnreachableError as exc:
+                # Preflight already established that no endpoint is reachable.
+                # Do NOT construct the native client (it would block the event
+                # loop for POCKET_OPTION_INIT_TIMEOUT and freeze /health).
+                self._last_transport_error = exc
+                logger.error("endpoint_preflight_failed reason=%s", exc)
+                await self._set_status(
+                    "connection_error",
+                    f"{exc} (endpoint unreachable - retrying)",
+                )
+                return
             try:
                 await asyncio.wait_for(
                     client.wait_for_assets(timeout=connect_deadline),

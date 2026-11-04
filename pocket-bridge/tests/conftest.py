@@ -20,3 +20,5 @@ AUTH_ENV_KEYS = (
 def _clear_pocket_option_auth_env(monkeypatch):
     for key in AUTH_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    # Tests must never hit the live WebSocket preflight / Pocket Option hosts.
+    monkeypatch.setenv("POCKET_BRIDGE_ENDPOINT_PREFLIGHT", "0")
