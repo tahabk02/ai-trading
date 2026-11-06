@@ -1616,25 +1616,33 @@ class ForexDataService {
   computeTargetPrice(
     direction: "BUY" | "SELL" | "HOLD",
     livePrice: number,
-    atr: number,
+    atr: number | null | undefined,
     timeframe: string,
     symbol: string,
-  ): number {
-    if (!Number.isFinite(livePrice) || livePrice <= 0) return 0;
-    if (!Number.isFinite(atr) || atr <= 0) return livePrice;
+  ): number | null {
+    // A target is only meaningful when BOTH the price and a real volatility
+    // estimate exist. The old implementation returned `livePrice` when ATR was
+    // zero/missing, which is indistinguishable from "no target" and could turn
+    // a non-executable verdict into an actionable-looking one. Missing data
+    // must stay missing; the AI engine owns the canonical target.
+    if (!Number.isFinite(livePrice) || livePrice <= 0) return null;
+    if (typeof atr !== "number" || !Number.isFinite(atr) || atr <= 0)
+      return null;
+    if (direction !== "BUY" && direction !== "SELL") return null;
 
-    // Scale ATR by timeframe — longer timeframes = larger moves
+    // Scale ATR by timeframe - longer timeframes = larger moves
     const tfScale = this.timeframeToMultiplier(timeframe);
     const targetDistance = atr * tfScale;
 
-    if (direction === "BUY") {
-      return Number((livePrice + targetDistance).toFixed(6));
-    } else if (direction === "SELL") {
-      return Number((livePrice - targetDistance).toFixed(6));
-    }
+    const target =
+      direction === "BUY"
+        ? livePrice + targetDistance
+        : livePrice - targetDistance;
 
-    // HOLD — flat projection
-    return livePrice;
+    if (!Number.isFinite(target) || target <= 0) return null;
+    // A projection equal to spot is not a target.
+    if (target === livePrice) return null;
+    return Number(target.toFixed(6));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

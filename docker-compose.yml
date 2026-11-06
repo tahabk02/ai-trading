@@ -68,6 +68,13 @@ services:
       # and warms the model cache in the background. 0 = legacy unbounded.
       AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
       AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:-}
+      FINGPT_SENTIMENT_URL: ${FINGPT_SENTIMENT_URL:-}
+      FINGPT_API_KEY: ${FINGPT_API_KEY:-}
+      OPENBB_MACRO_URL: ${OPENBB_MACRO_URL:-}
+      OPENBB_API_KEY: ${OPENBB_API_KEY:-}
+      QLIB_ML_URL: ${QLIB_ML_URL:-}
+      QLIB_API_KEY: ${QLIB_API_KEY:-}
+      QUANT_PROVIDER_TIMEOUT_SECONDS: ${QUANT_PROVIDER_TIMEOUT_SECONDS:-2.0}
     depends_on:
       redis:
         condition: service_healthy
@@ -146,6 +153,32 @@ services:
       REDIS_HOST: redis
       ENVIRONMENT: production
       TZ: UTC
+      TRADING_MODE: ${EXECUTION_TRADING_MODE:-disabled}
+      ALLOWED_SYMBOLS: ${EXECUTION_ALLOWED_SYMBOLS:-}
+      SIGNAL_STREAM: ${EXECUTION_SIGNAL_STREAM:-trading_signals:stream}
+      SIGNAL_GROUP: ${EXECUTION_SIGNAL_GROUP:-execution-gateway}
+      DEAD_LETTER_STREAM: ${EXECUTION_DEAD_LETTER_STREAM:-execution:dead_letter}
+      MIN_CONFIDENCE: ${EXECUTION_MIN_CONFIDENCE:-96.5}
+      MAX_SIGNAL_AGE_MS: "5000"
+      MAX_NOTIONAL_PER_TRADE: ${MAX_NOTIONAL_PER_TRADE:-50}
+      MAX_OPEN_NOTIONAL: ${MAX_OPEN_NOTIONAL:-0}
+      MAX_TRADES_PER_DAY: ${MAX_TRADES_PER_DAY:-20}
+      MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-0}
+      RISK_PER_TRADE: ${RISK_PER_TRADE:-0.01}
+      DEDUPE_WINDOW_SECONDS: ${DEDUPE_WINDOW_SECONDS:-60}
+      KILL_SWITCH_KEY: ${KILL_SWITCH_KEY:-execution:kill_switch}
+      MAX_SUBMIT_ATTEMPTS: ${MAX_SUBMIT_ATTEMPTS:-3}
+      MAX_RECONCILE_AGE_MS: ${MAX_RECONCILE_AGE_MS:-60000}
+      SQLITE_PATH: /app/data/execution.db
+      DEFAULT_BALANCE: ${DEFAULT_BALANCE:-1000.0}
+      HEALTH_PORT: "8081"
+    env_file:
+      - path: ./execution-engine/.env
+        required: false
+    volumes:
+      - execution_data:/app/data
+    expose:
+      - "8081"
     depends_on:
       redis:
         condition: service_healthy
@@ -197,11 +230,14 @@ services:
       # /run/secrets/pocket_option_ssid to use it (contents are gitignored).
       - ./pocket-bridge/secrets:/run/secrets:ro
     ports:
-      - "8788:8788"
-      - "8789:8789"   # /health endpoint (relay_port + 1)
+      # Container-to-container traffic uses radar_network; host tools may
+      # reach these only through loopback, never a public interface.
+      - "127.0.0.1:8788:8788"
+      - "127.0.0.1:8789:8789"   # /health endpoint (relay_port + 1)
     networks:
       - radar_network
     restart: always
 
 volumes:
   postgres_data:
+  execution_data:

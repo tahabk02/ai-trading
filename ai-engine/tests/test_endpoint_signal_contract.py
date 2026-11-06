@@ -28,12 +28,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.main import app
+from app.api.v1.signals import _validate_response_finite
 from app.services.book_instruments import DEFINITIVE_CONFIDENCE_MIN
 from app.services.ml_predictor import _model_cache
 from app.services.signal_lock import signal_lock
@@ -49,6 +51,23 @@ from test_endpoint_mixed import (  # noqa: E402
 )
 
 PILLARS = ("volatility", "momentum", "microstructure")
+
+
+@pytest.mark.parametrize("confidence", [None, "96.5", -0.1, 100.1, float("nan")])
+def test_ai_response_contract_rejects_invalid_confidence(confidence):
+    with pytest.raises(HTTPException) as exc:
+        _validate_response_finite({"confidence": confidence})
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "confidence_contract_invalid"
+
+
+def test_ai_response_contract_marks_percent_and_preserves_missing_target():
+    response = _validate_response_finite(
+        {"confidence": 96.5, "target_price": None, "current_price": 1.1}
+    )
+    assert response["schema_version"] == "1.0.0"
+    assert response["confidence_unit"] == "percent"
+    assert response["target_price"] is None
 
 
 @pytest.fixture(autouse=True)

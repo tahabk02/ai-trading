@@ -656,6 +656,7 @@ class PocketOptionBridge:
         self._reader_connect_sem = asyncio.Semaphore(READER_CONNECT_CONCURRENCY)
         self._reader_connect_lock = asyncio.Lock()
         self._last_reader_connect_at: float = 0.0
+        self._pending_stall_symbols: set[str] = set()
         #: First configured symbol; its stream reuses ``self.client``.
         self._primary_symbol: Optional[str] = None
         #: True once the PO client is authenticated AND the authoritative asset
@@ -2038,11 +2039,6 @@ class PocketOptionBridge:
         await self._ensure_connected()
         if not self.is_connected:
             return
-        # One active subscription per client (SDK 0.2.14 limitation); the
-        # primary pair shares the control client, every other pair gets its own.
-        client = await self._ensure_reader_client(symbol)
-        if not self._client_connected(client):
-            return
         if not self._assets_ready:
             # NEVER call subscribe_symbol() against an uninitialised registry:
             # the SDK raises General("Assets not found") for EVERY symbol,
@@ -2054,7 +2050,10 @@ class PocketOptionBridge:
                 symbol, detail,
             )
             raise AssetsNotReadyError(symbol, detail)
-        resolved = await self._resolve_asset(client, symbol)
+        # Validate against the authenticated control client's authoritative
+        # registry before reserving a dedicated connection. Unsupported pairs
+        # must not consume one of the scarce per-symbol reader slots.
+        resolved = await self._resolve_asset(self.client, symbol)
         if resolved is None:
             candidates = list(asset_candidates(symbol))
             logger.warning(
@@ -2070,11 +2069,24 @@ class PocketOptionBridge:
                 symbol, asset, resolved,
             )
             asset = resolved
+        # One active subscription per client (SDK 0.2.14 limitation); the
+        # primary pair shares the control client, every other pair gets its own.
+        client = await self._ensure_reader_client(symbol)
+        if not self._client_connected(client):
+            await self._release_reader_client(symbol)
+            return
         try:
             asset, stream = await self._subscribe_first_available(
                 client, symbol, asset
             )
-        except (AssetSkippedError, AssetsNotReadyError):
+        except AssetSkippedError:
+            # The asset may have disappeared from the registry between
+            # validation and subscribe_symbol(). Release a secondary acquired
+            # for this now-unsupported pair; the shared primary stays alive.
+            if not self._is_primary_symbol(symbol):
+                await self._release_reader_client(symbol)
+            raise
+        except AssetsNotReadyError:
             raise
         except Exception as exc:  # noqa: BLE001 - transport/subscribe failure
             logger.error("subscribe_symbol(%s) failed: %s", asset, exc)
@@ -3094,6 +3106,7 @@ class PocketOptionBridge:
         self._session_watch_task = None
         self._refresh_task = None
         self._recovery_task = None
+        self._pending_stall_symbols.clear()
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
@@ -3182,6 +3195,7 @@ class PocketOptionBridge:
             connected = False
 
         keepalive_ok: Optional[bool] = None
+        recover_symbols: set[str] = set()
         if send_keepalive and connected and self.client is not None:
             try:
                 await self.client.send_raw_message(self.settings.keepalive_message)
@@ -3193,19 +3207,26 @@ class PocketOptionBridge:
                     except Exception as exc:  # noqa: BLE001 - reader retries
                         logger.warning(
                             "READER_KEEPALIVE_FAIL symbol=%s error=%s — "
-                            "its reader will rebuild the client",
+                            "scheduling only this reader for recovery",
                             symbol, exc,
                         )
-                keepalive_ok = True
+                        recover_symbols.add(symbol)
+                        keepalive_ok = False
+                if keepalive_ok is None:
+                    keepalive_ok = True
                 self._last_keepalive_at = wall_now
             except Exception as exc:  # noqa: BLE001 - recycle below
                 keepalive_ok = False
                 logger.warning(
                     "HEARTBEAT_KEEPALIVE_FAIL message=%s error=%s — "
-                    "releasing half-open client for clean re-auth",
+                    "recycling the primary reader",
                     self.settings.keepalive_message, exc,
                 )
-                await self._release_client()
+                primary = self._primary_symbol
+                if primary and primary in self._reader_tasks:
+                    recover_symbols.add(primary)
+                else:
+                    await self._release_client()
                 if self.status == "connected":
                     await self._set_status(
                         "connection_error",
@@ -3215,9 +3236,13 @@ class PocketOptionBridge:
         elif self.client is not None and not connected and self.status == "connected":
             logger.warning(
                 "HEARTBEAT_SOCKET_CLOSED is_connected=False — "
-                "releasing client so readers rebuild the socket"
+                "recycling the primary reader"
             )
-            await self._release_client()
+            primary = self._primary_symbol
+            if primary and primary in self._reader_tasks:
+                recover_symbols.add(primary)
+            else:
+                await self._release_client()
             await self._set_status(
                 "connection_error", "socket closed — reconnecting"
             )
@@ -3258,17 +3283,18 @@ class PocketOptionBridge:
             stall_age = max(stalled_ages.values())
             logger.warning(
                 "WATCHDOG_STALLED symbols=%s no_ticks_for=%.1fs threshold=%.1fs — "
-                "clean disconnect -> re-auth -> resubscribe "
-                "(engine/dynamic OTC state preserved)",
+                "recycling only stalled readers",
                 ",".join(sorted(stalled_ages)), stall_age, stale_window,
             )
-            await self._release_client()
-            await self._set_status(
-                "stalled",
-                f"no ticks for {stall_age:.0f}s — reconnecting",
-            )
-            connected = False
-            self._schedule_stall_recovery(list(stalled_ages))
+            recover_symbols.update(stalled_ages)
+            if not (set(self._subs) - set(stalled_ages)):
+                await self._set_status(
+                    "stalled",
+                    f"no ticks for {stall_age:.0f}s — reconnecting",
+                )
+
+        if recover_symbols:
+            self._schedule_stall_recovery(sorted(recover_symbols))
 
         if not emit:
             return
@@ -3305,19 +3331,15 @@ class PocketOptionBridge:
                 logger.exception("heartbeat relay failed")
 
     def _schedule_stall_recovery(self, symbols: list[str]) -> None:
-        """Schedule a clean re-auth/resubscribe cycle after a stall.
-
-        The heartbeat probe stays fast (it must not block on a 90s handshake),
-        so the actual teardown/reconnect runs in a dedicated task. It is only
-        scheduled when reader tasks exist — without readers there is nothing to
-        resubscribe and the next connect will arm them normally.
-        """
-        if not self._reader_tasks:
+        """Schedule recovery for only the affected readers."""
+        affected = {symbol for symbol in symbols if symbol}
+        if not affected:
             return
+        self._pending_stall_symbols.update(affected)
         if self._recovery_task is not None and not self._recovery_task.done():
             logger.info(
                 "STALL_RECOVERY_ALREADY_RUNNING symbols=%s",
-                ",".join(sorted(symbols)),
+                ",".join(sorted(self._pending_stall_symbols)),
             )
             return
         try:
@@ -3325,42 +3347,51 @@ class PocketOptionBridge:
         except RuntimeError:  # pragma: no cover - no loop => nothing to schedule
             return
         self._recovery_task = loop.create_task(
-            self._recover_after_stall(symbols)
+            self._recover_after_stall([])
         )
 
     async def _recover_after_stall(self, symbols: list[str]) -> None:
-        """Clean disconnect -> re-authenticate -> resubscribe every symbol."""
+        """Recycle stalled readers individually, preserving healthy streams."""
         async with self._recovery_lock:
-            logger.warning(
-                "STALL_RECOVERY_BEGIN symbols=%s — disconnecting, "
-                "re-authenticating, resubscribing",
-                ",".join(sorted(symbols)),
-            )
-            try:
-                await self._teardown_client()
-                await self._ensure_connected()
-                # Re-arm BOTH sets: teardown cancelled every reader, including
-                # dynamic OTC pairs armed by a browser subscription push.
-                self._start_static_readers()
-                for symbol in list(self._dynamic_symbols):
-                    self._assets.setdefault(symbol, asset_for_symbol(symbol))
-                self._rearm_dynamic_readers()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - readers retry themselves
-                logger.error(
-                    "STALL_RECOVERY_FAILED error_type=%s error=%s — "
-                    "readers will continue their own bounded backoff",
-                    type(exc).__name__, exc,
-                )
-                return
-            if self.is_connected:
-                logger.info(
-                    "STALL_RECOVERY_COMPLETE symbols=%s",
-                    ",".join(sorted(self._subs)) or "(pending readers)",
-                )
-            else:
-                logger.warning(
-                    "STALL_RECOVERY_DEFERRED — re-auth did not complete; "
-                    "readers will retry on the exponential ladder"
-                )
+            pending = set(symbols)
+            while pending or self._pending_stall_symbols:
+                pending.update(self._pending_stall_symbols)
+                self._pending_stall_symbols.clear()
+                for symbol in sorted(pending):
+                    pending.discard(symbol)
+                    if symbol not in self._reader_tasks:
+                        continue
+                    logger.warning(
+                        "STALL_READER_RECOVERY_BEGIN symbol=%s — recycling "
+                        "only this reader",
+                        symbol,
+                    )
+                    task = self._reader_tasks.get(symbol)
+                    if task is not None and not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    self._reader_tasks.pop(symbol, None)
+                    self._reader_symbols.discard(symbol)
+                    asset = self._assets.get(symbol) or asset_for_symbol(symbol)
+                    try:
+                        await self._release_reader_client(symbol)
+                    except Exception as exc:  # noqa: BLE001 - continue other readers
+                        logger.warning(
+                            "STALL_READER_RELEASE_FAILED symbol=%s "
+                            "error_type=%s error=%s",
+                            symbol, type(exc).__name__, exc,
+                        )
+                    if (
+                        self._retry_stopped
+                        or not asset
+                        or (
+                            symbol not in self.settings.static_symbols()
+                            and symbol not in self._dynamic_symbols
+                        )
+                    ):
+                        continue
+                    self._spawn_reader(symbol, asset)
+                    logger.info(
+                        "STALL_READER_RECOVERY_SCHEDULED symbol=%s",
+                        symbol,
+                    )

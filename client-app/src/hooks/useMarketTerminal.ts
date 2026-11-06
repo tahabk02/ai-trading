@@ -43,6 +43,9 @@ const PREDICT_FALLBACK_MS = 15_000;
  *           `market-terminal` room and streams this ONE feed:
  *             • `market_quotes`      — 1Hz all-symbol quote snapshots
  *             • `live_quant_signal`  — 1Hz AI micro-quant verdicts (all pairs)
+ *           This does NOT arm PO readers per card; only the active chart's
+ *           `subscribe` event requests a per-symbol bridge stream. Grid-only
+ *           pairs retain their quote provenance and proxy/offline label.
  *           No per-symbol rooms are joined (no 34× replay bursts).
  * BOOTSTRAP: one REST GET /api/v1/quotes paints prices before the first beat.
  * REFRESH:  `setGlobalHorizon` / `setCardHorizon` fire a debounced

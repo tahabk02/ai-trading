@@ -167,12 +167,15 @@ const makeBars = (n = 60): Record<string, unknown>[] => {
 
 const FRESH_TICK = { price: 1.1525, tsMs: Date.now() - 100 };
 const AI_PAYLOAD = {
+  schema_version: "1.0.0",
+  confidence_unit: "percent",
   symbol: "EUR/USD",
   signal: "BUY",
   confidence: 99,
   market_waiting: false,
   target_price: 1.16,
   current_price: 1.1525,
+  horizon_minutes: 1,
   timeframe: "1d",
   diagnostics: { book: {} },
   book_confluence: { book_confirm: 0.98 },
@@ -262,6 +265,119 @@ describe("POST /api/v1/predict — graceful fallback contract", () => {
     expect(response.body.candles).toHaveLength(60);
     expect(response.body.barCount).toBe(60);
     expect(typeof response.body.proxyLatencyMs).toBe("number");
+  });
+
+  it("test_predict_passes_ai_target_and_horizon_through_without_local_recompute", async () => {
+    axiosPost.post.mockResolvedValue({ data: AI_PAYLOAD });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "GBP/JPY", timeframe: "1d" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.code).toBe(200);
+    expect(response.body.target_price).toBe(1.16);
+    expect(response.body.horizon_minutes).toBe(1);
+    expect(response.body.display_target_override).toBeNull();
+    // The AI target is authoritative; Node must not derive one from ATR.
+    expect(forex.computeTargetPrice).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the AI confidence percentage is outside 0..100", async () => {
+    axiosPost.post.mockResolvedValue({
+      data: { ...AI_PAYLOAD, confidence: 101 },
+    });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "USD/CHF", timeframe: "2h" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.body.signal).toBeNull();
+    expect(response.body.market_waiting).toBe(true);
+    expect(response.body.waiting_reason).toBe("AI_CONFIDENCE_INVALID");
+    expect(forex.computeTargetPrice).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the AI confidence unit is absent", async () => {
+    axiosPost.post.mockResolvedValue({
+      data: { ...AI_PAYLOAD, confidence_unit: undefined },
+    });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "USD/CAD", timeframe: "2h" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.body.signal).toBeNull();
+    expect(response.body.waiting_reason).toBe("AI_CONFIDENCE_INVALID");
+  });
+
+  it("fails closed on an unsupported AI response schema version", async () => {
+    axiosPost.post.mockResolvedValue({
+      data: { ...AI_PAYLOAD, schema_version: "2.0.0" },
+    });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "AUD/USD", timeframe: "2h" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.body.signal).toBeNull();
+    expect(response.body.waiting_reason).toBe("AI_SCHEMA_INVALID");
+  });
+
+  it("test_predict_refuses_direction_without_ai_target", async () => {
+    axiosPost.post.mockResolvedValue({
+      data: { ...AI_PAYLOAD, target_price: null },
+    });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "EUR/TRY", timeframe: "1d" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.code).toBe(200);
+    expect(response.body.signal).toBeNull();
+    expect(response.body.market_waiting).toBe(true);
+    expect(response.body.executable).toBe(false);
+    expect(response.body.waiting_reason).toBe("AI_TARGET_INVALID");
+    expect(response.body.target_price).toBeNull();
+    expect(forex.computeTargetPrice).not.toHaveBeenCalled();
+  });
+
+  it("test_predict_refuses_direction_without_ai_horizon", async () => {
+    axiosPost.post.mockResolvedValue({
+      data: { ...AI_PAYLOAD, horizon_minutes: null },
+    });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "USD/MXN", timeframe: "1d" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.code).toBe(200);
+    expect(response.body.signal).toBeNull();
+    expect(response.body.waiting_reason).toBe("AI_HORIZON_INVALID");
+    expect(response.body.target_price).toBeNull();
+  });
+
+  it("test_predict_refuses_ai_target_that_contradicts_direction", async () => {
+    axiosPost.post.mockResolvedValue({
+      data: { ...AI_PAYLOAD, target_price: 1.15 },
+    });
+
+    const { res, calls, done } = capture();
+    await predictSignal(req({ symbol: "USD/TRY", timeframe: "1d" }), res);
+    await done;
+
+    const [response] = calls;
+    expect(response.code).toBe(200);
+    expect(response.body.signal).toBeNull();
+    expect(response.body.waiting_reason).toBe(
+      "AI_TARGET_CONTRADICTS_DIRECTION",
+    );
+    expect(response.body.target_price).toBeNull();
   });
 
   it("test_predict_passes_engine_strict_gate_verbatim — sub-96.5% demotion survives the integration layer", async () => {
@@ -634,8 +750,8 @@ describe("POST /api/v1/predict — graceful fallback contract", () => {
     await second.done;
     expect(axiosPost.post).toHaveBeenCalledTimes(2);
     // The response is the 10m verdict, not the cached 3m one.
-    // (target_price is NOT asserted: the controller authoritatively recomputes
-    // it from ATR, so it never reflects the engine's echoed value.)
+    // The controller passes the engine's AI-owned target through verbatim; it
+    // never recomputes one from local ATR.
     expect(second.calls[0].body.horizon_minutes).toBe(10);
 
     // Repeating the SAME horizon inside the TTL IS served from cache.

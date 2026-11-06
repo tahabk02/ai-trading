@@ -426,6 +426,10 @@ io.on("connection", (socket) => {
           socket.leave(`${previous.symbol}:${previous.timeframe}`);
         if (!wsService.hasActiveSubscribers(previous.symbol)) {
           realtimeCandleAggregatorService.removeSymbol(previous.symbol);
+        }
+        // The global terminal room receives proxy/quote snapshots only. It
+        // must not keep an otherwise-unused per-symbol PO connection armed.
+        if (!wsService.hasSymbolRoomSubscribers(previous.symbol)) {
           pocketOptionBridgeService.requestSymbolUnsubscription(
             previous.symbol,
           );
@@ -472,8 +476,29 @@ io.on("connection", (socket) => {
           );
           return;
         }
+        const previous = socket.data.activeSubscription as
+          | { symbol?: string; timeframe?: string }
+          | undefined;
+        if (previous?.symbol && previous.symbol !== normalized) {
+          socket.leave(previous.symbol);
+          if (previous.timeframe) {
+            socket.leave(`${previous.symbol}:${previous.timeframe}`);
+          }
+          if (!wsService.hasActiveSubscribers(previous.symbol)) {
+            realtimeCandleAggregatorService.removeSymbol(previous.symbol);
+          }
+          if (!wsService.hasSymbolRoomSubscribers(previous.symbol)) {
+            pocketOptionBridgeService.requestSymbolUnsubscription(
+              previous.symbol,
+            );
+          }
+        }
         socket.join(normalized);
         socket.join(`${normalized}:M1`);
+        socket.data.activeSubscription = {
+          symbol: normalized,
+          timeframe: "M1",
+        };
         tickIngestionService.startSymbolStream(normalized);
         pocketOptionBridgeService.requestSymbolSubscription(normalized);
         wsService.replayHistory(socket, normalized);
@@ -496,23 +521,31 @@ io.on("connection", (socket) => {
       typeof payload === "string"
         ? payload
         : (payload as { symbol?: string } | null)?.symbol;
-    if (raw?.trim()) {
-      const normalized = raw.trim().toUpperCase();
-      const timeframe = (
-        socket.data.activeSubscription as { timeframe?: string } | undefined
-      )?.timeframe;
+    const normalized = canonicalizeSymbol(raw);
+    if (normalized) {
+      const active = socket.data.activeSubscription as
+        | { symbol?: string; timeframe?: string }
+        | undefined;
+      const timeframe =
+        active?.symbol === normalized
+          ? active.timeframe
+          : (payload as { timeframe?: string } | null)?.timeframe;
       socket.leave(normalized);
       if (timeframe) socket.leave(`${normalized}:${timeframe}`);
       if (!wsService.hasActiveSubscribers(normalized)) {
         realtimeCandleAggregatorService.removeSymbol(normalized);
-        pocketOptionBridgeService.requestSymbolUnsubscription(normalized);
         // Nobody is watching this pair any more: forget the learned horizon so a
         // later subscriber starts from the engine default instead of inheriting
         // a stale expiry selection.
         liveTickSignalDispatcher.clearSelectedHorizonMinutes(normalized);
         liveTickSignalDispatcher.clearSelectedMinTier(normalized);
       }
-      socket.data.activeSubscription = undefined;
+      if (!wsService.hasSymbolRoomSubscribers(normalized)) {
+        pocketOptionBridgeService.requestSymbolUnsubscription(normalized);
+      }
+      if (active?.symbol === normalized) {
+        socket.data.activeSubscription = undefined;
+      }
       logger.info("Client unsubscribed from symbol room", {
         socketId: socket.id,
         symbol: normalized,
@@ -569,6 +602,8 @@ io.on("connection", (socket) => {
     if (active?.symbol) {
       if (!wsService.hasActiveSubscribers(active.symbol)) {
         realtimeCandleAggregatorService.removeSymbol(active.symbol);
+      }
+      if (!wsService.hasSymbolRoomSubscribers(active.symbol)) {
         pocketOptionBridgeService.requestSymbolUnsubscription(active.symbol);
       }
     }

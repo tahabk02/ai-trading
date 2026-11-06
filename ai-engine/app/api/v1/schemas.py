@@ -8,7 +8,7 @@ Strict validation ensures that:
 """
 
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Literal, Optional, Union
 from datetime import datetime
 import numpy as np
 
@@ -201,6 +201,15 @@ class PredictRequest(BaseModel):
             "contract and the expiry timestamp. Snap-resolved by the horizon engine."
         ),
     )
+    request_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description=(
+            "Caller-supplied idempotency/correlation id. Echoed verbatim in the "
+            "response so a retried request can be matched to its original verdict."
+        ),
+    )
     factor_inputs: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
@@ -306,11 +315,14 @@ class IndicatorModel(BaseModel):
 
 class PredictResponse(BaseModel):
     """Standardized prediction response."""
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    confidence_unit: Literal["percent"] = "percent"
+    request_id: Optional[str] = None
     symbol: str
     signal: Optional[str] = Field(None, pattern="^(BUY|SELL|HOLD)$")
     # Genuine full-range confidence percentage (0-100 scale from the engine).
     confidence: float = Field(..., ge=0.0, le=100.0)
-    target_price: float = Field(..., ge=0)
+    target_price: Optional[float] = Field(None, gt=0)
     current_price: float = Field(..., gt=0)
     # PART 22.1 [150] — RF corroboration split schema: rf_* are the
     # RandomForest's real numbers, null when the corroborator did not run on

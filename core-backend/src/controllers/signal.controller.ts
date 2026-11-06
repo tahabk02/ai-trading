@@ -23,6 +23,7 @@ import {
 } from "../lib/signalThresholds";
 import { isCacheUnavailable, isDbUnavailable } from "../lib/storageAvailability";
 import { normalizeSignalLimit } from "../lib/signalQuery";
+import { SIGNAL_SCHEMA_VERSION } from "../messaging/signalContract";
 
 const prisma = new PrismaClient();
 
@@ -368,10 +369,13 @@ export function buildPredictFallbackPayload(
       : {}),
     signal: null,
     confidence: null,
-    target_price: livePrice,
+    // No directional target exists on a waiting payload. Echoing livePrice
+    // here used to look like a valid target and made "no signal" visually
+    // indistinguishable from a real projection.
+    target_price: null,
     current_price: livePrice,
     currentPrice: livePrice,
-    delta_pct: 0,
+    delta_pct: null,
     market_waiting: true,
     executable: false,
     regime_gate: "pending_data",
@@ -1364,19 +1368,54 @@ export const predictSignal = async (req: Request, res: Response) => {
       );
     }
 
-    // ════════════════════════════════════════════════════════════════════
-    // CONFIDENCE SANITIZER — normalizes every upstream scale to 0-100.
-    // ════════════════════════════════════════════════════════════════════
-    const rawConf = Number(prediction.confidence) || 0;
-    const normalizedConf = rawConf > 100 ? rawConf / 100 : rawConf;
-    const finalConfidence = Math.min(
-      Math.max(normalizedConf > 1 ? normalizedConf : normalizedConf * 100, 0),
-      100,
-    );
+    // Confidence is an explicit percentage at the AI API boundary. Do not
+    // guess whether an unlabelled value is a fraction or silently clamp it.
+    const rawConf: unknown = prediction?.confidence;
+    const schemaValid =
+      prediction?.schema_version === SIGNAL_SCHEMA_VERSION;
+    const confidenceValid =
+      prediction?.confidence_unit === "percent" &&
+      typeof rawConf === "number" &&
+      Number.isFinite(rawConf) &&
+      rawConf >= 0 &&
+      rawConf <= 100;
+    if (
+      !schemaValid ||
+      !confidenceValid
+    ) {
+      const reason = schemaValid
+        ? "AI_CONFIDENCE_INVALID"
+        : "AI_SCHEMA_INVALID";
+      logger.warn(
+        "[signal.controller] AI response contract invalid - serving honest waiting payload",
+        {
+          symbol: normalizedSymbol,
+          schemaVersion: prediction?.schema_version ?? null,
+          confidenceUnit: prediction?.confidence_unit ?? null,
+          reason,
+        },
+      );
+      return res.json(
+        buildPredictFallbackPayload({
+          symbol: normalizedSymbol,
+          timeframe: tfNormalized,
+          requestedTimeframe: normalizedTimeframe,
+          livePrice: effectiveLivePrice,
+          reason,
+          detail:
+            "The AI Engine must return confidence as a finite 0-100 percentage. The integration layer will not infer units or clamp an invalid value.",
+          message:
+            "The AI Engine returned confidence outside its declared percentage contract. No directional signal was emitted.",
+          elapsedMs: elapsed,
+          candles: bars,
+        }),
+      );
+    }
+    const finalConfidence = rawConf;
 
     // ════════════════════════════════════════════════════════════════════
-    // STEP 5 — VOLATILITY-DRIVEN TARGET PRICING (AUTHORITATIVE)
-    // Target = live price +/− ATR-scaled distance. ZERO hash injection.
+    // STEP 5 — VALIDATE THE AI-OWNED TARGET AND HORIZON
+    // No core-backend target calculation is permitted at this boundary.
     // ════════════════════════════════════════════════════════════════════
     const direction = upstreamSignal as "BUY" | "SELL";
 
@@ -1389,29 +1428,81 @@ export const predictSignal = async (req: Request, res: Response) => {
     // bars.
 
     // ════════════════════════════════════════════════════════════════════
-    // DIRECTION↔TARGET INVARIANT (AUTHORITATIVE) — the dispatched signal and
-    // the chart projection line MUST mathematically agree:
-    //   BUY  → target strictly ABOVE live price
-    //   SELL → target strictly BELOW live price
-    // Any upstream target contradicting the dispatched direction is
-    // recomputed from real ATR. delta_pct is ALWAYS derived from THIS target.
+    // AI TARGET/HORIZON AUTHORITY (STRICT PASS-THROUGH)
+    // The Python engine owns direction, target_price and horizon_minutes.
+    // The integration layer NEVER recomputes a target from local ATR — that
+    // duplicated quant logic, could disagree with the engine, and fabricated
+    // a target when ATR was missing. If the engine's target is absent,
+    // non-finite, or contradicts its own direction, no actionable verdict is
+    // emitted: the honest waiting payload below is returned instead.
     // ════════════════════════════════════════════════════════════════════
-    const authoritativeTarget = forexDataService.computeTargetPrice(
-      direction,
-      effectiveLivePrice,
-      atr,
-      normalizedTimeframe,
-      normalizedSymbol,
+    const rawAiTarget = Number(prediction?.target_price);
+    const rawAiHorizon = Number(
+      prediction?.horizon_minutes ?? prediction?.horizon?.horizon_minutes,
     );
+    const targetValid =
+      Number.isFinite(rawAiTarget) && rawAiTarget > 0;
+    const horizonValid =
+      Number.isFinite(rawAiHorizon) &&
+      Number.isInteger(rawAiHorizon) &&
+      rawAiHorizon > 0 &&
+      rawAiHorizon <= 1_440;
+    const targetMatchesDirection =
+      !targetValid || effectiveLivePrice <= 0
+        ? true
+        : direction === "BUY"
+          ? rawAiTarget > effectiveLivePrice
+          : rawAiTarget < effectiveLivePrice;
+
+    if (!targetValid || !horizonValid || !targetMatchesDirection) {
+      const reason = !targetValid
+        ? "AI_TARGET_INVALID"
+        : !horizonValid
+          ? "AI_HORIZON_INVALID"
+          : "AI_TARGET_CONTRADICTS_DIRECTION";
+      logger.warn(
+        "[signal.controller] AI verdict failed target/horizon authority check - serving honest waiting payload",
+        {
+          symbol: normalizedSymbol,
+          timeframe: normalizedTimeframe,
+          signal: direction,
+          targetPrice: prediction?.target_price ?? null,
+          horizonMinutes: prediction?.horizon_minutes ?? null,
+          livePrice: effectiveLivePrice,
+          reason,
+        },
+      );
+      return res.json(
+        buildPredictFallbackPayload({
+          symbol: normalizedSymbol,
+          timeframe: tfNormalized,
+          requestedTimeframe: normalizedTimeframe,
+          livePrice: effectiveLivePrice,
+          reason,
+          detail:
+            "The AI Engine returned a directional verdict without a valid AI-owned target/horizon. The integration layer refuses to synthesize one.",
+          message:
+            "A directional verdict arrived without a usable target or horizon. No target was fabricated; the next fresh tick will be evaluated.",
+          elapsedMs: elapsed,
+          candles: bars,
+        }),
+      );
+    }
+
+    const authoritativeTarget = rawAiTarget;
+    const authoritativeHorizon = Math.trunc(rawAiHorizon);
 
     logger.info("[signal.controller] Prediction successful (OTC)", {
       symbol: normalizedSymbol,
       signal: direction,
       confidence: finalConfidence,
+      confidence_unit: "percent",
       rawConfidence: rawConf,
       elapsedMs: elapsed,
       dataSource: "forex_otc",
       targetPrice: authoritativeTarget,
+      targetSource: "ai_engine",
+      horizonMinutes: authoritativeHorizon,
       atr,
     });
 
@@ -1434,12 +1525,18 @@ export const predictSignal = async (req: Request, res: Response) => {
 
     const finalResponse = {
       ...prediction,
+      schema_version: SIGNAL_SCHEMA_VERSION,
       signal: direction,
       confidence: finalConfidence,
+      confidence_unit: "percent",
       target_price: authoritativeTarget,
+      horizon_minutes: authoritativeHorizon,
       current_price: effectiveLivePrice,
       currentPrice: effectiveLivePrice,
       delta_pct: authoritativeDeltaPct,
+      // Explicitly no Node-side target override. Any future UI-only offset
+      // belongs here and MUST NOT mutate target_price above.
+      display_target_override: null,
       symbol: normalizedSymbol,
       proxied: true,
       proxyLatencyMs: elapsed,

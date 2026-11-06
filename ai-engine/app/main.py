@@ -290,6 +290,9 @@ async def lifespan(app: FastAPI):
     set_warmup_running(False)
     await publisher.close()
     await _signal_lock.close()
+    from .api.v1.quant import close_quant_pipeline
+
+    await close_quant_pipeline()
     logger.info("AI Engine shutdown complete")
 
 
@@ -398,4 +401,3 @@ if __name__ == "__main__":
     # timeout_keep_alive=5 — same leak guard as the root runner: idle pooled
     # sockets from the core-backend are closed quickly instead of lingering.
     uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=5)
-

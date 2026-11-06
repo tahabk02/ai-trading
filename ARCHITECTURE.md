@@ -109,28 +109,23 @@ The **Trading AI Platform** is a real-time algorithmic trading terminal that com
 └──────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│              EXECUTION ENGINE (Python FastAPI)                   │
-│              Port 8001 (orchestrates trades)                     │
+│          EXECUTION GATEWAY (Python, Redis Streams)               │
+│          Quarantined by default (TRADING_MODE=disabled)          │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Broker Clients:                                          │  │
-│  │  alpaca_client.py → Alpaca trading API                    │  │
-│  │  binance_client.py → Binance spot/futures                 │  │
-│  │  order_manager.py → order lifecycle                       │  │
+│  │  Transport: SIGNAL_STREAM=trading_signals:stream         │  │
+│  │  stream_consumer.py → XREADGROUP + XAUTOCLAIM + XACK     │  │
+│  │  gateway.py → validate → risk gate → idempotent submit   │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Risk Management:                                        │  │
-│  │  position_sizing.py → Kelly / fixed fraction             │  │
-│  │  stop_loss_manager.py → trailing + hard stops            │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Reconciliation:                                         │  │
-│  │  trade_logger.py → fills + settlement tracking           │  │
+│  │  Brokers: paper.py (sim) | ccxt_broker.py (live)         │  │
+│  │  State:   SQLite WAL order store (dedupe + audit)        │  │
+│  │  Safety:  kill switch, freshness, confidence, allowlist  │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
 
 External Services:
   Alpaca Market Data API  ◄── Core Backend (bars, snapshots)
-  Alpaca Trading API      ◄── Execution Engine (orders)
+  ccxt venue (e.g. Binance) ◄── Execution Gateway (live orders only)
   Binance API             ◄── AI Engine (crypto fallback)
   TradingView Widget      ◄── Client (chart, no backend)
 ```
@@ -187,18 +182,24 @@ External Services:
 - `live_price` is **required** — AI Engine rejects requests without it
 - `current_price` must be the Alpaca snapshot live price, never a bar close
 - `target_price` derived dynamically from `current_price + ATR * 3.0` (BUY) / `- ATR * 3.0` (SELL)
+- Target authority must stay in one place: the execution gateway validates the
+  target against direction and never recomputes it from a local ATR (a local
+  ATR=0 fallback would fabricate `target == price` and must not be used).
 - Model retrained on every request — no stale `.joblib` cache files loaded
 
-#### Execution Engine (Python FastAPI, Port 8001)
+#### Execution Gateway (Python, Redis Streams, no HTTP API)
 
-| Module                   | Function                                                                 |
-| ------------------------ | ------------------------------------------------------------------------ |
-| **alpaca_client.py**     | Alpaca Trading API client for order placement (market, limit, stop-loss) |
-| **binance_client.py**    | Binance REST API client for crypto order execution                       |
-| **order_manager.py**     | Order lifecycle management (create, cancel, replace, track fills)        |
-| **position_sizing.py**   | Kelly Criterion / fixed fraction position sizing                         |
-| **stop_loss_manager.py** | Trailing stop-loss + hard stop-loss management                           |
-| **trade_logger.py**      | Trade reconciliation and settlement tracking                             |
+| Module                    | Function                                                                 |
+| ------------------------- | ------------------------------------------------------------------------ |
+| **config.py**             | Fail-closed settings: mode, confidence units, allowlist, risk limits      |
+| **domain.py**             | Strict signal contract, dedupe key, order/risk/outcome models             |
+| **infra/stream_consumer.py** | Redis Streams consumer group, PEL reclaim, dead-letter stream          |
+| **execution/gateway.py**  | Validate → risk gate → intent → submit/retry/reconcile, SQLite audit      |
+| **risk/gate.py**          | Kill switch, freshness, confidence, allowlist, exposure, daily counters   |
+| **broker/paper.py**       | Idempotent paper broker (fills at the real signal price)                  |
+| **broker/ccxt_broker.py** | Live ccxt adapter with fail-closed symbol validation                      |
+| **state/store.py**        | SQLite WAL order store: unique dedupe, attempts, audit trail              |
+| **health.py**             | `/health` + `/metrics` on `HEALTH_PORT` (default 8081)                    |
 
 ### 2.3 Database & Storage
 
@@ -422,7 +423,7 @@ cacheService.flushByPrefix("alpaca_quote_"); // SCAN + DEL for price quotes
 | --- | ----------------------------------------------------------------------------------- | --------------------------- | ------ | ------------ |
 | 12  | **Re-enable WebSocket** — Add `socket.io-client` to frontend for push-based updates | Frontend                    | 4h     | #1, #2       |
 | 13  | **Add signal history page** — View historical predictions with filtering            | Frontend                    | 6h     | —            |
-| 14  | **Add portfolio tracking** — Track holdings, P&L, and position sizing               | Frontend + Execution Engine | 8h     | —            |
+| 14  | **Add portfolio tracking** — Track holdings, P&L, and position sizing               | Frontend + Execution Gateway | 8h     | —            |
 | 15  | **Add multi-timeframe support** — Allow users to select 1h, 4h, 1d, 1w              | Frontend + AI Engine        | 4h     | —            |
 | 16  | **Add dark/light theme toggle** — Extend Tailwind theme                             | Frontend                    | 2h     | —            |
 
@@ -455,7 +456,7 @@ cacheService.flushByPrefix("alpaca_quote_"); // SCAN + DEL for price quotes
 | **Next.js (Client)** | 3000 | HTTP             | Frontend application        |
 | **Core Backend**     | 4000 | HTTP + WebSocket | REST API + Socket.IO        |
 | **AI Engine**        | 8000 | HTTP             | ML inference endpoint       |
-| **Execution Engine** | 8001 | HTTP             | Order execution             |
+| **Execution Gateway**| 8081 | HTTP (health)    | Health/metrics only         |
 | **Redis**            | 6379 | TCP              | Caching (optional)          |
 | **PostgreSQL**       | 5432 | TCP              | Primary database (optional) |
 
@@ -463,9 +464,14 @@ cacheService.flushByPrefix("alpaca_quote_"); // SCAN + DEL for price quotes
 
 | Variable                    | Service                        | Purpose                    |
 | --------------------------- | ------------------------------ | -------------------------- |
-| `ALPACA_API_KEY_ID`         | Core Backend, Execution Engine | Alpaca API authentication  |
-| `ALPACA_API_SECRET`         | Core Backend, Execution Engine | Alpaca API authentication  |
-| `ALPACA_USE_SANDBOX`        | Core Backend                   | Toggle sandbox/live mode   |
+| `ALPACA_API_KEY_ID`         | Core Backend                   | Alpaca market-data auth    |
+| `ALPACA_API_SECRET`         | Core Backend                   | Alpaca market-data auth    |
+| `ALPACA_USE_SANDBOX`        | Core Backend                   | Toggle sandbox/live data   |
+| `TRADING_MODE`              | Execution Gateway              | `disabled` / `paper` / `live` |
+| `EXCHANGE_API_KEY/SECRET`   | Execution Gateway              | ccxt venue credentials     |
+| `EXECUTION_MIN_CONFIDENCE`  | Compose → Execution Gateway    | 0..100 confidence floor    |
+| `MAX_DAILY_LOSS`            | Compose → Execution Gateway    | Positive account-currency limit; 0 disables |
+| `SIGNAL_STREAM_MAXLEN`      | Core Backend                   | Approximate Redis stream cap, 1..10,000 (default 10,000) |
 | `AI_ENGINE_URL`             | Core Backend                   | AI Engine endpoint URL     |
 | `AI_ENGINE_API_KEY`         | Core Backend                   | AI Engine authentication   |
 | `REDIS_HOST` / `REDIS_PORT` | Core Backend                   | Redis connection           |
@@ -520,3 +526,10 @@ Client (Axios → useTradingStore.getPrediction)
         │
         └─── _priceVersion increment → all stale memoized values invalidated
 ```
+
+## Appendix D: Signal Integrity, AI Authority & Confluence
+
+- **Durable signal contract (v1):** core-backend writes `schema_version='1.0.0'`, `confidence_unit='percent'`, and a stable 32-char `event_id` to `trading_signals:stream`. Confidence must be a finite 0–100 percentage; consumers reject missing units, out-of-range values, and unsupported schema versions. The execution gateway uses `event_id` (not the Redis entry id) for idempotency. Entries are always capped with approximate `XADD MAXLEN ~` trimming (`SIGNAL_STREAM_MAXLEN`, default and maximum 10,000; invalid or zero settings fall back to 10,000).
+- **AI authority:** the AI engine owns `direction`, `target_price`, and `horizon_minutes`. core-backend validates the AI schema version, confidence unit, target and horizon, but never recomputes them from local ATR. An invalid AI response is downgraded to an honest waiting payload; no target is fabricated. UI-only target offsets belong in `display_target_override` and never mutate the canonical target.
+- **Restart-safe daily loss:** execution-engine persists one `daily_equity` row per UTC day in the named `execution_data` volume (`starting_equity` written once, `last_equity` updated on every account snapshot). The risk gate uses the larger of the broker's `daily_pnl` loss and the persisted starting-minus-last loss. The UTC date key starts a fresh baseline on the next day. With `MAX_DAILY_LOSS > 0`, live mode fails closed (`DAILY_LOSS_UNAVAILABLE`) when no loss can be measured; zero disables this threshold.
+- **Confluence evidence pipeline:** `POST /api/v1/quant/confluence` aggregates independent providers (technical candles, optional ML probability, sentiment, macro). Missing inputs are `UNAVAILABLE`/`AWAITING_DATA`, never neutral scores. Technical candles must be timestamped, ordered, and no older than two requested bars; ML/sentiment/macro evidence must carry a timezone-aware `as_of` no more than 15 minutes old. A requested stale or invalid provider degrades the whole result and prevents actionability. Providers are isolated by timeout and report `OK`/`DEGRADED`/`UNAVAILABLE`/`ERROR` with provenance. A target is emitted only when real ATR and current price exist and it agrees with the aggregate direction. `GET /api/v1/quant/providers` lists the registry.

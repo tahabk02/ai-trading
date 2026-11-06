@@ -472,24 +472,36 @@ async def _get_symbol_lock(symbol: str) -> asyncio.Lock:
 
 
 def _validate_response_finite(response: Dict[str, Any]) -> Dict[str, Any]:
+    confidence = response.get("confidence")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float, np.number))
+        or not np.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 100.0
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "confidence_contract_invalid",
+                "message": "confidence must be a finite percentage in [0, 100]",
+            },
+        )
+    response["schema_version"] = "1.0.0"
+    response["confidence_unit"] = "percent"
+
     numeric_keys = [
         # NOTE (PART 22.1): ml_probability / model_accuracy were REMOVED from
         # this sanitizer — they are now Optional RF aliases (null until the
         # corroborator runs) and must NEVER be force-zeroed here; the rf_*
         # nulls survive via the non-finite guard below.
-        "confidence", "target_price", "target_distance", "current_price",
+        "target_price", "target_distance", "current_price",
         "atr", "volatility_pct",
     ]
     for key in numeric_keys:
         val = response.get(key)
         if val is None or not np.isfinite(float(val)):
             if key == "target_price":
-                cp = response.get("current_price", 0.0)
-                response[key] = (
-                    float(round(cp, 2))
-                    if cp is not None and np.isfinite(float(cp))
-                    else 0.0
-                )
+                response[key] = None
             elif key == "current_price":
                 response[key] = 0.0
             else:
@@ -789,6 +801,9 @@ async def tick_signal(data: Dict[str, Any]):
                 min_confidence=data.get("min_confidence"),
                 min_tier=data.get("min_tier"),
             )
+            request_id = data.get("request_id")
+            if isinstance(request_id, str) and request_id.strip():
+                locked_response["request_id"] = request_id.strip()
             logger.info(
                 "TICK_SIGNAL_LOCK_SERVED",
                 symbol=symbol,
@@ -956,6 +971,9 @@ async def tick_signal(data: Dict[str, Any]):
         # _validate_response_finite, which this response flows through below), and
         # `tier` keeps the true confidence band for every computed tier. The
         # executable/signal reconciliation invariant is unchanged.
+        request_id = data.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            response["request_id"] = request_id.strip()
         return _validate_response_finite(response)
     except HTTPException:
         raise
@@ -1316,6 +1334,7 @@ async def predict_signal(data: PredictRequest):
         fast_path_response = {
             "symbol": symbol,
             "signal": emitted_signal,
+            "request_id": getattr(data, "request_id", None),
             "confidence": verdict.confidence,
             "book_agreement": round(verdict.confidence, 2),
             "book_agreement_detail": book_agreement_detail(
@@ -1616,6 +1635,7 @@ async def predict_signal(data: PredictRequest):
 
     response = {
         "symbol": symbol,
+        "request_id": getattr(data, "request_id", None),
         # HONEST DIRECTION — emitted for every tier. A watershed hold leaves it
         # intact and is reported as `executable: false` + `scored_only: true`
         # via the execution surface below.

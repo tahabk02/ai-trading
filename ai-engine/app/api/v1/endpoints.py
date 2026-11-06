@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1 import signals, health
+from app.api.v1 import signals, health, quant
 
 api_router = APIRouter()
 # Mounted at the api_router root so the health routes surface exactly as
@@ -9,3 +9,5 @@ api_router.include_router(health.router)
 # Mount signals router at root so its routes become /predict and /analyze
 # under the /api/v1 prefix set in main.py, matching the Node.js AI_ENGINE_URL
 api_router.include_router(signals.router, tags=["signals"])
+# Confluence evidence pipeline: /api/v1/quant/confluence and /quant/providers
+api_router.include_router(quant.router, tags=["quant"])

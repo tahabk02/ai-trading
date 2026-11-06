@@ -83,24 +83,37 @@ def test_heartbeat_sends_keepalive_on_a_quiet_live_stream():
     assert bridge.status == "connected"
 
 
-def test_stale_stream_is_recycled_before_60s_and_preserves_otc_state():
+def test_stale_stream_schedules_targeted_recovery_before_60s(monkeypatch):
     bridge = _bridge()
     client = _ConnectedClient()
+    healthy_reader = _ConnectedClient()
     bridge.client = client
     bridge.status = "connected"
-    bridge._subs = {"EUR/USD_otc": object()}
+    bridge._subs = {
+        "EUR/USD": object(),
+        "USD/JPY": object(),
+    }
     bridge._dynamic_symbols = {"EUR/USD"}
-    bridge._tick_count = {"EUR/USD": 3}
+    bridge._reader_clients["USD/JPY"] = healthy_reader
+    bridge._tick_count = {"EUR/USD": 3, "USD/JPY": 2}
     bridge._last_tick_ts = {"EUR/USD": time.time() - 51.0}
+    bridge._last_tick_ts["USD/JPY"] = time.time()
     bridge.engine.ensure_feed("EUR/USD", "otc")
     bridge.engine.handle_tick_all("EUR/USD", 1.1010, 1_000)
+    scheduled: list[list[str]] = []
+    monkeypatch.setattr(
+        bridge,
+        "_schedule_stall_recovery",
+        lambda symbols: scheduled.append(list(symbols)),
+    )
 
     asyncio.run(bridge._heartbeat_tick(send_keepalive=False, emit=False))
 
-    assert client.disconnected is True
-    assert bridge.client is None
-    assert bridge.status == "stalled"
-    assert "reconnecting" in (bridge.last_error or "")
+    assert client.disconnected is False
+    assert bridge.client is client
+    assert healthy_reader.disconnected is False
+    assert bridge.status == "connected"
+    assert scheduled == [["EUR/USD"]]
     # The engine tape + desired dynamic subscription survive the recycle.
     assert bridge._dynamic_symbols == {"EUR/USD"}
     assert bridge.engine.snapshot("EUR/USD") is not None

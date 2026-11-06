@@ -154,6 +154,18 @@ export class WebSocketService {
     }
   }
 
+  /** True when a chart (not the all-pairs terminal) is joined to this symbol. */
+  public hasSymbolRoomSubscribers(symbol: string): boolean {
+    const server = this.io;
+    if (!server) return false;
+    try {
+      const room = server.sockets.adapter.rooms.get(symbol);
+      return !!room && room.size > 0;
+    } catch {
+      return false;
+    }
+  }
+
   /** True when at least one live client is joined to the MARKET TERMINAL ROOM
    *  (the all-pairs grid). The 1Hz `market_quotes` broadcaster no-ops without
    *  one so a silent terminal never burns CPU reading 34 rings. */
@@ -487,8 +499,12 @@ export class WebSocketService {
       signalType: "BUY" | "SELL" | null;
       signal: "BUY" | "SELL" | null;
       confidence: number;
+      confidence_score?: number;
       current_price?: number;
       target_price?: number;
+      take_profit?: number;
+      request_id?: string;
+      horizon_minutes?: number;
       timeframe: string;
       market_waiting?: boolean;
       waiting_reason?: string | null;

@@ -8,6 +8,7 @@ import { LocalEventBus } from "./local-event-bus";
 import { realtimeTickBuffer } from "../services/realtimeTickBuffer.service";
 import { secrets } from "../config/secrets";
 import { logger } from "../utils/logger";
+import { SIGNAL_SCHEMA_VERSION } from "./signalContract";
 
 // ── LIVE-SIGNAL FRESHNESS GATE ──
 // A distributed signal is only broadcast to clients as a "live" verdict when
@@ -364,21 +365,20 @@ export class RedisSubscriber {
     const price = this.toNumber(
       raw?.price ?? raw?.entry_price ?? raw?.current_price,
     );
-    // Confidence accepted in EITHER scale and normalized to [0,1] for storage
-    // (a 0-100 value like 65.90 becomes 0.659). No 70% floor gate — genuinely
-    // low-confidence signals are persisted and broadcast like any other.
+    // Wire confidence is explicitly a percentage. The database model keeps its
+    // legacy fractional representation, so convert only after validating the
+    // declared unit and range; never guess based on magnitude.
     const confidence = this.toNumber(raw?.confidence ?? raw?.confidence_score);
-    const normalizedConfidence =
-      confidence > 1 ? confidence / 100 : confidence;
+    if (raw?.confidence_unit !== "percent") return null;
     if (!Number.isFinite(price) || price <= 0) return null;
-    if (!Number.isFinite(normalizedConfidence) || normalizedConfidence < 0)
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100)
       return null;
 
     return {
       symbol,
       signal_type,
       price,
-      confidence: normalizedConfidence,
+      confidence: confidence / 100,
       stop_loss: this.toNumber(raw?.stop_loss ?? raw?.stopLoss) || undefined,
       take_profit:
         this.toNumber(raw?.take_profit ?? raw?.takeProfit) || undefined,
@@ -403,13 +403,15 @@ export class RedisSubscriber {
     const adxValue = Number(indicators?.adx ?? 0);
 
     return {
+      schema_version: SIGNAL_SCHEMA_VERSION,
+      confidence_unit: "percent",
       id: saved.id,
       symbol: saved.symbol,
       direction: saved.signalType as "BUY" | "SELL",
       entry_price: saved.price,
       take_profit: payload.take_profit ?? 0,
       stop_loss: payload.stop_loss ?? 0,
-      confidence_score: saved.confidence,
+      confidence_score: saved.confidence * 100,
       timestamp: saved.createdAt.toISOString(),
       reasoning: {
         adx_value: adxValue,

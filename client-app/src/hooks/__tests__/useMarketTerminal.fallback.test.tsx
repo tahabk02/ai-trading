@@ -98,6 +98,23 @@ describe("useMarketTerminal reactive sync", () => {
     unmount();
   });
 
+  it("keeps grid-only pairs on the aggregate feed without arming PO readers", async () => {
+    const { unmount } = renderHook(() => useMarketTerminal());
+    await flush();
+
+    expect(socketState.socket.emit).toHaveBeenCalledWith("subscribe_all");
+    expect(socketState.socket.emit).not.toHaveBeenCalledWith(
+      "subscribe",
+      expect.anything(),
+    );
+    expect(socketState.socket.emit).not.toHaveBeenCalledWith(
+      "subscribe_symbol",
+      expect.anything(),
+    );
+
+    unmount();
+  });
+
   it("falls back to one debounced /multi-predict batch when no verdict lands", async () => {
     const multiPredict = vi.mocked(apiClient.multiPredict);
     const { unmount } = renderHook(() => useMarketTerminal());

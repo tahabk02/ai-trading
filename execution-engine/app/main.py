@@ -1,337 +1,208 @@
-import json
+from __future__ import annotations
+
 import asyncio
-import os
 import logging
-from contextlib import suppress
-from pathlib import Path
+import signal
+import sys
 
 import redis.asyncio as redis
 import structlog
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from app.broker.binance_client import ExchangeClient
-from app.broker.order_manager import OrderManager
-from app.risk.position_sizing import RiskManager
-from app.risk.stop_loss_manager import StopLossManager
-from app.reconciliation.trade_logger import TradeLogger
 
-# ── Environment file isolation ───────────────────────────────────────────────
-# `<repo>/execution-engine`, derived from THIS file's location so it is
-# identical under python, Docker, and a packaged image regardless of cwd.
-EXECUTION_ENGINE_ROOT = Path(__file__).resolve().parents[1]
-_logger = logging.getLogger(__name__)
+from app.broker.base import Broker, PermanentBrokerError, TransientBrokerError
+from app.broker.ccxt_broker import CcxtBroker
+from app.broker.paper import PaperBroker
+from app.config import Settings
+from app.execution.gateway import ExecutionGateway
+from app.health import serve_health
+from app.infra.stream_consumer import StreamConsumer
+from app.observability import Metrics
+from app.risk.gate import KillSwitch, RiskGate
+from app.state.store import OrderStore
 
-
-def _execution_engine_env_files() -> tuple[Path, ...]:
-    """
-    execution-engine-local env files, HIGHEST precedence first.
-
-    pydantic-settings merges a tuple left-to-right with later entries losing, so
-    the highest-priority file is placed first. A real environment variable
-    always wins over every file, which keeps docker-compose injection
-    authoritative.
-    """
-    environment = os.environ.get("ENVIRONMENT") or os.environ.get("NODE_ENV") or "development"
-    candidates = [
-        EXECUTION_ENGINE_ROOT / ".env.local",
-        EXECUTION_ENGINE_ROOT / f".env.{environment}",
-        EXECUTION_ENGINE_ROOT / ".env",
-    ]
-    return tuple(p for p in candidates if p.is_file())
-
-
-EXECUTION_ENGINE_ROOT_ENV = _execution_engine_env_files()
-
-_PARENT_DOTENV = EXECUTION_ENGINE_ROOT.parent / ".env"
-if _PARENT_DOTENV.is_file() and os.environ.get("EXECUTION_ENGINE_ALLOW_PARENT_DOTENV") != "true":
-    _logger.warning(
-        "execution-engine: ignoring parent %s — it is another service's "
-        "configuration (it may carry exchange-adjacent credentials). Set values "
-        "in %s or the real environment.",
-        _PARENT_DOTENV,
-        EXECUTION_ENGINE_ROOT / ".env",
-    )
-
-
-# Settings
-class Settings(BaseSettings):
-    REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = 6379
-    # Required once Redis runs with `requirepass` (the hardened production
-    # stack does). The URL was previously assembled without any credential
-    # support, so enabling Redis auth would have made this service fail every
-    # connect with NOAUTH — it looked like a Redis outage rather than a config
-    # gap.
-    REDIS_PASSWORD: str = ""
-    REDIS_DB: int = 0
-    # A pre-built URL (e.g. rediss:// for TLS) overrides HOST/PORT/PASSWORD.
-    REDIS_URL: str = ""
-    EXCHANGE_ID: str = "binance"
-    # Empty by default. The previous values ("YOUR_API_KEY"/"YOUR_API_SECRET")
-    # were placeholder STRINGS that are non-empty, so every guard that checked
-    # `if not api_key` passed and the engine happily constructed a broker client
-    # with a literal fake key — surfacing later as an opaque exchange 401
-    # instead of an honest "no credentials configured".
-    API_KEY: str = ""
-    API_SECRET: str = ""
-    # Health/liveness port for the tiny stdlib probe server (see start_health_server).
-    HEALTH_PORT: int = 8081
-    # When true, refuse to boot without exchange credentials. Enabled by
-    # docker-compose.prod.yml; the engine can then never place orders with a
-    # placeholder credential.
-    REQUIRE_CREDENTIALS: bool = False
-    MIN_CONFIDENCE: float = 0.90
-    DEFAULT_BALANCE: float = 1000.0
-
-    # Absolute path resolved from THIS FILE, not the process working directory.
-    # A bare env_file=".env" is relative to cwd, so launching this engine from
-    # the repo root silently loaded the ROOT .env — another service's
-    # credentials — and the same image behaved differently depending on where it
-    # was started. Only files inside execution-engine/ are read; a real
-    # environment variable still beats every file, so docker-compose.prod.yml
-    # injection remains authoritative.
-    model_config = SettingsConfigDict(
-        env_file=EXECUTION_ENGINE_ROOT_ENV,
-        extra='ignore',
-    )
-
-settings = Settings()
 logger = structlog.get_logger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════
-# STRICT OTC WHITELIST — 21-PAIR UNIVERSE (0 DEMO, 100% REAL)
-# Mirrors the executable core-backend symbolRegistry.service.ts universe.
-# ═══════════════════════════════════════════════════════════════════
-OTC_WHITELIST = {
-    # Forex Majors (5)
-    "EUR/USD", "USD/JPY", "USD/CHF", "USD/CAD", "AUD/USD",
-    # Euro Crosses (4)
-    "EUR/JPY", "EUR/CHF", "EUR/AUD", "EUR/CAD",
-    # Yen Crosses (3)
-    "AUD/JPY", "CAD/JPY", "CHF/JPY",
-    # Other Minors (4)
-    "AUD/CAD", "AUD/NZD", "CAD/CHF", "EUR/RUB",
-    # Emerging / OTC Variants (5)
-    "USD/TRY", "USD/MXN", "USD/SGD", "MAD/USD", "KES/USD",
-}
 
-def _is_whitelisted(symbol: str) -> bool:
-    """Strict membership check — only the 21 OTC whitelisted pairs pass."""
-    return (symbol or "").strip().upper() in OTC_WHITELIST
-
-class ExecutionEngine:
-    def __init__(self):
-        self.broker = ExchangeClient(settings.EXCHANGE_ID, settings.API_KEY, settings.API_SECRET)
-        self.order_manager = OrderManager(self.broker)
-        self.risk = RiskManager(account_balance=settings.DEFAULT_BALANCE)
-        self.sl_manager = StopLossManager()
-        self.trade_logger = TradeLogger()
-        self.redis_client = None
-        # Readiness signals surfaced by /health. A container that is running but
-        # has no Redis subscription is NOT ready, and compose must be able to
-        # see that instead of assuming "process alive == working".
-        self.ready = False
-        self.started_at = None
-
-    def _redis_url(self) -> str:
-        """Resolve the Redis URL, percent-encoding the password.
-
-        A password containing '@', ':' or '/' MUST be escaped, otherwise the
-        URL parser silently truncates it and the connection fails auth.
-        """
-        if settings.REDIS_URL:
-            return settings.REDIS_URL
-        if settings.REDIS_PASSWORD:
-            from urllib.parse import quote
-            auth = f":{quote(settings.REDIS_PASSWORD, safe='')}@"
-        else:
-            auth = ""
-        return f"redis://{auth}{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}"
-
-    async def run(self):
-        self.redis_client = redis.from_url(self._redis_url())
-        pubsub = self.redis_client.pubsub()
-        await pubsub.subscribe("trading_signals")
-
-        self.started_at = asyncio.get_event_loop().time()
-        self.ready = True
-        logger.info("EXECUTION_ENGINE_READY", min_confidence=settings.MIN_CONFIDENCE)
-
-        try:
-            async for message in pubsub.listen():
-                if message['type'] == 'message':
-                    await self.process_signal(message['data'])
-        except Exception as e:
-            logger.error("Main loop error", error=str(e))
-        finally:
-            self.ready = False
-            await self.redis_client.close()
-
-    async def process_signal(self, raw_data: str):
-        try:
-            signal = json.loads(raw_data)
-            symbol = signal.get("symbol")
-            confidence = signal.get("confidence", 0)
-            signal_type = signal.get("signal_type")
-            # Never turn a malformed/missing direction into a SELL order. The
-            # old ternary defaulted everything that was not exactly "BUY" to
-            # "sell", so a corrupt payload could open a short position.
-            if signal_type not in ("BUY", "SELL"):
-                logger.warning(
-                    "REJECTED_INVALID_SIGNAL_TYPE",
-                    symbol=symbol,
-                    signal_type=signal_type,
-                )
-                return
-            side = "buy" if signal_type == "BUY" else "sell"
-            price = signal.get("price")
-            atr = signal.get("indicators", {}).get("atr")
-
-            # ── STRICT OTC WHITELIST GATE ──
-            # Reject ANY non-whitelisted signal (stocks/unlisted pairs)
-            # before risk/execution. The 21-pair OTC universe passes through.
-            if not _is_whitelisted(symbol):
-                logger.warning(
-                    "REJECTED_NON_OTC_SIGNAL",
-                    symbol=symbol,
-                    reason="not_in_strict_otc_whitelist",
-                )
-                return
-
-            if confidence < settings.MIN_CONFIDENCE:
-                return
-
-            # 1. Risk & Exit Levels
-            amount = self.risk.calculate_position_size(price)
-            exit_levels = self.sl_manager.calculate_exit_levels(price, side, atr)
-
-            # 2. Execution
-            logger.info("PLACING_REAL_TRADE", symbol=symbol, side=side, amount=amount)
-            # ccxt's sync client blocks; keep the signal loop responsive.
-            order = await asyncio.to_thread(
-                self.broker.execute_market_order, symbol, side, amount
-            )
-            
-            # 3. Audit & Logging
-            self.trade_logger.log_trade({
-                "symbol": symbol,
-                "side": side,
-                "amount": amount,
-                "price": price,
-                "sl": exit_levels["stop_loss"],
-                "tp": exit_levels["take_profit"],
-                "order_id": order.get("id"),
-                "confidence": confidence
-            })
-
-            # 4. Track Order status
-            asyncio.create_task(self.order_manager.track_order(order.get("id"), symbol))
-
-        except Exception as e:
-            logger.error("Execution failed", error=str(e))
+def _configure_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(message)s",
+    )
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(
+            getattr(logging, level.upper(), logging.INFO)
+        ),
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  HEALTH ENDPOINT
-#  The engine is a Redis pub/sub subscriber with NO HTTP surface at all,
-#  so `depends_on: {condition: service_healthy}` and the orchestrator's
-#  health checks had nothing to probe and the service was indistinguishable
-#  from one that crashed on startup. A ~30-line stdlib server (no new
-#  dependency, no FastAPI import cost on a 4 GB VPS) exposes /health.
-# ═══════════════════════════════════════════════════════════════════
-
-async def _handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Answer `GET /health` with a JSON readiness report."""
-    try:
-        request_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-        # Drain the request headers so the client sees a clean response.
-        while True:
-            line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            if line in (b"\r\n", b"\n", b""):
-                break
-
-        method, path = "GET", "/"
-        parts = request_line.decode("latin-1").strip().split(" ")
-        if len(parts) >= 2:
-            method, path = parts[0], parts[1]
-
-        if path.split("?")[0] != "/health":
-            status, body = "404 Not Found", {"error": "not found"}
-        elif not engine.ready:
-            # 503: the process is up but has NOT completed the Redis
-            # subscription, so it cannot process a signal yet.
-            status, body = "503 Service Unavailable", {
-                "status": "starting",
-                "service": "execution-engine",
-            }
-        else:
-            status, body = "200 OK", {
-                "status": "ok",
-                "service": "execution-engine",
-                "exchange_id": settings.EXCHANGE_ID,
-                # Never echo key material — only whether it is configured.
-                "credentials_configured": bool(settings.API_KEY and settings.API_SECRET),
-                "min_confidence": settings.MIN_CONFIDENCE,
-            }
-
-        payload = json.dumps(body).encode()
-        writer.write(
-            f"HTTP/1.1 {status}\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Content-Length: {len(payload)}\r\n"
-            f"Cache-Control: no-store\r\n"
-            f"Connection: close\r\n\r\n".encode()
-            + payload
-        )
-        await writer.drain()
-    except (asyncio.TimeoutError, ConnectionError):
-        pass
-    except Exception as exc:  # noqa: BLE001 — a probe must never kill the loop
-        logger.warning("health handler error", error=str(exc))
-    finally:
-        try:
-            writer.close()
-        except Exception:  # noqa: BLE001
-            pass
+def _build_broker(settings: Settings) -> Broker:
+    if settings.TRADING_MODE == "live":
+        return CcxtBroker(settings)
+    return PaperBroker(settings)
 
 
-async def start_health_server() -> asyncio.AbstractEventLoop:
-    """Serve /health on HEALTH_PORT until cancelled."""
-    server = await asyncio.start_server(_handle_health, "0.0.0.0", settings.HEALTH_PORT)
-    logger.info("health_endpoint_listening", port=settings.HEALTH_PORT)
-    async with server:
-        await server.serve_forever()
-
-
-engine: ExecutionEngine | None = None
-
-
-async def main() -> None:
-    global engine
-
-    # Fail fast rather than trade with a placeholder credential. In production
-    # (REQUIRE_CREDENTIALS=true) an unconfigured exchange must stop the boot:
-    # silently running with a fake key produces orders that can never fill and
-    # an audit trail that looks legitimate.
-    if settings.REQUIRE_CREDENTIALS and not (settings.API_KEY and settings.API_SECRET):
+async def _validate_live_symbols(broker: Broker, settings: Settings) -> None:
+    symbols = sorted(settings.allowed_symbols)
+    if not symbols:
         raise SystemExit(
-            "[FATAL] REQUIRE_CREDENTIALS is set but API_KEY/API_SECRET are empty. "
-            "Refusing to start the execution engine without exchange credentials."
+            "[FATAL] TRADING_MODE=live requires a non-empty ALLOWED_SYMBOLS list"
+        )
+    unsupported: list[str] = []
+    for symbol in symbols:
+        try:
+            await broker.validate_symbol(symbol)
+        except PermanentBrokerError:
+            unsupported.append(symbol)
+    if unsupported:
+        raise SystemExit(
+            "[FATAL] the configured venue cannot trade these symbols: "
+            + ", ".join(unsupported)
+            + ". Point EXECUTION at a venue that supports them or run paper mode."
         )
 
-    engine = ExecutionEngine()
-    # The health server starts FIRST and stays independent of the Redis loop, so
-    # a Redis outage is reported as "starting" instead of "container not found".
-    health_task = asyncio.create_task(start_health_server())
+
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event) -> None:
+    def _stop(*_args) -> None:
+        loop.call_soon_threadsafe(stop_event.set)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _stop)
+        except (NotImplementedError, RuntimeError):
+            try:
+                signal.signal(sig, _stop)
+            except (ValueError, OSError):
+                pass
+
+
+async def _reconcile_loop(
+    gateway: ExecutionGateway,
+    settings: Settings,
+    stop_event: asyncio.Event,
+) -> None:
+    interval = settings.ORDER_POLL_INTERVAL_MS / 1000.0
+    while not stop_event.is_set():
+        if settings.TRADING_MODE != "disabled":
+            try:
+                await gateway.reconcile_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("order reconciliation failed: %s", exc)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def _run() -> None:
+    settings = Settings()
+    _configure_logging(settings.LOG_LEVEL)
+    metrics = Metrics()
+    stop_event = asyncio.Event()
+
+    redis_client = redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        health_check_interval=30,
+    )
+    broker = _build_broker(settings)
+    store = OrderStore(settings.resolved_sqlite_path)
+    kill_switch = KillSwitch(settings, redis_client)
+    gate = RiskGate(settings, kill_switch)
+    gateway = ExecutionGateway(settings, broker, store, gate, metrics)
+    consumer = StreamConsumer(settings, redis_client, gateway.process, metrics)
+
+    broker_ready = False
+    health_task: asyncio.Task | None = None
+    reconcile_task: asyncio.Task | None = None
+    consumer_task: asyncio.Task | None = None
+
     try:
-        await engine.run()
+        await redis_client.ping()
+        await store.init()
+        await broker.start()
+        broker_ready = True
+        if settings.TRADING_MODE == "live":
+            await _validate_live_symbols(broker, settings)
+            await broker.account_snapshot()
+        await consumer.connect()
+
+        def report() -> tuple[int, dict]:
+            ready = consumer.ready and broker_ready
+            payload = {
+                "status": "ok" if ready else "starting",
+                "mode": settings.TRADING_MODE,
+                "venue": broker.capabilities().venue,
+                "stream": settings.SIGNAL_STREAM,
+                "group": settings.SIGNAL_GROUP,
+                "consumer": settings.SIGNAL_CONSUMER,
+                "ready": ready,
+                **metrics.snapshot(),
+            }
+            return (200 if ready else 503), payload
+
+        loop = asyncio.get_running_loop()
+        _install_signal_handlers(loop, stop_event)
+
+        health_task = asyncio.create_task(
+            serve_health(settings.HEALTH_HOST, settings.HEALTH_PORT, report, stop_event)
+        )
+        reconcile_task = asyncio.create_task(
+            _reconcile_loop(gateway, settings, stop_event)
+        )
+        consumer_task = asyncio.create_task(consumer.run(stop_event))
+        consumer_task.add_done_callback(lambda _task: stop_event.set())
+
+        logger.info(
+            "EXECUTION_ENGINE_STARTED",
+            mode=settings.TRADING_MODE,
+            venue=broker.capabilities().venue,
+            symbols=sorted(settings.allowed_symbols),
+            min_confidence=settings.MIN_CONFIDENCE,
+            max_notional=settings.MAX_NOTIONAL_PER_TRADE,
+        )
+        await stop_event.wait()
     finally:
-        health_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await health_task
+        stop_event.set()
+        for task in (consumer_task, reconcile_task, health_task):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in (consumer_task, reconcile_task, health_task):
+            if task is not None:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        try:
+            await broker.close()
+        finally:
+            await store.close()
+            await redis_client.close()
+        logger.info("EXECUTION_ENGINE_STOPPED")
+
+
+def main() -> None:
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+    except (PermanentBrokerError, TransientBrokerError) as exc:
+        logger.error("EXECUTION_ENGINE_BOOT_FAILED", error=str(exc))
+        sys.exit(1)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("EXECUTION_ENGINE_CRASHED")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    main()

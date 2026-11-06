@@ -166,6 +166,13 @@ services:
       LOG_FORMAT: JSON
       CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-95.0}
       AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
+      FINGPT_SENTIMENT_URL: ${FINGPT_SENTIMENT_URL:-}
+      FINGPT_API_KEY: ${FINGPT_API_KEY:-}
+      OPENBB_MACRO_URL: ${OPENBB_MACRO_URL:-}
+      OPENBB_API_KEY: ${OPENBB_API_KEY:-}
+      QLIB_ML_URL: ${QLIB_ML_URL:-}
+      QLIB_API_KEY: ${QLIB_API_KEY:-}
+      QUANT_PROVIDER_TIMEOUT_SECONDS: ${QUANT_PROVIDER_TIMEOUT_SECONDS:-2.0}
       # Service names, never 127.0.0.1: inside a container, loopback is THIS
       # container — that mistake 503s every predict.
       REDIS_HOST: redis
@@ -349,8 +356,9 @@ services:
   # must NOT start in a plain `docker compose up`. It sits behind the
   # "execution" profile: start it explicitly with
   # `docker compose --profile execution up -d` once exchange credentials are
-  # configured (REQUIRE_CREDENTIALS=true turns an unconfigured exchange into a
-  # hard boot failure rather than a silent no-op).
+  # configured. TRADING_MODE=live turns missing credentials, an empty symbol
+  # allowlist, a wildcard allowlist, or an unsupported venue symbol into a hard
+  # boot failure instead of a silent no-op.
   execution-engine:
     profiles: ["execution"]
     build:
@@ -366,17 +374,37 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       REDIS_DB: "0"
       EXCHANGE_ID: ${EXCHANGE_ID:-binance}
-      # Empty by default. REQUIRE_CREDENTIALS makes an unconfigured exchange a
-      # hard boot failure instead of orders failing later with an opaque 401.
+      QUOTE_CURRENCY: ${QUOTE_CURRENCY:-USDT}
+      ASSUME_CLIENT_ORDER_IDEMPOTENCY: ${ASSUME_CLIENT_ORDER_IDEMPOTENCY:-false}
+      # Empty by default. TRADING_MODE=live refuses to boot without credentials.
       API_KEY: ${EXCHANGE_API_KEY:-}
       API_SECRET: ${EXCHANGE_API_SECRET:-}
-      REQUIRE_CREDENTIALS: ${REQUIRE_CREDENTIALS:-true}
-      MIN_CONFIDENCE: ${MIN_CONFIDENCE:-0.90}
+      # Quarantined by default: the gateway consumes and audits signals but
+      # never places an order until this is explicitly set to paper or live.
+      TRADING_MODE: ${EXECUTION_TRADING_MODE:-disabled}
+      ALLOWED_SYMBOLS: ${EXECUTION_ALLOWED_SYMBOLS:-}
+      SIGNAL_STREAM: ${EXECUTION_SIGNAL_STREAM:-trading_signals:stream}
+      SIGNAL_GROUP: ${EXECUTION_SIGNAL_GROUP:-execution-gateway}
+      DEAD_LETTER_STREAM: ${EXECUTION_DEAD_LETTER_STREAM:-execution:dead_letter}
+      MIN_CONFIDENCE: ${EXECUTION_MIN_CONFIDENCE:-96.5}
+      MAX_SIGNAL_AGE_MS: ${MAX_SIGNAL_AGE_MS:-5000}
+      MAX_NOTIONAL_PER_TRADE: ${MAX_NOTIONAL_PER_TRADE:-50}
+      MAX_OPEN_NOTIONAL: ${MAX_OPEN_NOTIONAL:-0}
+      MAX_TRADES_PER_DAY: ${MAX_TRADES_PER_DAY:-20}
+      MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-0}
+      RISK_PER_TRADE: ${RISK_PER_TRADE:-0.01}
+      DEDUPE_WINDOW_SECONDS: ${DEDUPE_WINDOW_SECONDS:-60}
+      KILL_SWITCH_KEY: ${KILL_SWITCH_KEY:-execution:kill_switch}
+      MAX_SUBMIT_ATTEMPTS: ${MAX_SUBMIT_ATTEMPTS:-3}
+      MAX_RECONCILE_AGE_MS: ${MAX_RECONCILE_AGE_MS:-60000}
+      SQLITE_PATH: /app/data/execution.db
       DEFAULT_BALANCE: ${DEFAULT_BALANCE:-1000.0}
       HEALTH_PORT: "8081"
     env_file:
       - path: ./execution-engine/.env
         required: false
+    volumes:
+      - execution_data:/app/data
     expose:
       - "8081"
     depends_on:
@@ -389,7 +417,7 @@ services:
         limits:
           memory: 384m
     healthcheck:
-      # /health answers 503 until the Redis subscription is live, so `up`
+      # /health answers 503 until the Redis Streams consumer is live, so `up`
       # ordering is truthful.
       test:
         - CMD
@@ -541,6 +569,8 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  execution_data:
     driver: local
 
 networks:

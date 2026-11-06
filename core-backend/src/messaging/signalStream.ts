@@ -41,6 +41,11 @@
 
 import { logger } from "../utils/logger";
 import secrets from "../config/secrets";
+import {
+  DEFAULT_SIGNAL_STREAM_MAXLEN,
+  buildTradingSignal,
+  describeSignalContractError,
+} from "./signalContract";
 
 /** Append-only log of signals awaiting durable persistence. */
 export const SIGNAL_STREAM_KEY = "trading_signals:stream";
@@ -62,7 +67,7 @@ type StreamEntry = [id: string, fields: string[]];
  * future client swap is caught by the compiler rather than at runtime.
  */
 export interface StreamRedis {
-  xadd(key: string, id: string, ...args: string[]): Promise<string>;
+  xadd(key: string, ...args: string[]): Promise<string>;
   xgroup(
     verb: string,
     key: string,
@@ -86,14 +91,18 @@ export interface StreamRedis {
 }
 
 let client: StreamRedis | null = null;
-/** Once Redis has failed we stop trying — no retry storm in the hot path. */
-let disabled = false;
+const CONNECT_RETRY_BASE_MS = 1_000;
+const CONNECT_RETRY_MAX_MS = 60_000;
+let connectFailures = 0;
+let nextConnectAttemptAt = 0;
+let lastMaxLenWarning: string | null = null;
 let consuming = false;
 let consumerName = `core-${process.pid}`;
 
 async function connect(): Promise<StreamRedis | null> {
-  if (disabled) return null;
   if (client) return client;
+  if (Date.now() < nextConnectAttemptAt) return null;
+  let retryMs = CONNECT_RETRY_BASE_MS;
   try {
     const { Redis } = await import("ioredis");
     const options = {
@@ -124,14 +133,21 @@ async function connect(): Promise<StreamRedis | null> {
     });
     await redis.connect();
     client = redis;
+    connectFailures = 0;
+    nextConnectAttemptAt = 0;
     logger.info("[SignalStream] Redis connected for durable signals");
     return client;
   } catch (err) {
-    disabled = true;
+    connectFailures += 1;
+    retryMs = Math.min(
+      CONNECT_RETRY_BASE_MS * 2 ** (connectFailures - 1),
+      CONNECT_RETRY_MAX_MS,
+    );
+    nextConnectAttemptAt = Date.now() + retryMs;
     logger.warn(
-      "[SignalStream] Redis unavailable — durable signal log disabled " +
+      "[SignalStream] Redis unavailable — durable signal retry scheduled " +
         "(the hot socket path is unaffected)",
-      { error: (err as Error).message },
+      { error: (err as Error).message, retryMs },
     );
     return null;
   }
@@ -171,23 +187,68 @@ function parseEntries(reply: unknown): Array<{ id: string; payload: Record<strin
 }
 
 /**
+ * Resolve the stream cap at call time (not module load) so an operator can
+ * change it without a rebuild. The configured cap is always positive and never
+ * exceeds the safe default, so no setting can disable trimming or unbound the
+ * durable log.
+ */
+export function getSignalStreamMaxLen(): number {
+  const raw = process.env.SIGNAL_STREAM_MAXLEN;
+  if (raw === undefined || raw === "") return DEFAULT_SIGNAL_STREAM_MAXLEN;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) {
+    if (lastMaxLenWarning !== raw) {
+      logger.warn("[SignalStream] invalid SIGNAL_STREAM_MAXLEN; using default cap", {
+        configured: raw,
+        default: DEFAULT_SIGNAL_STREAM_MAXLEN,
+      });
+      lastMaxLenWarning = raw;
+    }
+    return DEFAULT_SIGNAL_STREAM_MAXLEN;
+  }
+  if (n > DEFAULT_SIGNAL_STREAM_MAXLEN && lastMaxLenWarning !== raw) {
+    logger.warn("[SignalStream] SIGNAL_STREAM_MAXLEN exceeds safe cap; clamping", {
+      configured: raw,
+      maximum: DEFAULT_SIGNAL_STREAM_MAXLEN,
+    });
+    lastMaxLenWarning = raw;
+  }
+  return Math.min(Math.floor(n), DEFAULT_SIGNAL_STREAM_MAXLEN);
+}
+
+/**
  * Append one signal to the durable log. NEVER throws and never awaits on
  * behalf of the caller — the hot broadcast must not inherit Redis latency.
+ *
+ * The entry is validated against the canonical contract first. A malformed
+ * payload is dropped with a warning instead of being persisted and later
+ * dead-lettered by the execution gateway: an invalid signal must never look
+ * like a real one in the audit log.
  */
 export async function publishDurableSignal(
   payload: Record<string, unknown>,
 ): Promise<void> {
+  const signal = buildTradingSignal(payload);
+  if (!signal) {
+    logger.warn("[SignalStream] refused to append contract-invalid signal", {
+      symbol: payload?.symbol ?? null,
+      reason: describeSignalContractError(payload),
+    });
+    return;
+  }
+
   try {
     const redis = await connect();
     if (!redis) return;
-    // One JSON field keeps the entry schema-free: the consumer's extractor
-    // already tolerates symbol/signal_type/price/confidence aliases.
-    await redis.xadd(
-      SIGNAL_STREAM_KEY,
-      "*",
-      "payload",
-      JSON.stringify(payload),
-    );
+    const maxlen = getSignalStreamMaxLen();
+    // One JSON field keeps the entry self-describing. MAXLEN ~ is approximate
+    // trimming: O(1) append, bounded memory, and no risk of blocking the hot
+    // path on an exact-trim scan.
+    const args =
+      maxlen > 0
+        ? ["MAXLEN", "~", String(maxlen), "*", "payload", JSON.stringify(signal)]
+        : ["*", "payload", JSON.stringify(signal)];
+    await redis.xadd(SIGNAL_STREAM_KEY, ...args);
   } catch (err) {
     // A failed durable append must never propagate into the socket path.
     logger.warn("[SignalStream] durable append failed (hot path unaffected)", {
@@ -381,6 +442,8 @@ export async function startDurableSignalConsumer(
 /** Test seam: drop the cached client + state. */
 export function __resetSignalStreamForTests(): void {
   client = null;
-  disabled = false;
+  connectFailures = 0;
+  nextConnectAttemptAt = 0;
+  lastMaxLenWarning = null;
   consuming = false;
 }

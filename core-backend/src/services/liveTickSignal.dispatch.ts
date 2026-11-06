@@ -32,6 +32,10 @@ import type { SignalTier } from "../lib/signalTiers";
 import { realtimeTickBuffer } from "./realtimeTickBuffer.service";
 import { realtimeCandleAggregatorService } from "./realtimeCandleAggregator.service";
 import { publishDurableSignal } from "../messaging/signalStream";
+import {
+  deriveSignalRequestId,
+  SIGNAL_SCHEMA_VERSION,
+} from "../messaging/signalContract";
 import { isAlertEligible } from "../lib/alertGate";
 import {
   MIN_EXECUTABLE_CONFIDENCE,
@@ -374,9 +378,17 @@ public clearSelectedHorizonMinutes(symbol: string): void {
         : undefined;
     const intraCandle =
       realtimeCandleAggregatorService.getIntraCandleFeatures(symbol, "M1");
-    const payload = {
+    const requestId = deriveSignalRequestId({
       symbol,
       timeframe: "1m",
+      horizon_minutes: horizonMinutes ?? undefined,
+      timestamp: new Date().toISOString(),
+    });
+    const payload = {
+      schema_version: SIGNAL_SCHEMA_VERSION,
+      symbol,
+      timeframe: "1m",
+      request_id: requestId,
       dataSource: "live_tick_ring",
       prices,
       ...(tickTimestamps ? { tick_timestamps: tickTimestamps } : {}),
@@ -410,6 +422,7 @@ public clearSelectedHorizonMinutes(symbol: string): void {
       );
       this.broadcast(symbol, {
         ...data,
+        request_id: requestId,
         market_regime: summarizeRegime(regime),
       });
     } catch (err) {
@@ -542,25 +555,49 @@ public clearSelectedHorizonMinutes(symbol: string): void {
     }
 
     const price = Number(data?.current_price ?? data?.tick ?? 0);
+    // ── AI TARGET AUTHORITY ──
+    // The target is computed by the AI engine and passed through verbatim.
+    // There is deliberately NO local fallback to the live price: a target
+    // equal to the entry price is indistinguishable from "no target" and
+    // would make a non-executable verdict look actionable. Missing/invalid
+    // target stays null and is surfaced honestly.
+    const upstreamTarget = Number(data?.target_price);
     const targetPrice =
-      Number(data?.target_price) > 0 ? Number(data.target_price) : price;
+      Number.isFinite(upstreamTarget) && upstreamTarget > 0
+        ? upstreamTarget
+        : null;
+    if (direction !== null && targetPrice === null) {
+      logger.warn(
+        "[LiveTickDispatch] directional verdict carried no valid AI target; suppressing durable/broadcast signal",
+        { symbol, confidence, horizonMinutes: data?.horizon_minutes ?? null },
+      );
+      return;
+    }
     const timestamp = data?.timestamp ?? new Date().toISOString();
     // The horizon this verdict was actually evaluated at, so the client never
-    // has to guess which expiry a live tick belongs to.
+    // has to guess which expiry a live tick belongs to. AI-owned: no local
+    // fallback to the operator's selection, which would fabricate a horizon
+    // the engine did not actually score.
+    const upstreamHorizon = Number(data?.horizon_minutes);
     const horizonMinutes =
-      Number(data?.horizon_minutes) > 0
-        ? Number(data.horizon_minutes)
-        : this.getSelectedHorizonMinutes(symbol);
+      Number.isFinite(upstreamHorizon) &&
+      Number.isInteger(upstreamHorizon) &&
+      upstreamHorizon > 0
+        ? upstreamHorizon
+        : null;
 
     const payload = {
         symbol,
+        request_id:
+          typeof data?.request_id === "string" ? data.request_id : undefined,
         signalType: direction,
         signal: direction,
         confidence,
         confidence_score: confidence,
+        confidence_unit: "percent",
         current_price: Number.isFinite(price) ? price : undefined,
-        target_price: Number.isFinite(targetPrice) ? targetPrice : undefined,
-        take_profit: Number.isFinite(targetPrice) ? targetPrice : undefined,
+        target_price: targetPrice ?? undefined,
+        take_profit: targetPrice ?? undefined,
         timeframe: "1m",
         market_waiting: waiting,
         waiting_reason: data?.waiting_reason ?? null,
@@ -627,7 +664,7 @@ public clearSelectedHorizonMinutes(symbol: string): void {
         signalType: direction as "BUY" | "SELL",
         confidence,
         price: Number.isFinite(price) ? price : 0,
-        targetPrice: Number.isFinite(targetPrice) ? targetPrice : 0,
+        targetPrice: targetPrice != null ? targetPrice : 0,
         timeframe: "1m",
         timestamp,
         executable: data?.executable === true,

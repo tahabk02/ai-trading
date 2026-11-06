@@ -234,10 +234,14 @@ def test_close_codes_are_classified_explicitly():
 def test_stale_subscription_is_flagged_and_recovery_is_scheduled(monkeypatch):
     bridge = _bridge()
     client = _ConnectedClient()
+    healthy_reader = _ConnectedClient()
     bridge.client = client
     bridge.status = "connected"
-    bridge._subs = {"EUR/USD": object()}
+    bridge._subs = {"EUR/USD": object(), "USD/JPY": object()}
+    bridge._reader_clients["USD/JPY"] = healthy_reader
     bridge._last_tick_ts = {"EUR/USD": time.time() - 51.0}
+    bridge._last_tick_ts["USD/JPY"] = time.time()
+    bridge._dynamic_symbols = {"EUR/USD"}
     scheduled: list = []
     monkeypatch.setattr(
         bridge, "_schedule_stall_recovery",
@@ -246,9 +250,10 @@ def test_stale_subscription_is_flagged_and_recovery_is_scheduled(monkeypatch):
 
     asyncio.run(bridge._heartbeat_tick(send_keepalive=False, emit=False))
 
-    assert client.disconnected is True
-    assert bridge.client is None
-    assert bridge.status == "stalled"
+    assert client.disconnected is False
+    assert healthy_reader.disconnected is False
+    assert bridge.client is client
+    assert bridge.status == "connected"
     assert scheduled == [["EUR/USD"]]
 
 
@@ -266,31 +271,41 @@ def test_fresh_subscription_gets_a_full_window_before_being_recycled():
     assert bridge.status == "connected"
 
 
-def test_stall_recovery_runs_clean_disconnect_auth_and_resubscribe(monkeypatch):
+def test_stall_recovery_recycles_only_the_affected_reader(monkeypatch):
     bridge = _bridge()
-    bridge.client = _ConnectedClient()
-    calls: list = []
+    control = _ConnectedClient()
+    stalled_reader = _ConnectedClient()
+    healthy_reader = _ConnectedClient()
+    bridge.client = control
+    bridge._primary_symbol = "EUR/USD"
+    bridge._reader_clients["USD/JPY"] = stalled_reader
+    bridge._reader_clients["AUD/USD"] = healthy_reader
+    bridge._reader_symbols.add("USD/JPY")
+    bridge._dynamic_symbols.add("USD/JPY")
+    bridge._assets["USD/JPY"] = "USDJPY_otc"
+    spawned: list[tuple[str, str]] = []
 
-    async def teardown() -> None:
-        calls.append("teardown")
+    async def idle_reader() -> None:
+        await asyncio.Event().wait()
 
-    async def connect() -> None:
-        calls.append("connect")
+    monkeypatch.setattr(
+        bridge,
+        "_spawn_reader",
+        lambda symbol, asset: spawned.append((symbol, asset)),
+    )
 
-    def start_static() -> None:
-        calls.append("static")
+    async def scenario() -> None:
+        bridge._reader_tasks["USD/JPY"] = asyncio.create_task(idle_reader())
+        await bridge._recover_after_stall(["USD/JPY"])
 
-    def rearm_dynamic() -> None:
-        calls.append("dynamic")
+    asyncio.run(scenario())
 
-    monkeypatch.setattr(bridge, "_teardown_client", teardown)
-    monkeypatch.setattr(bridge, "_ensure_connected", connect)
-    monkeypatch.setattr(bridge, "_start_static_readers", start_static)
-    monkeypatch.setattr(bridge, "_rearm_dynamic_readers", rearm_dynamic)
-
-    asyncio.run(bridge._recover_after_stall(["EUR/USD"]))
-
-    assert calls == ["teardown", "connect", "static", "dynamic"]
+    assert stalled_reader.disconnected is True
+    assert healthy_reader.disconnected is False
+    assert bridge.client is control
+    assert "AUD/USD" in bridge._reader_clients
+    assert "USD/JPY" not in bridge._reader_clients
+    assert spawned == [("USD/JPY", "USDJPY_otc")]
 
 
 # ── SERVER_PUBLIC_IP ─────────────────────────────────────────────────────────

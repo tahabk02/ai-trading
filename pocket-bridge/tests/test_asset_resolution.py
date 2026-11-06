@@ -168,6 +168,7 @@ class FakeSubscribeErrorClient(FakeActiveAssetsClient):
     def __init__(self):
         super().__init__([])
         self.active_assets_calls = 0
+        self.disconnected = False
 
     async def active_assets(self):
         self.active_assets_calls += 1
@@ -175,6 +176,9 @@ class FakeSubscribeErrorClient(FakeActiveAssetsClient):
 
     async def subscribe_symbol(self, asset: str):
         raise RuntimeError(f"PocketOptionError, Invalid asset: {asset}")
+
+    async def disconnect(self):
+        self.disconnected = True
 
 
 def test_invalid_asset_error_detection():
@@ -197,6 +201,62 @@ def test_subscribe_invalid_asset_skips_without_connection_error():
     assert bridge.status == "connected"
     assert bridge.last_error is None
     assert bridge._skipped == {"AUD/CHF": "AUDCHF_otc"}
+
+
+def test_unsupported_asset_is_rejected_before_secondary_slot_allocation(
+    monkeypatch,
+):
+    bridge = _bridge(["EUR/USD", "AUD/CHF"])
+    bridge.status = "connected"
+    bridge._primary_symbol = "EUR/USD"
+    bridge._assets_ready = True
+    bridge.client = FakeSubscribeErrorClient()
+
+    async def no_asset(_client, _symbol):
+        return None
+
+    async def allocation_must_not_run(_symbol):
+        pytest.fail("secondary reader allocated before asset validation")
+
+    monkeypatch.setattr(bridge, "_resolve_asset", no_asset)
+    monkeypatch.setattr(bridge, "_ensure_reader_client", allocation_must_not_run)
+
+    with pytest.raises(AssetSkippedError):
+        asyncio.run(bridge.run_reader("AUD/CHF", "AUDCHF_otc"))
+
+    assert bridge._reader_clients == {}
+    assert bridge._skipped == {"AUD/CHF": "AUDCHF_otc,AUDCHF"}
+
+
+def test_rejected_asset_after_allocation_releases_secondary_client(monkeypatch):
+    bridge = _bridge(["EUR/USD", "AUD/CHF"])
+    bridge.status = "connected"
+    bridge._primary_symbol = "EUR/USD"
+    bridge._assets_ready = True
+    bridge.client = FakeSubscribeErrorClient()
+    secondary = FakeSubscribeErrorClient()
+    bridge._reader_clients["AUD/CHF"] = secondary
+
+    async def resolve_asset(_client, _symbol):
+        return "AUDCHF_otc"
+
+    async def reject_subscription(_client, _symbol, _asset):
+        raise AssetSkippedError("AUD/CHF", ["AUDCHF_otc"])
+
+    async def ensure_reader_client(_symbol):
+        return secondary
+
+    monkeypatch.setattr(bridge, "_resolve_asset", resolve_asset)
+    monkeypatch.setattr(bridge, "_ensure_reader_client", ensure_reader_client)
+    monkeypatch.setattr(
+        bridge, "_subscribe_first_available", reject_subscription
+    )
+
+    with pytest.raises(AssetSkippedError):
+        asyncio.run(bridge.run_reader("AUD/CHF", "AUDCHF_otc"))
+
+    assert secondary.disconnected is True
+    assert "AUD/CHF" not in bridge._reader_clients
 
 
 def test_subscribe_generic_failure_still_reports_connection_error():

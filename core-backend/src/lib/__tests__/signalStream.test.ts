@@ -50,10 +50,32 @@ import {
   publishDurableSignal,
   startDurableSignalConsumer,
   unwrapEntryPayload,
+  getSignalStreamMaxLen,
   __resetSignalStreamForTests,
 } from "../../messaging/signalStream";
+import { logger } from "../../utils/logger";
 
 type Call = { args: unknown[] };
+
+/** A contract-valid v1 signal. Every publish test must use one. */
+const VALID_SIGNAL = (over: Record<string, unknown> = {}) => ({
+  symbol: "EUR/USD",
+  signal: "BUY",
+  signal_type: "BUY",
+  confidence: 98,
+  confidence_unit: "percent",
+  current_price: 1.1042,
+  price: 1.1042,
+  target_price: 1.1048,
+  take_profit: 1.1048,
+  horizon_minutes: 1,
+  timeframe: "1m",
+  timestamp: new Date().toISOString(),
+  executable: true,
+  dispatchable: true,
+  market_waiting: false,
+  ...over,
+});
 
 /** A hand-driven stand-in for the ioredis client. */
 function fakeRedis(over: Partial<Record<string, unknown>> = {}) {
@@ -98,21 +120,62 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   __resetSignalStreamForTests();
   vi.doUnmock("ioredis");
   vi.resetModules();
 });
 
 describe("publishDurableSignal", () => {
-  it("appends the signal to the durable log", async () => {
-    await publishDurableSignal({ symbol: "EUR/USD", signal: "BUY" });
+  beforeEach(() => {
+    delete process.env.SIGNAL_STREAM_MAXLEN;
+  });
+
+  it("appends the signal to the durable log with a capped stream", async () => {
+    await publishDurableSignal(VALID_SIGNAL());
     expect(redis.xadd).toHaveBeenCalledTimes(1);
-    const [key, id, field, json] = (redis.xadd as ReturnType<typeof vi.fn>).mock
-      .calls[0];
+    const [key, ...args] = (redis.xadd as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, ...string[]];
     expect(key).toBe(SIGNAL_STREAM_KEY);
-    expect(id).toBe("*"); // server-assigned id → strictly ordered log
-    expect(field).toBe("payload");
-    expect(JSON.parse(json as string)).toMatchObject({ symbol: "EUR/USD" });
+    expect(args.slice(0, 4)).toEqual(["MAXLEN", "~", "10000", "*"]);
+    expect(args[4]).toBe("payload"); // server-assigned id -> ordered log
+    expect(JSON.parse(args[5])).toMatchObject({
+      symbol: "EUR/USD",
+      schema_version: "1.0.0",
+    });
+    expect((JSON.parse(args[5]) as { event_id: string }).event_id).toHaveLength(32);
+  });
+
+  it("drops a contract-invalid signal instead of persisting it", async () => {
+    await publishDurableSignal({ symbol: "EUR/USD", signal: "BUY" });
+    expect(redis.xadd).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[SignalStream] refused to append contract-invalid signal",
+      expect.objectContaining({ symbol: "EUR/USD" }),
+    );
+  });
+
+  it("cannot disable trimming with SIGNAL_STREAM_MAXLEN=0", async () => {
+    process.env.SIGNAL_STREAM_MAXLEN = "0";
+    await publishDurableSignal(VALID_SIGNAL());
+    const [, ...args] = (redis.xadd as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, ...string[]];
+    expect(args.slice(0, 4)).toEqual(["MAXLEN", "~", "10000", "*"]);
+  });
+
+  it("reads the cap at call time and bounds it to 1..10000", () => {
+    delete process.env.SIGNAL_STREAM_MAXLEN;
+    expect(getSignalStreamMaxLen()).toBe(10_000);
+    process.env.SIGNAL_STREAM_MAXLEN = "2500";
+    expect(getSignalStreamMaxLen()).toBe(2500);
+    process.env.SIGNAL_STREAM_MAXLEN = "25000";
+    expect(getSignalStreamMaxLen()).toBe(10_000);
+    process.env.SIGNAL_STREAM_MAXLEN = "0";
+    expect(getSignalStreamMaxLen()).toBe(10_000);
+    process.env.SIGNAL_STREAM_MAXLEN = "nope";
+    expect(getSignalStreamMaxLen()).toBe(10_000);
+    process.env.SIGNAL_STREAM_MAXLEN = "-5";
+    expect(getSignalStreamMaxLen()).toBe(10_000);
   });
 
   it("never throws when the durable log is broken", async () => {
@@ -121,23 +184,31 @@ describe("publishDurableSignal", () => {
     __resetSignalStreamForTests();
     // The hot socket path calls this and must not be able to fail.
     await expect(
-      publishDurableSignal({ symbol: "EUR/USD", signal: "BUY" }),
+      publishDurableSignal(VALID_SIGNAL()),
     ).resolves.toBeUndefined();
   });
 
-  it("disables itself after Redis is unreachable instead of retry-storming", async () => {
+  it("retries after bounded backoff instead of disabling the durable path forever", async () => {
+    vi.useFakeTimers();
+    const connect = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValue(undefined);
     const bad = fakeRedis({
-      connect: vi.fn(async () => {
-        throw new Error("ECONNREFUSED");
-      }),
+      connect,
     });
     vi.doMock("ioredis", () => ({ Redis: vi.fn(() => bad) }));
     __resetSignalStreamForTests();
 
-    await publishDurableSignal({ symbol: "EUR/USD", signal: "BUY" });
-    await publishDurableSignal({ symbol: "EUR/USD", signal: "BUY" });
-    // Only the FIRST call may have attempted a connection.
-    expect(bad.connect).toHaveBeenCalledTimes(1);
+    await publishDurableSignal(VALID_SIGNAL());
+    await publishDurableSignal(VALID_SIGNAL());
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(bad.xadd).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await publishDurableSignal(VALID_SIGNAL());
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(bad.xadd).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -301,9 +372,10 @@ describe("unwrapEntryPayload", () => {
   });
 
   it("round-trips a real publish payload back into the signal fields", async () => {
-    await publishDurableSignal(SIGNAL);
-    const [, , , encoded] = (redis.xadd as ReturnType<typeof vi.fn>).mock
-      .calls[0] as [string, string, string, string];
+    await publishDurableSignal(VALID_SIGNAL());
+    const [, ...args] = (redis.xadd as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, ...string[]];
+    const encoded = args[args.indexOf("payload") + 1];
 
     const unwrapped = unwrapEntryPayload({ payload: encoded });
 
@@ -312,6 +384,7 @@ describe("unwrapEntryPayload", () => {
     expect(unwrapped.signal_type).toBe("BUY");
     expect(Number(unwrapped.price)).toBeGreaterThan(0);
     expect(unwrapped.confidence).toBeDefined();
+    expect(unwrapped.schema_version).toBe("1.0.0");
   });
 
   it("passes through an already-flat map untouched", () => {
@@ -345,17 +418,13 @@ describe("durable consumer end-to-end format", () => {
 
   it("delivers a published signal to the handler as usable fields", async () => {
     const handler = vi.fn(async () => {});
-    const SIGNAL = {
-      symbol: "EUR/USD",
-      signal_type: "BUY",
-      price: 1.1042,
-      confidence: 0.987,
-    };
+    const SIGNAL = VALID_SIGNAL();
 
     // Read back exactly what XADD stored, in the shape XREADGROUP returns.
     await publishDurableSignal(SIGNAL);
-    const [, , , encoded] = (redis.xadd as ReturnType<typeof vi.fn>).mock
-      .calls[0] as [string, string, string, string];
+    const [, ...args] = (redis.xadd as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, ...string[]];
+    const encoded = args[args.indexOf("payload") + 1];
     const stored = [["1-0", ["payload", encoded]]];
 
     (redis.xreadgroup as ReturnType<typeof vi.fn>).mockResolvedValue([

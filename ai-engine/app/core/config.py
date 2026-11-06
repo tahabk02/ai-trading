@@ -2,7 +2,7 @@ import logging
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from typing import Optional
 
 from app.services.signal_gatekeeper import (
@@ -120,6 +120,16 @@ class Settings(BaseSettings):
     # hardcoded constant) so an unconfigured engine FAILS CLOSED in production
     # instead of accepting a public, repository-known key.
     AI_ENGINE_API_KEY: Optional[str] = None
+
+    # Optional external quant services. Empty URLs disable a provider; the
+    # pipeline reports it unavailable and never creates substitute evidence.
+    FINGPT_SENTIMENT_URL: Optional[str] = None
+    FINGPT_API_KEY: Optional[str] = None
+    OPENBB_MACRO_URL: Optional[str] = None
+    OPENBB_API_KEY: Optional[str] = None
+    QLIB_ML_URL: Optional[str] = None
+    QLIB_API_KEY: Optional[str] = None
+    QUANT_PROVIDER_TIMEOUT_SECONDS: float = Field(default=2.0, gt=0.0, le=10.0)
     
     # تم تغيير localhost إلى اسم الخدمة في Docker Network لتجنب مشاكل الاتصال في السيرفر
     BACKEND_API_URL: str = "http://core-backend:4000/api/v1"

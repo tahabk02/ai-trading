@@ -165,8 +165,8 @@ export const MarketTerminal: React.FC = () => {
               />
               <span className="num-fig text-[9px] sm:text-[10px] text-term-ink-dim uppercase tracking-tighter">
                 {live
-                  ? `Streaming ${ALL_MARKET_SYMBOLS.length} pairs`
-                  : "Connecting..."}
+                  ? `Monitoring ${ALL_MARKET_SYMBOLS.length} pairs`
+                    : "Connecting..."}
               </span>
             </div>
           </div>
