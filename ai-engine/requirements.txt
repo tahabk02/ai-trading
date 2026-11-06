@@ -11,6 +11,10 @@ python-dotenv>=1.0.1
 prometheus-client>=0.20.0
 httpx>=0.27.0
 joblib>=1.4.2
+# OpenBB 5 is split into the core client, economy router, and provider extension.
+openbb>=5.0,<6
+openbb-economy>=2.0,<3
+openbb-fred>=2.0,<3
 # PART 43 [435]: urllib3 is pulled transitively; 2.7.0 carries PYSEC-2026-4175/
 # 4176/4177. Pin the patched floor explicitly so it cannot regress.
 urllib3>=2.8.0

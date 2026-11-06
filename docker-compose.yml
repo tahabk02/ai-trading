@@ -68,13 +68,11 @@ services:
       # and warms the model cache in the background. 0 = legacy unbounded.
       AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
       AI_ENGINE_API_KEY: ${AI_ENGINE_API_KEY:-}
-      FINGPT_SENTIMENT_URL: ${FINGPT_SENTIMENT_URL:-}
-      FINGPT_API_KEY: ${FINGPT_API_KEY:-}
-      OPENBB_MACRO_URL: ${OPENBB_MACRO_URL:-}
-      OPENBB_API_KEY: ${OPENBB_API_KEY:-}
-      QLIB_ML_URL: ${QLIB_ML_URL:-}
-      QLIB_API_KEY: ${QLIB_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      QLIB_MODEL_PATH: ${QLIB_MODEL_PATH:-}
       QUANT_PROVIDER_TIMEOUT_SECONDS: ${QUANT_PROVIDER_TIMEOUT_SECONDS:-2.0}
+    volumes:
+      - ./ai-engine/models/qlib:/app/models/qlib:ro
     depends_on:
       redis:
         condition: service_healthy

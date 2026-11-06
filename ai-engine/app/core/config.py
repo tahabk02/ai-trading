@@ -121,14 +121,10 @@ class Settings(BaseSettings):
     # instead of accepting a public, repository-known key.
     AI_ENGINE_API_KEY: Optional[str] = None
 
-    # Optional external quant services. Empty URLs disable a provider; the
-    # pipeline reports it unavailable and never creates substitute evidence.
-    FINGPT_SENTIMENT_URL: Optional[str] = None
-    FINGPT_API_KEY: Optional[str] = None
-    OPENBB_MACRO_URL: Optional[str] = None
-    OPENBB_API_KEY: Optional[str] = None
-    QLIB_ML_URL: Optional[str] = None
-    QLIB_API_KEY: Optional[str] = None
+    # Local quant provider configuration. OpenBB uses its standard FRED_API_KEY
+    # environment credential; Qlib inference requires a trusted local artifact.
+    FRED_API_KEY: Optional[str] = None
+    QLIB_MODEL_PATH: Optional[str] = None
     QUANT_PROVIDER_TIMEOUT_SECONDS: float = Field(default=2.0, gt=0.0, le=10.0)
     
     # تم تغيير localhost إلى اسم الخدمة في Docker Network لتجنب مشاكل الاتصال في السيرفر

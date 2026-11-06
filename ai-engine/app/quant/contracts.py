@@ -24,10 +24,14 @@ from pydantic import (
 
 
 SCHEMA_VERSION = "1.0.0"
+SchemaVersion = Literal["1.0.0"]
 EvidenceKind = Literal["news", "social", "market_mood"]
 MacroCategory = Literal[
+    "fx_rate",
     "fx_index",
+    "interest_rate",
     "interest_rate_differential",
+    "yield_curve",
     "commodity",
     "global_correlation",
 ]
@@ -114,12 +118,14 @@ class SentimentEvidence(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION]
+    schema_version: SchemaVersion
     kind: EvidenceKind
+    symbol: str = Field(min_length=1, max_length=32)
     source: str = Field(min_length=1, max_length=128)
     reference_id: str = Field(min_length=1, max_length=256)
     polarity: float = Field(ge=-1.0, le=1.0)
     as_of: datetime
+    matched_terms: list[str] = Field(default_factory=list, max_length=128)
 
     @field_validator("polarity")
     @classmethod
@@ -127,6 +133,41 @@ class SentimentEvidence(BaseModel):
         if not math.isfinite(value):
             raise ValueError("sentiment polarity must be finite")
         return float(value)
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def parse_as_of(cls, value: object) -> datetime:
+        return _parse_aware_iso8601(value, "as_of")
+
+
+class SentimentTextInput(BaseModel):
+    """Source-attributed raw text for local lexicon sentiment analysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: SchemaVersion
+    kind: EvidenceKind
+    symbol: str = Field(min_length=1, max_length=32)
+    source: str = Field(min_length=1, max_length=128)
+    reference_id: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=20_000)
+    as_of: datetime
+
+    @field_validator("text")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("sentiment text must not be blank")
+        return normalized
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        symbol = value.strip().upper()
+        if not symbol:
+            raise ValueError("sentiment evidence symbol must not be blank")
+        return symbol
 
     @field_validator("as_of", mode="before")
     @classmethod
@@ -143,11 +184,41 @@ class SentimentProviderResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION]
+    schema_version: SchemaVersion
     source: str = Field(min_length=1, max_length=128)
     model: str = Field(min_length=1, max_length=128)
     evidence: list[SentimentEvidence] = Field(min_length=1, max_length=500)
     as_of: datetime
+
+    @field_validator("as_of", mode="before")
+    @classmethod
+    def parse_as_of(cls, value: object) -> datetime:
+        return _parse_aware_iso8601(value, "as_of")
+
+
+class SentimentAssessment(BaseModel):
+    """Validated local sentiment aggregate and its source evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: SchemaVersion
+    symbol: str = Field(min_length=1, max_length=32)
+    direction: Direction
+    score: float = Field(ge=-1.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=100.0)
+    confidence_unit: Literal["percent"]
+    source: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1, max_length=128)
+    confidence_method: str = Field(min_length=1, max_length=128)
+    evidence: list[SentimentEvidence] = Field(min_length=1, max_length=100)
+    as_of: datetime
+
+    @field_validator("score", "confidence")
+    @classmethod
+    def finite_aggregate_values(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("sentiment score and confidence must be finite")
+        return float(value)
 
     @field_validator("as_of", mode="before")
     @classmethod
@@ -160,12 +231,13 @@ class MacroDataPoint(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION]
+    schema_version: SchemaVersion
     category: MacroCategory
     name: str = Field(min_length=1, max_length=128)
     value: float
     unit: str = Field(min_length=1, max_length=64)
     source: str = Field(min_length=1, max_length=128)
+    timestamp_precision: Literal["instant", "date"] = "instant"
     as_of: datetime
 
     @field_validator("value")
@@ -191,7 +263,7 @@ class MacroProviderResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION]
+    schema_version: SchemaVersion
     score: float = Field(ge=-1.0, le=1.0)
     confidence: float = Field(ge=0.0, le=100.0)
     confidence_unit: Literal["percent"]
@@ -219,7 +291,7 @@ class MLProviderResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION]
+    schema_version: SchemaVersion
     direction: Direction
     probability: float = Field(ge=0.5, le=1.0)
     probability_unit: Literal["fraction"]
@@ -243,20 +315,52 @@ class MLProviderResponse(BaseModel):
 
     @model_validator(mode="after")
     def direction_matches_probability(self) -> "MLProviderResponse":
-        if self.direction == Direction.NEUTRAL and self.probability != 0.5:
-            raise ValueError("NEUTRAL inference must have probability 0.5")
+        if self.direction == Direction.NEUTRAL:
+            if self.probability != 0.5:
+                raise ValueError("NEUTRAL inference must have probability 0.5")
+        elif self.probability <= 0.5:
+            raise ValueError("directional inference probability must exceed 0.5")
         return self
+
+
+class QlibArtifactMetadata(BaseModel):
+    """Metadata contract for a trusted, locally exported Qlib classifier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: SchemaVersion
+    timeframe: str = Field(min_length=1, max_length=16)
+    model: str = Field(min_length=1, max_length=128)
+    version: str = Field(min_length=1, max_length=64)
+    trained_at: datetime
+    feature_names: list[str] = Field(min_length=1, max_length=32)
+    probability_calibrated: Literal[True]
+
+    @field_validator("trained_at", mode="before")
+    @classmethod
+    def parse_trained_at(cls, value: object) -> datetime:
+        return _parse_aware_iso8601(value, "trained_at")
+
+    @field_validator("feature_names")
+    @classmethod
+    def unique_feature_names(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("Qlib feature_names must be unique")
+        return value
 
 
 class ConfluenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION]
+    schema_version: SchemaVersion
     symbol: str = Field(min_length=1, max_length=32)
     timeframe: str = Field(default="1h", min_length=1, max_length=16)
     live_price: float | None = Field(default=None, gt=0)
     live_price_as_of: datetime | None = None
     candles: list[Candle] = Field(default_factory=list, max_length=5000)
+    sentiment_evidence: list[SentimentTextInput] = Field(
+        default_factory=list, max_length=100
+    )
     required_providers: int = Field(default=1, ge=1, le=4)
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -300,7 +404,7 @@ class ProviderResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    schema_version: SchemaVersion = SCHEMA_VERSION
     name: str
     status: ProviderStatus
     weight: float = Field(gt=0.0)
@@ -329,7 +433,7 @@ class ProviderResult(BaseModel):
 class ConfluenceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    schema_version: SchemaVersion = SCHEMA_VERSION
     confluence_id: str
     request_id: str | None = None
     symbol: str
@@ -391,7 +495,7 @@ class ConfluenceResponse(BaseModel):
 class ProviderDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
+    schema_version: SchemaVersion = SCHEMA_VERSION
     name: str
     weight: float
     description: str

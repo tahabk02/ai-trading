@@ -166,12 +166,8 @@ services:
       LOG_FORMAT: JSON
       CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-95.0}
       AI_ENGINE_INFERENCE_BUDGET_MS: ${AI_ENGINE_INFERENCE_BUDGET_MS:-150}
-      FINGPT_SENTIMENT_URL: ${FINGPT_SENTIMENT_URL:-}
-      FINGPT_API_KEY: ${FINGPT_API_KEY:-}
-      OPENBB_MACRO_URL: ${OPENBB_MACRO_URL:-}
-      OPENBB_API_KEY: ${OPENBB_API_KEY:-}
-      QLIB_ML_URL: ${QLIB_ML_URL:-}
-      QLIB_API_KEY: ${QLIB_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      QLIB_MODEL_PATH: ${QLIB_MODEL_PATH:-}
       QUANT_PROVIDER_TIMEOUT_SECONDS: ${QUANT_PROVIDER_TIMEOUT_SECONDS:-2.0}
       # Service names, never 127.0.0.1: inside a container, loopback is THIS
       # container — that mistake 503s every predict.
@@ -189,6 +185,8 @@ services:
       # Anything REQUIRED is enforced above with `:?` and fails loudly.
       - path: ./ai-engine/.env
         required: false
+    volumes:
+      - ./ai-engine/models/qlib:/app/models/qlib:ro
     expose:
       - "8000"
     # Bound to loopback: reachable from the host for debugging, NOT from the
